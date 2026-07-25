@@ -1,0 +1,310 @@
+name: Central PR review
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        description: Pull request number in the calling repository
+        required: true
+        type: number
+      policy_path:
+        description: Trusted base-revision review policy path
+        required: true
+        type: string
+      review_base_url:
+        description: Claude-compatible provider base URL
+        required: true
+        type: string
+      shadow:
+        description: Publish a non-gating shadow review
+        required: false
+        default: false
+        type: boolean
+      max_diff_chars:
+        description: Maximum immutable diff bytes
+        required: false
+        default: 40000
+        type: number
+      max_shard_chars:
+        description: Maximum Luna shard characters
+        required: false
+        default: 12000
+        type: number
+      worker_timeout_ms:
+        description: Per-Claude-process timeout
+        required: false
+        default: 120000
+        type: number
+    secrets:
+      review_api_key:
+        description: Caller-owned provider credential
+        required: true
+
+permissions: {}
+
+jobs:
+  preflight:
+    name: preflight
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      base_oid: ${{ steps.pr.outputs.base_oid }}
+      head_oid: ${{ steps.pr.outputs.head_oid }}
+      workflow_ref: ${{ steps.central.outputs.workflow_ref }}
+      central_repository: ${{ steps.central.outputs.central_repository }}
+    steps:
+      - name: Parse and checkout fixed central implementation
+        id: central
+        shell: bash
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$WORKFLOW_REF" =~ ^([^/]+/[^/]+)/\.github/workflows/review\.yml@([0-9a-fA-F]{40})$ ]]; then
+            echo 'Reusable workflow must be invoked from review.yml at an immutable full SHA.' >&2
+            exit 1
+          fi
+          repository="${BASH_REMATCH[1]}"
+          ref="${BASH_REMATCH[2],,}"
+          git init --quiet _central
+          git -C _central remote add origin "https://github.com/$repository.git"
+          git -C _central -c protocol.version=2 fetch --no-tags --depth=1 origin "$ref"
+          git -C _central checkout --quiet --detach FETCH_HEAD
+          actual="$(git -C _central rev-parse HEAD)"
+          [[ "$actual" == "$ref" ]] || { echo 'Central checkout does not match requested workflow SHA.' >&2; exit 1; }
+          printf 'workflow_ref=%s\ncentral_repository=%s\n' "$actual" "$repository" >> "$GITHUB_OUTPUT"
+      - name: Fetch authoritative PR OIDs from GitHub API
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid PR number.' >&2; exit 1; }
+          response="$(curl --fail-with-body --silent --show-error \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          base_oid="$(jq -er '.base.sha | select(test("^[0-9a-f]{40}$"))' <<<"$response")"
+          head_oid="$(jq -er '.head.sha | select(test("^[0-9a-f]{40}$"))' <<<"$response")"
+          jq -n --arg repository "$GITHUB_REPOSITORY" --argjson pullNumber "$PR_NUMBER" --arg baseOid "$base_oid" --arg headOid "$head_oid" \
+            '{repository:$repository,pullNumber:$pullNumber,baseOid:$baseOid,headOid:$headOid}' > pr-context.json
+          printf 'base_oid=%s\nhead_oid=%s\n' "$base_oid" "$head_oid" >> "$GITHUB_OUTPUT"
+      - name: Upload trusted PR context
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: pr-context.json
+          if-no-files-found: error
+          retention-days: 1
+
+  review:
+    name: read-only review
+    needs: preflight
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      review_outcome: ${{ steps.review.outcome }}
+    steps:
+      - name: Checkout fixed central implementation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ needs.preflight.outputs.central_repository }}
+          ref: ${{ needs.preflight.outputs.workflow_ref }}
+          path: _central
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify central implementation OID
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git -C _central rev-parse HEAD)" == "${{ needs.preflight.outputs.workflow_ref }}" ]]
+      - name: Download trusted PR context
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: pr-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: _input
+      - name: Checkout trusted caller base for policy
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ needs.preflight.outputs.base_oid }}
+          path: _base
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Checkout exact caller head into isolated directory
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ needs.preflight.outputs.head_oid }}
+          path: _caller
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Stage and verify trusted policy
+        shell: bash
+        env:
+          POLICY_PATH: ${{ inputs.policy_path }}
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import { copyFile, lstat, mkdir } from "node:fs/promises";
+            import { assertInsideWorkspace, safeRelativePath } from "./_central/src/workspace-boundary.mjs";
+            const candidate = safeRelativePath(process.env.POLICY_PATH);
+            const source = await assertInsideWorkspace("_base", `_base/${candidate}`);
+            const info = await lstat(source);
+            if (!info.isFile() || info.size < 2 || info.size > 262144) throw new Error("policy must be a bounded regular file");
+            await mkdir("_trusted", { recursive: true });
+            await copyFile(source, "_trusted/policy.json");
+            JSON.parse(await (await import("node:fs/promises")).readFile("_trusted/policy.json", "utf8"));
+          '
+      - name: Set up Node.js 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+          check-latest: false
+      - name: Install pinned Claude Code
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected='sha512-ogBrvwkqF9f8okmnXKxmRNHuvtFxFEffe5pWdqOV3iQDxlUOKirFqnyWC7NGXXnDA4WkkbPH8pvSbwyCR2Auyw=='
+          actual="$(npm view @anthropic-ai/claude-code@2.1.220 dist.integrity --json | jq -er '.')"
+          [[ "$actual" == "$expected" ]] || { echo 'Claude Code package integrity mismatch.' >&2; exit 1; }
+          npm install --global --ignore-scripts @anthropic-ai/claude-code@2.1.220
+          [[ "$(claude --version)" == '2.1.220 (Claude Code)' ]]
+      - name: Verify caller checkout and build immutable diff
+        shell: bash
+        env:
+          BASE_OID: ${{ needs.preflight.outputs.base_oid }}
+          HEAD_OID: ${{ needs.preflight.outputs.head_oid }}
+        run: |
+          set -euo pipefail
+          actual="$(git -C _caller rev-parse HEAD)"
+          [[ "$actual" == "$HEAD_OID" ]] || { echo 'Caller checkout HEAD differs from authoritative PR head.' >&2; exit 1; }
+          git -C _caller -c core.hooksPath=/dev/null diff --no-ext-diff --no-renames --binary "$BASE_OID" "$HEAD_OID" > _input/review.diff
+      - name: Run deterministic Claude Code review
+        id: review
+        continue-on-error: true
+        shell: bash
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.review_api_key }}
+          ANTHROPIC_BASE_URL: ${{ inputs.review_base_url }}
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+          CENTRAL_ROOT: ${{ github.workspace }}/_central
+          CALLER_ROOT: ${{ github.workspace }}/_caller
+          REPOSITORY: ${{ github.repository }}
+          POLICY_FILE: ${{ github.workspace }}/_trusted/policy.json
+          DIFF_PATH: ${{ github.workspace }}/_input/review.diff
+          CONTEXT_PATH: ${{ github.workspace }}/_input/pr-context.json
+          OUTPUT_DIRECTORY: ${{ github.workspace }}/_output
+          WORKFLOW_REF: ${{ needs.preflight.outputs.workflow_ref }}
+          REVIEW_HEAD_OID: ${{ needs.preflight.outputs.head_oid }}
+          MAX_DIFF_CHARS: ${{ inputs.max_diff_chars }}
+          MAX_SHARD_CHARS: ${{ inputs.max_shard_chars }}
+          WORKER_TIMEOUT_MS: ${{ inputs.worker_timeout_ms }}
+          SHADOW: ${{ inputs.shadow }}
+        run: |
+          set -euo pipefail
+          mkdir -p _output
+          node _central/src/run-review.mjs
+      - name: Upload review artifacts and bound manifest
+        if: always() && hashFiles('_output/review.json', '_output/review.md', '_output/manifest.json') != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: central-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            _output/review.json
+            _output/review.md
+            _output/manifest.json
+          if-no-files-found: error
+          retention-days: 1
+
+  finalize:
+    name: write finalize
+    needs: [preflight, review]
+    if: always() && needs.preflight.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout fixed central finalizer
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ needs.preflight.outputs.central_repository }}
+          ref: ${{ needs.preflight.outputs.workflow_ref }}
+          path: _central
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Download bound review artifacts
+        continue-on-error: true
+        id: download
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: central-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: _review
+      - name: Refetch PR, validate artifacts, and publish
+        if: steps.download.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          EXPECTED_BASE: ${{ needs.preflight.outputs.base_oid }}
+          EXPECTED_HEAD: ${{ needs.preflight.outputs.head_oid }}
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find _review -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
+          [[ "${files[*]}" == 'manifest.json review.json review.md' ]] || { echo 'Unexpected artifact file set.' >&2; exit 1; }
+          find _review -mindepth 1 -maxdepth 1 -type f | grep -q .
+          [[ "$(find _review -mindepth 1 -maxdepth 1 ! -type f -print -quit)" == '' ]] || { echo 'Artifact contains a non-regular file.' >&2; exit 1; }
+          response="$(curl --fail-with-body --silent --show-error -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          base_oid="$(jq -er '.base.sha | select(test("^[0-9a-f]{40}$"))' <<<"$response")"
+          head_oid="$(jq -er '.head.sha | select(test("^[0-9a-f]{40}$"))' <<<"$response")"
+          [[ "$base_oid" == "$EXPECTED_BASE" && "$head_oid" == "$EXPECTED_HEAD" ]] || { echo 'PR changed after review; refusing to publish stale artifacts.' >&2; exit 1; }
+          [[ "$(wc -c < _review/review.json)" -le 1048576 ]] || { echo 'review.json exceeds size limit.' >&2; exit 1; }
+          [[ "$(wc -c < _review/review.md)" -le 65536 ]] || { echo 'review.md exceeds size limit.' >&2; exit 1; }
+          [[ "$(wc -c < _review/manifest.json)" -le 16384 ]] || { echo 'manifest.json exceeds size limit.' >&2; exit 1; }
+          BASE_OID="$base_oid" HEAD_OID="$head_oid" REPOSITORY="$GITHUB_REPOSITORY" node --input-type=module -e '
+            import { readFile } from "node:fs/promises";
+            import { canFinalize } from "./_central/src/finalizer.mjs";
+            const manifest = JSON.parse(await readFile("_review/manifest.json", "utf8"));
+            const artifacts = {
+              "review.json": await readFile("_review/review.json", "utf8"),
+              "review.md": await readFile("_review/review.md", "utf8"),
+            };
+            canFinalize({ manifest, currentPullRequest: { repository: process.env.REPOSITORY, pullNumber: Number(process.env.PR_NUMBER), baseOid: process.env.BASE_OID, headOid: process.env.HEAD_OID }, artifacts });
+          '
+          jq -n --rawfile body _review/review.md '{body:$body}' | curl --fail-with-body --silent --show-error -X POST \
+            -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Content-Type: application/json' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --data-binary @-
+          decision="$(jq -er '.decision' _review/review.json)"
+          jq -e '
+            type == "object" and
+            (keys | sort == ["decision","failures","findings","version"]) and
+            .version == "v1" and
+            (.decision == "approve" or .decision == "request_changes" or .decision == "infrastructure_failure") and
+            (.findings | type == "array") and
+            (.failures | type == "array")
+          ' _review/review.json >/dev/null
+          if [[ "$decision" == 'infrastructure_failure' ]]; then exit 2; fi
+          if [[ "$decision" == 'request_changes' && '${{ inputs.shadow }}' != 'true' ]]; then exit 3; fi
+      - name: Publish missing-artifact infrastructure handoff
+        if: steps.download.outcome != 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          body='## Central review\n\n**Decision:** `infrastructure_failure`\n\nThe read-only review job did not produce a verifiable artifact. No code verdict was inferred.'
+          jq -n --arg body "$body" '{body:$body}' | curl --fail-with-body --silent --show-error -X POST \
+            -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Content-Type: application/json' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --data-binary @-
+          exit 2

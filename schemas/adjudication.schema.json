@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "adjudication.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "candidateFingerprint", "decision", "reason"],
+  "properties": {
+    "version": { "type": "string", "const": "v1" },
+    "candidateFingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "decision": { "type": "string", "enum": ["accept", "reject"] },
+    "reason": { "type": "string", "minLength": 1 }
+  }
+}

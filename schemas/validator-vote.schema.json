@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "validator-vote.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "candidateFingerprint", "verdict", "reachable", "evidence", "reason"],
+  "properties": {
+    "version": { "type": "string", "const": "v1" },
+    "candidateFingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "verdict": { "type": "string", "enum": ["confirm", "reject"] },
+    "reachable": { "type": "boolean" },
+    "evidence": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 4000 }
+  }
+}

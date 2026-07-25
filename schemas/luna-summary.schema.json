@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "luna-summary.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "summary", "files"],
+  "properties": {
+    "version": { "type": "string", "const": "v1" },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 12000 },
+    "files": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]{1,500}$" }
+    }
+  }
+}

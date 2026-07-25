@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "version": "review-dimensions.v1",
+  "dimensions": [
+    {
+      "id": "correctness",
+      "title": "Correctness and reachability",
+      "prompt": "Find behaviorally wrong, incomplete, unreachable, stale-state, edge-case, error-path, or lifecycle bugs. Prove the concrete input or state that reaches the defect and the observable wrong result."
+    },
+    {
+      "id": "wiring",
+      "title": "End-to-end wiring",
+      "prompt": "Trace every new producer, consumer, registration, dispatch, event, command, payload, UI handler, and runtime entry point. Find features that compile or test locally but are not reachable through the real production chain."
+    },
+    {
+      "id": "schema-contracts",
+      "title": "Schemas and boundary contracts",
+      "prompt": "Check serialization shapes, enum variants, generated artifacts, protocol conversions, repository-relative paths, public API assumptions, and caller/callee contracts for drift, ambiguity, or fail-open behavior."
+    },
+    {
+      "id": "security",
+      "title": "Security and trust boundaries",
+      "prompt": "Find privilege expansion, untrusted-code execution, secret exposure, injection, path traversal, symlink escape, stale identity, confused-deputy, artifact tampering, unsafe defaults, and authorization failures."
+    },
+    {
+      "id": "concurrency-atomicity",
+      "title": "Concurrency and atomicity",
+      "prompt": "Find races, stale reads, non-atomic related updates, partial application, duplicate delivery, ordering assumptions, cancellation leaks, unsafe retries, and independent work serialized without a sound reason."
+    },
+    {
+      "id": "performance",
+      "title": "Performance and resource bounds",
+      "prompt": "Find unbounded work, repeated scans, accidental quadratic behavior, memory or output growth, process leaks, needless serialization, oversized payloads, and hot-path regressions. Require a realistic scale or execution path."
+    },
+    {
+      "id": "testing",
+      "title": "Tests and regression protection",
+      "prompt": "Find important observable behaviors, boundaries, errors, state transitions, integration chains, schemas, and security properties that are not locked by tests, or tests that assert implementation details while missing the real contract."
+    },
+    {
+      "id": "strict-maintainability",
+      "title": "Strict maintainability and code judo",
+      "prompt": "Apply the repository code-review skill. Seek structural simplifications that delete concepts, branches, wrappers, casts, optionality, duplicated helpers, wrong-layer feature logic, and spaghetti growth. Treat a file crossing from below 1000 lines to above 1000 lines as a presumptive blocker."
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "artifact-manifest.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "repository",
+    "pullNumber",
+    "runId",
+    "workflowRef",
+    "baseOid",
+    "headOid",
+    "reviewOid",
+    "artifacts",
+    "manifestSha256"
+  ],
+  "properties": {
+    "version": { "type": "integer", "const": 1 },
+    "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", "maxLength": 201 },
+    "pullNumber": { "type": "integer", "minimum": 1 },
+    "runId": { "type": "integer", "minimum": 1 },
+    "workflowRef": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "baseOid": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "headOid": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "reviewOid": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["review.json", "review.md"],
+      "properties": {
+        "review.json": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "review.md": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "manifestSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

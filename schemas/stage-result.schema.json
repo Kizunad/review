@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stage-result.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "stage", "status"],
+  "properties": {
+    "version": { "type": "string", "const": "v1" },
+    "stage": { "type": "string", "minLength": 1 },
+    "status": { "type": "string", "enum": ["ok", "infra_error", "schema_error"] },
+    "data": {},
+    "error": { "type": "string", "minLength": 1 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "ok" } } },
+      "then": { "required": ["data"] },
+      "else": { "required": ["error"] }
+    }
+  ]
+}
