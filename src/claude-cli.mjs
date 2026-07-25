@@ -277,10 +277,11 @@ export async function runFreshClaude({
       const stdout = Buffer.concat(stdoutChunks).toString('utf8');
       const stderr = Buffer.concat(stderrChunks).toString('utf8');
       if (code !== 0) {
+        const stderrDiagnostic = diagnostic(stderr, sourceEnvironment);
         finish({
           status: 'infra_error',
-          error: `claude exited ${code ?? signal}`,
-          stderr: diagnostic(stderr, sourceEnvironment),
+          error: stderrDiagnostic ? `claude exited ${code ?? signal}: ${stderrDiagnostic}` : `claude exited ${code ?? signal}`,
+          stderr: stderrDiagnostic,
         });
         return;
       }
