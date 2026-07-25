@@ -69,6 +69,43 @@ test('exact manual review bypasses the circuit without reading or writing GitHub
   assert.deepEqual(outputs, ['should_run=true\n']);
 });
 
+test('explicit trusted workflow dispatch retry bypasses the circuit without reading or writing state', async () => {
+  const outputs = [];
+  await runCircuit('preflight', {
+    environment: environment({ REVIEW_TRIGGER: 'workflow_dispatch', CIRCUIT_MANUAL_RETRY: 'true' }),
+    fetchImpl: async () => { throw new Error('GitHub state must not be accessed'); },
+    append: async (_path, value) => outputs.push(value),
+  });
+  assert.deepEqual(outputs, ['should_run=true\n']);
+});
+
+test('workflow dispatch without explicit retry opt-in remains protected by the open circuit', async () => {
+  const outputs = [];
+  await runCircuit('preflight', {
+    environment: environment({ REVIEW_TRIGGER: 'workflow_dispatch', CIRCUIT_MANUAL_RETRY: 'false' }),
+    fetchImpl: readOnlyStateFetch(failureEvents),
+    append: async (_path, value) => outputs.push(value),
+    now: () => '2026-07-25T00:30:00.000Z',
+  });
+  assert.deepEqual(outputs, ['should_run=false\nopen_until=2026-07-25T01:20:00.000Z\n']);
+});
+
+test('retry opt-in cannot bypass the circuit for a different trigger or command', async () => {
+  for (const overrides of [
+    { REVIEW_TRIGGER: 'issue_comment', REVIEW_COMMENT_BODY: '/review-next', CIRCUIT_MANUAL_RETRY: 'true' },
+    { REVIEW_TRIGGER: 'pull_request_target', CIRCUIT_MANUAL_RETRY: 'true' },
+  ]) {
+    const outputs = [];
+    await runCircuit('preflight', {
+      environment: environment(overrides),
+      fetchImpl: readOnlyStateFetch(failureEvents),
+      append: async (_path, value) => outputs.push(value),
+      now: () => '2026-07-25T00:30:00.000Z',
+    });
+    assert.deepEqual(outputs, ['should_run=false\nopen_until=2026-07-25T01:20:00.000Z\n']);
+  }
+});
+
 test('preflight fails open when trusted circuit state cannot be read', async () => {
   const outputs = [];
   await runCircuit('preflight', {
