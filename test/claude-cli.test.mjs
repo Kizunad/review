@@ -179,6 +179,20 @@ test('builds the fixed fresh read-only Claude command with inline schema JSON', 
   assert.throws(() => buildClaudeArgs({ model: 'opus', prompt: 'x', jsonSchema: schema }), /model/);
 });
 
+test('strips schema metadata unsupported by the Claude CLI validator', () => {
+  const source = {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    $id: 'review-plan.schema.json',
+    ...schema,
+  };
+  const args = buildClaudeArgs({ model: 'sol', prompt: 'plan', jsonSchema: source });
+  const cliSchema = JSON.parse(args[args.indexOf('--json-schema') + 1]);
+
+  assert.deepEqual(cliSchema, schema);
+  assert.equal('$schema' in cliSchema, false);
+  assert.equal('$id' in cliSchema, false);
+});
+
 test('builds a mount namespace exposing only the read-only repository and fixed Claude executable', () => {
   const claudeArgs = buildClaudeArgs({ model: 'terra', prompt: 'review', jsonSchema: schema });
   const args = buildSandboxArgs({
