@@ -24,6 +24,19 @@ test('all review schemas are strict JSON Schema containers', async () => {
   }
 });
 
+test('final review failures allow only bounded optional diagnostics', async () => {
+  const schema = JSON.parse(await readFile(path.join(schemasDirectory, 'final-review.schema.json'), 'utf8'));
+  const failure = schema.properties.failures.items;
+
+  assert.equal(failure.additionalProperties, false);
+  assert.deepEqual(failure.required, ['stage', 'status', 'error']);
+  assert.deepEqual(failure.properties.diagnostic, {
+    type: 'string',
+    minLength: 1,
+    maxLength: 4000,
+  });
+});
+
 test('artifact manifest schema matches the implementation contract', async () => {
   const schema = JSON.parse(await readFile(path.join(schemasDirectory, 'artifact-manifest.schema.json'), 'utf8'));
   const manifest = createManifest({

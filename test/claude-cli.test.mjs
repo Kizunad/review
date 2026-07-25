@@ -17,6 +17,10 @@ const executable = '/trusted/claude';
 const ripgrepExecutable = '/trusted/rg';
 const repositoryRoot = '/trusted/repository';
 
+function resultEvent(structuredOutput = { verdict: 'PASS' }, overrides = {}) {
+  return `${JSON.stringify({ type: 'result', subtype: 'success', structured_output: structuredOutput, ...overrides })}\n`;
+}
+
 function fakeSpawn({ stdout = '{}', stderr = '', code = 0, error, neverClose = false, ignoreTerm = false, capture } = {}) {
   return (_executable, args, options) => {
     const child = new EventEmitter();
@@ -169,9 +173,9 @@ test('builds the fixed fresh read-only Claude command with inline schema JSON', 
     '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
     '-p', 'review', '--no-session-persistence', '--model', 'terra', '--effort', 'max',
     '--tools', 'Read,Glob,Grep', '--allowedTools', 'Read(//workspace/**),Glob(//workspace/**),Grep(//workspace/**)', '--permission-mode', 'dontAsk',
-    '--output-format', 'json', '--json-schema', JSON.stringify(schema),
+    '--output-format', 'stream-json', '--verbose', '--json-schema', JSON.stringify(schema),
   ]);
-  assert.equal(args.some((arg) => /resume|Bash|Edit|Write/.test(arg)), false);
+  assert.equal(args.some((arg) => /resume|Bash|Edit|Write|--bare/.test(arg)), false);
   assert.ok(args.includes('--safe-mode'));
   assert.ok(args.includes('--disable-slash-commands'));
   assert.ok(args.includes('--strict-mcp-config'));
@@ -406,7 +410,7 @@ test('loads schema files before spawning and validates structured_output, not th
     jsonSchema: undefined,
     jsonSchemaPath: schemaPath,
     spawn: fakeSpawn({
-      stdout: JSON.stringify({ type: 'result', result: '{"ignored":true}', structured_output: { verdict: 'PASS' } }),
+      stdout: resultEvent({ verdict: 'PASS' }, { result: '{"ignored":true}' }),
       capture: (value) => { captured = value; },
     }),
     validate: (data) => data.verdict === 'PASS',
@@ -432,14 +436,14 @@ test('passes only the minimal controlled child environment', () => {
 });
 
 test('accepts only successful result envelopes and rejects error or unknown envelopes', async () => {
-  assert.equal((await runFreshClaude(baseRun({ spawn: fakeSpawn({ stdout: JSON.stringify({ type: 'result', result: '{"verdict":"PASS"}' }) }) }))).status, 'ok');
+  assert.equal((await runFreshClaude(baseRun({ spawn: fakeSpawn({ stdout: resultEvent(undefined, { result: '{"verdict":"PASS"}', structured_output: undefined }) }) }))).status, 'ok');
   for (const envelope of [
     { type: 'error', structured_output: { verdict: 'PASS' } },
     { type: 'result', is_error: true, structured_output: { verdict: 'PASS' } },
     { type: 'result', subtype: 'error_max_turns', result: { verdict: 'PASS' } },
     { structured_output: { verdict: 'PASS' } },
   ]) {
-    const result = await runFreshClaude(baseRun({ spawn: fakeSpawn({ stdout: JSON.stringify(envelope) }) }));
+    const result = await runFreshClaude(baseRun({ spawn: fakeSpawn({ stdout: `${JSON.stringify(envelope)}\n` }) }));
     assert.equal(result.status, 'infra_error');
   }
 });
@@ -449,7 +453,7 @@ test('returns structured infra and schema errors rather than findings', async ()
   assert.equal((await runFreshClaude(baseRun({ timeoutMs: 10, killGraceMs: 1, spawn: fakeSpawn({ code: 2, stdout: '' }) }))).status, 'infra_error');
   assert.equal((await runFreshClaude(baseRun({ timeoutMs: 10, killGraceMs: 1, spawn: fakeSpawn({ stdout: 'nope' }) }))).status, 'infra_error');
   assert.equal((await runFreshClaude(baseRun({ timeoutMs: 10, killGraceMs: 1, spawn: fakeSpawn({ stdout: '{}' }), validate: () => false }))).status, 'infra_error');
-  assert.equal((await runFreshClaude(baseRun({ timeoutMs: 10, killGraceMs: 1, spawn: fakeSpawn({ stdout: JSON.stringify({ type: 'result', structured_output: { verdict: 'FAIL' } }) }), validate: () => false }))).status, 'schema_error');
+  assert.equal((await runFreshClaude(baseRun({ timeoutMs: 10, killGraceMs: 1, spawn: fakeSpawn({ stdout: resultEvent({ verdict: 'FAIL' }) }), validate: () => false }))).status, 'schema_error');
   assert.equal((await runFreshClaude(baseRun({ timeoutMs: 10, killGraceMs: 1, spawn: fakeSpawn({ neverClose: true }) }))).status, 'infra_error');
   assert.equal((await runFreshClaude({ ...baseRun(), executable: 'claude', spawn: fakeSpawn() })).status, 'infra_error');
   assert.equal((await runFreshClaude({ ...baseRun(), cwd: 'relative', spawn: fakeSpawn() })).status, 'infra_error');
@@ -472,6 +476,80 @@ test('caps stdout and stderr by bytes and terminates overflowing children', asyn
     assert.match(result.error, new RegExp(`${stream} limit exceeded`));
     assert.deepEqual(child.signals, ['SIGTERM']);
   }
+});
+
+test('can include bounded lifecycle diagnostics on successful canary probes', async () => {
+  const result = await runFreshClaude(baseRun({
+    includeSuccessDiagnostic: true,
+    spawn: fakeSpawn({
+      stdout: [
+        JSON.stringify({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: 1,
+          max_retries: 10,
+          error_status: 503,
+          error: 'temporarily unavailable',
+        }),
+        resultEvent({ verdict: 'PASS' }).trimEnd(),
+        '',
+      ].join('\n'),
+    }),
+  }));
+
+  assert.equal(result.status, 'ok');
+  assert.match(result.diagnostic, /api_retry/);
+  assert.match(result.diagnostic, /"errorStatus":503/);
+  assert.match(result.diagnostic, /"type":"result"/);
+});
+
+test('timeout returns bounded redacted stream lifecycle diagnostics', async () => {
+  const secret = 'timeout-secret-value';
+  const baseUrl = 'https://private-timeout-gateway.example';
+  let child;
+  const result = await runFreshClaude(baseRun({
+    model: 'sol',
+    environment: {
+      ANTHROPIC_API_KEY: secret,
+      ANTHROPIC_BASE_URL: baseUrl,
+    },
+    timeoutMs: 2,
+    killGraceMs: 1,
+    spawn: fakeSpawn({
+      neverClose: true,
+      capture: ({ child: value }) => {
+        child = value;
+        queueMicrotask(() => {
+          value.stdout.emit('data', `${JSON.stringify({
+            type: 'system',
+            subtype: 'init',
+            model: 'sol',
+            apiKeySource: 'ANTHROPIC_API_KEY',
+            claude_code_version: '2.1.220',
+            secret,
+          })}\n`);
+          value.stdout.emit('data', `${JSON.stringify({
+            type: 'system',
+            subtype: 'api_retry',
+            attempt: 2,
+            max_retries: 10,
+            error_status: 524,
+            error: `gateway ${baseUrl}`,
+          })}\n`);
+          value.stderr.emit('data', `stderr ${secret} ${baseUrl}`);
+        });
+      },
+    }),
+  }));
+  assert.equal(result.status, 'infra_error');
+  assert.match(result.error, /timeout/);
+  assert.match(result.diagnostic, /api_retry/);
+  assert.match(result.diagnostic, /"attempt":2/);
+  assert.match(result.diagnostic, /"errorStatus":524/);
+  assert.match(result.diagnostic, /REDACTED/);
+  assert.equal(JSON.stringify(result).includes(secret), false);
+  assert.equal(JSON.stringify(result).includes(baseUrl), false);
+  assert.deepEqual(child.signals, ['SIGTERM']);
 });
 
 test('timeout escalates from TERM to KILL when the child ignores TERM', async () => {
@@ -497,7 +575,7 @@ test('redacts inherited credentials and provider endpoints from every returned d
   assert.equal(JSON.stringify(nonzero).includes(baseUrl), false);
   assert.equal(JSON.stringify(nonzero).includes('github-secret'), false);
   assert.match(nonzero.error, /claude exited 2: .*REDACTED/);
-  assert.match(nonzero.stderr, /REDACTED/);
+  assert.match(nonzero.diagnostic, /REDACTED/);
 
   const malformed = await runFreshClaude(baseRun({
     environment,
@@ -535,7 +613,7 @@ process.stdout.write(JSON.stringify({
     scopedStatus: scoped.status,
     scopedOutput: scoped.stdout,
   },
-}));
+}) + '\\n');
 `);
   await chmod(executable, 0o755);
   const result = await runFreshClaude({
@@ -596,7 +674,7 @@ for (const procPath of new Set(procPaths)) {
     if (value.includes('not-visible-through-proc')) results.procEnvironmentReadable.push(procPath);
   } catch {}
 }
-process.stdout.write(JSON.stringify({ type: 'result', structured_output: results }));
+process.stdout.write(JSON.stringify({ type: 'result', structured_output: results }) + '\\n');
 `);
   await chmod(worker, 0o755);
   const result = await runFreshClaude({

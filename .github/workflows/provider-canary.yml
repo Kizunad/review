@@ -1,0 +1,111 @@
+name: Central provider canary
+
+on:
+  workflow_call:
+    inputs:
+      review_base_url:
+        description: Claude-compatible provider base URL
+        required: true
+        type: string
+      worker_timeout_ms:
+        description: Per-model canary timeout
+        required: false
+        default: 60000
+        type: number
+    secrets:
+      review_api_key:
+        description: Caller-owned provider credential
+        required: true
+
+permissions: {}
+
+jobs:
+  canary:
+    name: sol-luna-terra
+    runs-on: ubuntu-24.04
+    permissions:
+      # Used only to resolve this reusable workflow's immutable referenced_workflows SHA.
+      actions: read
+    steps:
+      - name: Resolve and checkout immutable central implementation
+        id: central
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_response="$(curl --fail-with-body --silent --show-error \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT")"
+          workflow_ref="$(jq -er '
+            [
+              .referenced_workflows[]?
+              | select(.path | startswith("Kizunad/review/.github/workflows/provider-canary.yml@"))
+              | {path, sha}
+            ]
+            | if length == 1 then .[0] else error("expected exactly one central provider canary workflow reference") end
+            | select(.path == ("Kizunad/review/.github/workflows/provider-canary.yml@" + .sha))
+            | .sha
+            | ascii_downcase
+            | select(test("^[0-9a-f]{40}$"))
+          ' <<<"$run_response")"
+          git init --quiet _central
+          git -C _central remote add origin https://github.com/Kizunad/review.git
+          git -C _central -c protocol.version=2 fetch --no-tags --depth=1 origin "$workflow_ref"
+          git -C _central checkout --quiet --detach FETCH_HEAD
+          [[ "$(git -C _central rev-parse HEAD)" == "$workflow_ref" ]]
+          printf 'workflow_ref=%s\n' "$workflow_ref" >> "$GITHUB_OUTPUT"
+      - name: Set up Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+          check-latest: false
+      - name: Install hash-pinned Claude Code
+        uses: ./_central/.github/actions/setup-claude
+      - name: Install pinned Bubblewrap sandbox
+        shell: bash
+        env:
+          BWRAP_URL: https://security.ubuntu.com/ubuntu/pool/main/b/bubblewrap/bubblewrap_0.9.0-1ubuntu0.1_amd64.deb
+          BWRAP_SHA256: 1b506492bd9c7fd0cdb4f02ac822f1d3e336b0aead5113c1239baf8db5db562a
+        run: |
+          set -euo pipefail
+          mkdir -p _sandbox-package
+          curl --fail-with-body --silent --show-error --location "$BWRAP_URL" -o _sandbox-package/bubblewrap.deb
+          printf '%s  %s\n' "$BWRAP_SHA256" '_sandbox-package/bubblewrap.deb' | sha256sum --check --strict
+          dpkg-deb --extract _sandbox-package/bubblewrap.deb _sandbox-package/root
+          bwrap_executable="$GITHUB_WORKSPACE/_sandbox-package/root/usr/bin/bwrap"
+          [[ -f "$bwrap_executable" && -x "$bwrap_executable" ]]
+          [[ "$($bwrap_executable --version)" == 'bubblewrap 0.9.0' ]]
+          sudo chown root:root "$bwrap_executable"
+          sudo chmod 4755 "$bwrap_executable"
+          [[ "$(stat -c '%U:%G %a' "$bwrap_executable")" == 'root:root 4755' ]]
+          printf 'BWRAP_EXECUTABLE=%s\n' "$bwrap_executable" >> "$GITHUB_ENV"
+      - name: Probe provider aliases with minimal structured output
+        id: probe
+        continue-on-error: true
+        shell: bash
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.review_api_key }}
+          ANTHROPIC_BASE_URL: ${{ inputs.review_base_url }}
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+          CLAUDE_EXECUTABLE: ${{ env.CLAUDE_EXECUTABLE }}
+          RIPGREP_EXECUTABLE: ${{ env.RIPGREP_EXECUTABLE }}
+          BWRAP_EXECUTABLE: ${{ env.BWRAP_EXECUTABLE }}
+          PROVIDER_CANARY_TIMEOUT_MS: ${{ inputs.worker_timeout_ms }}
+          PROVIDER_CANARY_OUTPUT: ${{ github.workspace }}/_output/provider-canary.json
+        run: |
+          set -euo pipefail
+          node _central/src/run-provider-canary.mjs
+      - name: Upload bounded provider diagnostics
+        if: always() && hashFiles('_output/provider-canary.json') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: central-provider-canary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: _output/provider-canary.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Preserve provider canary failure
+        if: steps.probe.outcome != 'success'
+        shell: bash
+        run: exit 1

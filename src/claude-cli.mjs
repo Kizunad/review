@@ -67,7 +67,8 @@ export function buildClaudeArgs({ model, prompt, jsonSchema }) {
     '--strict-mcp-config', '--mcp-config', EMPTY_MCP_CONFIG,
     '-p', prompt, '--no-session-persistence', '--model', model,
     '--effort', 'max', '--tools', READ_ONLY_TOOLS, '--allowedTools', READ_ONLY_PERMISSIONS,
-    '--permission-mode', 'dontAsk', '--output-format', 'json', '--json-schema', schemaJson(jsonSchema),
+    '--permission-mode', 'dontAsk', '--output-format', 'stream-json', '--verbose',
+    '--json-schema', schemaJson(jsonSchema),
   ];
 }
 
@@ -147,6 +148,57 @@ function extractStructuredOutput(envelope) {
   throw new TypeError('Claude envelope has no structured_output or JSON result');
 }
 
+function parseStreamJson(output) {
+  const lines = String(output ?? '').split('\n').filter((line) => line.trim().length > 0);
+  if (lines.length === 0) throw new TypeError('Claude stream has no JSON events');
+  const events = lines.map((line) => JSON.parse(line));
+  const results = events.filter((event) => event?.type === 'result');
+  if (results.length !== 1) throw new TypeError('Claude stream must contain exactly one result event');
+  return extractStructuredOutput(results[0]);
+}
+
+function streamDiagnostic(stdout, stderr, environment) {
+  const events = [];
+  for (const line of String(stdout ?? '').split('\n')) {
+    if (line.trim().length === 0) continue;
+    try {
+      const event = JSON.parse(line);
+      if (event?.type === 'system' && event.subtype === 'init') {
+        events.push({
+          type: 'system',
+          subtype: 'init',
+          model: event.model,
+          apiKeySource: event.apiKeySource,
+          claudeCodeVersion: event.claude_code_version,
+        });
+      } else if (event?.type === 'system' && event.subtype === 'api_retry') {
+        events.push({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: event.attempt,
+          maxRetries: event.max_retries,
+          errorStatus: event.error_status,
+          error: event.error,
+        });
+      } else if (event?.type === 'result') {
+        events.push({
+          type: 'result',
+          subtype: event.subtype,
+          isError: event.is_error === true,
+        });
+      }
+    } catch {
+      events.push({ type: 'non_json_output' });
+    }
+    if (events.length >= 32) break;
+  }
+  const value = {
+    events,
+    stderr: diagnostic(stderr, environment, 2_000),
+  };
+  return diagnostic(JSON.stringify(value), environment);
+}
+
 function signalChild(child, signal) {
   if (process.platform !== 'win32' && Number.isInteger(child.pid) && child.pid > 0) {
     try {
@@ -177,6 +229,7 @@ export async function runFreshClaude({
   killGraceMs = 2_000,
   maxStdoutBytes = 1_000_000,
   maxStderrBytes = 64_000,
+  includeSuccessDiagnostic = false,
   spawn = nodeSpawn,
   validate = () => true,
 }) {
@@ -229,6 +282,11 @@ export async function runFreshClaude({
     let terminationResult;
     let graceTimer;
 
+    const outputDiagnostic = () => streamDiagnostic(
+      Buffer.concat(stdoutChunks).toString('utf8'),
+      Buffer.concat(stderrChunks).toString('utf8'),
+      sourceEnvironment,
+    );
     const finish = (result) => {
       if (settled) return;
       settled = true;
@@ -238,7 +296,10 @@ export async function runFreshClaude({
     };
     const terminate = (result) => {
       if (settled || terminationResult) return;
-      terminationResult = result;
+      terminationResult = {
+        ...result,
+        diagnostic: outputDiagnostic(),
+      };
       clearTimeout(timeoutTimer);
       signalChild(child, 'SIGTERM');
       graceTimer = setTimeout(() => {
@@ -281,13 +342,13 @@ export async function runFreshClaude({
         finish({
           status: 'infra_error',
           error: stderrDiagnostic ? `claude exited ${code ?? signal}: ${stderrDiagnostic}` : `claude exited ${code ?? signal}`,
-          stderr: stderrDiagnostic,
+          diagnostic: streamDiagnostic(stdout, stderr, sourceEnvironment),
         });
         return;
       }
       let data;
       try {
-        data = extractStructuredOutput(JSON.parse(stdout));
+        data = parseStreamJson(stdout);
       } catch (error) {
         finish({
           status: 'infra_error',
@@ -306,7 +367,14 @@ export async function runFreshClaude({
         finish({ status: 'schema_error', error: diagnostic(`schema validation failed: ${error.message}`, sourceEnvironment) });
         return;
       }
-      finish({ status: 'ok', data, stderr: diagnostic(stderr, sourceEnvironment) });
+      finish({
+        status: 'ok',
+        data,
+        stderr: diagnostic(stderr, sourceEnvironment),
+        ...(includeSuccessDiagnostic
+          ? { diagnostic: streamDiagnostic(stdout, stderr, sourceEnvironment) }
+          : {}),
+      });
     });
   });
 }

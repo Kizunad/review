@@ -14,6 +14,29 @@ function plan(assignments = [{ id: 'a', shardIndexes: [0] }]) {
   return { status: 'ok', data: { assignments }, transcript: 'never pass this' };
 }
 
+test('preserves bounded runner diagnostics on stage infrastructure failure', async () => {
+  const result = await runReview({
+    diff: 'd',
+    taxonomy: ['security'],
+    runner: runnerFor((request) => {
+      if (request.stage === 'plan') {
+        return {
+          status: 'infra_error',
+          error: 'timeout after 60000ms',
+          diagnostic: '{"events":[{"subtype":"api_retry","errorStatus":524}]}',
+        };
+      }
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+  assert.deepEqual(result.findings, []);
+  assert.deepEqual(result.failures, [{
+    stage: 'plan',
+    status: 'infra_error',
+    error: 'timeout after 60000ms',
+    diagnostic: '{"events":[{"subtype":"api_retry","errorStatus":524}]}',
+  }]);
+});
 test('keeps all Sol output out of Terra input and accepts four confirmations', async () => {
   const requests = [];
   const result = await runReview({

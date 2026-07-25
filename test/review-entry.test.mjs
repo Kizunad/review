@@ -46,7 +46,7 @@ case "$model" in
   terra) output='[]' ;;
   *) exit 9 ;;
 esac
-printf '{"type":"result","structured_output":%s}' "$output"
+printf '{"type":"result","structured_output":%s}\n' "$output"
 `);
   await chmod(executable, 0o755);
   return { callerRoot, executable };
@@ -82,13 +82,20 @@ test('rejects oversized diffs and malformed project policies before spawning Cla
   }), /project/);
 });
 
-test('renders infrastructure failures without implying a code verdict', () => {
+test('renders infrastructure failures with collision-free code spans and no code verdict', () => {
   const markdown = renderReviewMarkdown({
     version: 'v1', decision: 'infrastructure_failure', findings: [],
-    failures: [{ stage: 'validate:x', status: 'infra_error', error: 'five votes unavailable' }],
+    failures: [{
+      stage: 'validate:`x`',
+      status: 'infra_error',
+      error: 'five ``votes`` unavailable',
+      diagnostic: '{"events":[{"detail":"```api_retry```","errorStatus":524}]}',
+    }],
   }, { headOid: 'b'.repeat(40), policyVersion: 'project-review-policy.v1', policySha256 });
   assert.match(markdown, /infrastructure_failure/);
   assert.match(markdown, new RegExp(policySha256));
   assert.match(markdown, /No approval or code finding was inferred/);
-  assert.match(markdown, /five votes unavailable/);
+  assert.ok(markdown.includes('`` validate:`x` ``'));
+  assert.ok(markdown.includes('``` five ``votes`` unavailable ```'));
+  assert.ok(markdown.includes('```` {"events":[{"detail":"```api_retry```","errorStatus":524}]} ````'));
 });
