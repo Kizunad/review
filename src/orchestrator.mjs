@@ -3,7 +3,14 @@ import { decideRound, isCountableVote } from './vote-gate.mjs';
 import { shardDiff } from './diff-sharder.mjs';
 
 function stageFailure(stage, result) {
-  return { stage, status: result?.status ?? 'infra_error', error: result?.error ?? 'runner returned no result' };
+  return {
+    stage,
+    status: result?.status ?? 'infra_error',
+    error: result?.error ?? 'runner returned no result',
+    ...(typeof result?.diagnostic === 'string' && result.diagnostic.length > 0
+      ? { diagnostic: result.diagnostic }
+      : {}),
+  };
 }
 
 function stageOk(result) {

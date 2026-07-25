@@ -65,7 +65,10 @@ export function renderReviewMarkdown(review, { headOid, policyVersion, policySha
   ];
   if (review.decision === 'infrastructure_failure') {
     lines.push('', 'The review could not complete safely. No approval or code finding was inferred from the failed stages.', '');
-    for (const failure of review.failures) lines.push(`- \`${failure.stage}\` — ${failure.status}: ${failure.error}`);
+    for (const failure of review.failures) {
+      lines.push(`- \`${failure.stage}\` — ${failure.status}: ${failure.error}`);
+      if (failure.diagnostic) lines.push(`  - diagnostic: \`${failure.diagnostic.replace(/`/g, '\\`')}\``);
+    }
     return `${lines.join('\n')}\n`;
   }
   if (review.findings.length === 0) {

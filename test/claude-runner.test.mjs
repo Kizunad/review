@@ -19,7 +19,7 @@ process.stdout.write(JSON.stringify({
     reason: 'independent validator result',
     ...vote,
   })},
-}));
+}) + '\\n');
 `);
   await chmod(executable, 0o755);
   return executable;
