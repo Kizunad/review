@@ -152,14 +152,12 @@ jobs:
         run: |
           set -euo pipefail
           node --input-type=module -e '
-            import { copyFile, lstat, mkdir } from "node:fs/promises";
-            import { assertInsideWorkspace, safeRelativePath } from "./_central/src/workspace-boundary.mjs";
-            const candidate = safeRelativePath(process.env.POLICY_PATH);
-            const source = await assertInsideWorkspace("_base", `_base/${candidate}`);
-            const info = await lstat(source);
-            if (!info.isFile() || info.size < 2 || info.size > 262144) throw new Error("policy must be a bounded regular file");
+            import { copyFile, mkdir } from "node:fs/promises";
+            import { assertRegularFileInsideWorkspace } from "./_central/src/workspace-boundary.mjs";
+            const source = await assertRegularFileInsideWorkspace("_base", process.env.POLICY_PATH);
+            if (source.size < 2 || source.size > 262144) throw new Error("policy must be a bounded regular file");
             await mkdir("_trusted", { recursive: true });
-            await copyFile(source, "_trusted/policy.json");
+            await copyFile(source.path, "_trusted/policy.json");
             JSON.parse(await (await import("node:fs/promises")).readFile("_trusted/policy.json", "utf8"));
           '
       - name: Set up Node.js 24

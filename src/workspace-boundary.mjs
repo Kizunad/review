@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { realpath } from 'node:fs/promises';
+import { lstat, realpath } from 'node:fs/promises';
 
 export async function assertInsideWorkspace(workspaceRoot, candidate) {
   const root = await realpath(workspaceRoot);
@@ -19,6 +19,21 @@ export function safeRelativePath(value) {
     throw new Error(`unsafe relative path: ${value}`);
   }
   return value;
+}
+
+export async function assertRegularFileInsideWorkspace(workspaceRoot, candidate) {
+  const relative = safeRelativePath(candidate);
+  const root = await realpath(workspaceRoot);
+  let current = root;
+  for (const component of relative.split(/[\\/]+/)) {
+    current = path.join(current, component);
+    const info = await lstat(current);
+    if (info.isSymbolicLink()) throw new Error(`path contains a symlink: ${candidate}`);
+  }
+  const target = await assertInsideWorkspace(root, current);
+  const info = await lstat(target);
+  if (!info.isFile()) throw new Error(`path is not a regular file: ${candidate}`);
+  return { path: target, size: info.size };
 }
 
 export function checkoutDirectory(workspaceRoot, name) {
