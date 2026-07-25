@@ -13,6 +13,7 @@ jobs:
   central-review:
     if: <caller-owned exact trigger and association gate>
     permissions:
+      actions: read
       contents: read
       pull-requests: write
       issues: write
@@ -26,7 +27,7 @@ jobs:
       review_api_key: ${{ secrets.REVIEW_CLAUDE_API_KEY }}
 ```
 
-The caller must not use `@main`, a tag, a short SHA, `secrets: inherit`, or a caller-controlled action/workflow ref. The referenced central commit is the release and rollback unit. The reusable workflow derives that commit from GitHub's called-job `job.workflow_ref` rather than the caller-bound `github.workflow_ref`, then verifies the checkout OID before running central code.
+The caller must not use `@main`, a tag, a short SHA, `secrets: inherit`, or a caller-controlled action/workflow ref. The referenced central commit is the release and rollback unit. The reusable workflow reads the current run-attempt metadata from GitHub's Actions API, requires exactly one `Kizunad/review/.github/workflows/review.yml@<full SHA>` entry whose path and reported SHA agree, and verifies the central checkout OID before running central code. This requires `actions: read` only in the preflight job; the provider-bearing review job remains limited to repository read permissions.
 
 ## Inputs
 
@@ -75,7 +76,7 @@ Rules must be declarative review data. A policy cannot configure tools, commands
 
 ## Identity and checkout
 
-The reusable workflow obtains repository identity, `baseRefOid`, and `headRefOid` from the GitHub API. Both OIDs must be lowercase 40-character Git object IDs.
+The workflow resolves the immutable central implementation from GitHub's current run-attempt `referenced_workflows` metadata, then obtains caller repository identity, `baseRefOid`, and `headRefOid` from the GitHub API. The central workflow reference must identify exactly `Kizunad/review/.github/workflows/review.yml` at a lowercase 40-character SHA, and the checked-out central commit must match that SHA. Both caller OIDs must also be lowercase 40-character Git object IDs.
 
 The workflow stages the central runner and caller policy from trusted revisions, then checks out the exact PR head detached. Review proceeds only when `git rev-parse HEAD` equals the authoritative head OID. Before a Claude process receives the provider credential, the platform copies regular repository files into a temporary snapshot, rejects all symlinks and non-regular entries, and excludes `.git`, `.claude`, `.mcp.json`, `CLAUDE.md`, and `AGENTS.md`. Each worker then enters a root-owned, hash-pinned setuid Bubblewrap mount namespace, avoiding dependence on Ubuntu 24.04 unprivileged-user-namespace policy. Only the snapshot is mounted read-only at `/workspace`, alongside the SHA-256-verified native Claude and ripgrep executables installed without package scripts, a minimal read-only runtime, DNS/TLS material, an empty `/home`, and an ephemeral `/tmp`; the original checkout and runner workspace are not mounted, and `/proc/self/environ` plus `/proc/1/environ` are masked. Claude starts with `--safe-mode --disable-slash-commands --strict-mcp-config`, an empty MCP configuration, and path-scoped allow rules for `Read`, `Glob`, and `Grep` under `/workspace` only. Native regression tests verify that safe mode advertises exactly those repository tools, normal `/workspace` Grep remains functional, and exact/concurrent procfs credential-oracle attempts fail without returning credential bytes. The finalizer re-fetches the PR and refuses to publish a normal verdict if either OID changed.
 

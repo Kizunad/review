@@ -47,6 +47,7 @@ jobs:
     name: preflight
     runs-on: ubuntu-24.04
     permissions:
+      actions: read
       contents: read
       pull-requests: read
       issues: read
@@ -54,31 +55,39 @@ jobs:
       base_oid: ${{ steps.pr.outputs.base_oid }}
       head_oid: ${{ steps.pr.outputs.head_oid }}
       workflow_ref: ${{ steps.central.outputs.workflow_ref }}
-      central_repository: ${{ steps.central.outputs.central_repository }}
       circuit_should_run: ${{ steps.circuit.outputs.should_run }}
       circuit_open_until: ${{ steps.circuit.outputs.open_until }}
     steps:
-      - name: Parse and checkout fixed central implementation
+      - name: Resolve and checkout immutable central implementation
         id: central
         shell: bash
         env:
-          # github.workflow_ref remains bound to the caller inside a reusable workflow.
-          WORKFLOW_REF: ${{ job.workflow_ref }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [[ ! "$WORKFLOW_REF" =~ ^([^/]+/[^/]+)/\.github/workflows/review\.yml@([0-9a-fA-F]{40})$ ]]; then
-            echo 'Reusable workflow must be invoked from review.yml at an immutable full SHA.' >&2
-            exit 1
-          fi
-          repository="${BASH_REMATCH[1]}"
-          ref="${BASH_REMATCH[2],,}"
+          run_response="$(curl --fail-with-body --silent --show-error \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT")"
+          workflow_ref="$(jq -er '
+            [
+              .referenced_workflows[]?
+              | select(.path | startswith("Kizunad/review/.github/workflows/review.yml@"))
+              | {path, sha}
+            ]
+            | if length == 1 then .[0] else error("expected exactly one central review workflow reference") end
+            | select(.path == ("Kizunad/review/.github/workflows/review.yml@" + .sha))
+            | .sha
+            | ascii_downcase
+            | select(test("^[0-9a-f]{40}$"))
+          ' <<<"$run_response")"
           git init --quiet _central
-          git -C _central remote add origin "https://github.com/$repository.git"
-          git -C _central -c protocol.version=2 fetch --no-tags --depth=1 origin "$ref"
+          git -C _central remote add origin https://github.com/Kizunad/review.git
+          git -C _central -c protocol.version=2 fetch --no-tags --depth=1 origin "$workflow_ref"
           git -C _central checkout --quiet --detach FETCH_HEAD
           actual="$(git -C _central rev-parse HEAD)"
-          [[ "$actual" == "$ref" ]] || { echo 'Central checkout does not match requested workflow SHA.' >&2; exit 1; }
-          printf 'workflow_ref=%s\ncentral_repository=%s\n' "$actual" "$repository" >> "$GITHUB_OUTPUT"
+          [[ "$actual" == "$workflow_ref" ]] || { echo 'Central checkout does not match the referenced workflow SHA.' >&2; exit 1; }
+          printf 'workflow_ref=%s\n' "$actual" >> "$GITHUB_OUTPUT"
       - name: Fetch authoritative PR OIDs from GitHub API
         id: pr
         shell: bash
@@ -133,7 +142,7 @@ jobs:
       - name: Checkout fixed central implementation
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          repository: ${{ needs.preflight.outputs.central_repository }}
+          repository: Kizunad/review
           ref: ${{ needs.preflight.outputs.workflow_ref }}
           path: _central
           persist-credentials: false
@@ -270,7 +279,7 @@ jobs:
       - name: Checkout fixed central finalizer
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          repository: ${{ needs.preflight.outputs.central_repository }}
+          repository: Kizunad/review
           ref: ${{ needs.preflight.outputs.workflow_ref }}
           path: _central
           persist-credentials: false
