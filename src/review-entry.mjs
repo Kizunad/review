@@ -6,6 +6,16 @@ import { createSanitizedCallerSnapshot } from './caller-snapshot.mjs';
 
 const SEVERITIES = new Set(['blocker', 'major', 'minor']);
 
+function markdownCodeSpan(value) {
+  const text = String(value);
+  const longestRun = (text.match(/`+/g) ?? []).reduce(
+    (longest, run) => Math.max(longest, run.length),
+    0,
+  );
+  const fence = '`'.repeat(longestRun + 1);
+  return `${fence} ${text} ${fence}`;
+}
+
 function positiveInteger(value, name, fallback) {
   if (value === undefined) return fallback;
   const parsed = Number(value);
@@ -66,8 +76,10 @@ export function renderReviewMarkdown(review, { headOid, policyVersion, policySha
   if (review.decision === 'infrastructure_failure') {
     lines.push('', 'The review could not complete safely. No approval or code finding was inferred from the failed stages.', '');
     for (const failure of review.failures) {
-      lines.push(`- \`${failure.stage}\` — ${failure.status}: ${failure.error}`);
-      if (failure.diagnostic) lines.push(`  - diagnostic: \`${failure.diagnostic.replace(/`/g, '\\`')}\``);
+      lines.push(
+        `- ${markdownCodeSpan(failure.stage)} — ${markdownCodeSpan(failure.status)}: ${markdownCodeSpan(failure.error)}`,
+      );
+      if (failure.diagnostic) lines.push(`  - diagnostic: ${markdownCodeSpan(failure.diagnostic)}`);
     }
     return `${lines.join('\n')}\n`;
   }

@@ -229,6 +229,7 @@ export async function runFreshClaude({
   killGraceMs = 2_000,
   maxStdoutBytes = 1_000_000,
   maxStderrBytes = 64_000,
+  includeSuccessDiagnostic = false,
   spawn = nodeSpawn,
   validate = () => true,
 }) {
@@ -366,7 +367,14 @@ export async function runFreshClaude({
         finish({ status: 'schema_error', error: diagnostic(`schema validation failed: ${error.message}`, sourceEnvironment) });
         return;
       }
-      finish({ status: 'ok', data, stderr: diagnostic(stderr, sourceEnvironment) });
+      finish({
+        status: 'ok',
+        data,
+        stderr: diagnostic(stderr, sourceEnvironment),
+        ...(includeSuccessDiagnostic
+          ? { diagnostic: streamDiagnostic(stdout, stderr, sourceEnvironment) }
+          : {}),
+      });
     });
   });
 }

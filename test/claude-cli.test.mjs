@@ -478,6 +478,31 @@ test('caps stdout and stderr by bytes and terminates overflowing children', asyn
   }
 });
 
+test('can include bounded lifecycle diagnostics on successful canary probes', async () => {
+  const result = await runFreshClaude(baseRun({
+    includeSuccessDiagnostic: true,
+    spawn: fakeSpawn({
+      stdout: [
+        JSON.stringify({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: 1,
+          max_retries: 10,
+          error_status: 503,
+          error: 'temporarily unavailable',
+        }),
+        resultEvent({ verdict: 'PASS' }).trimEnd(),
+        '',
+      ].join('\n'),
+    }),
+  }));
+
+  assert.equal(result.status, 'ok');
+  assert.match(result.diagnostic, /api_retry/);
+  assert.match(result.diagnostic, /"errorStatus":503/);
+  assert.match(result.diagnostic, /"type":"result"/);
+});
+
 test('timeout returns bounded redacted stream lifecycle diagnostics', async () => {
   const secret = 'timeout-secret-value';
   const baseUrl = 'https://private-timeout-gateway.example';

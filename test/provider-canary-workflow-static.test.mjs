@@ -13,7 +13,7 @@ test('provider canary is a credential-isolated reusable workflow with immutable 
   assert.match(yaml, /^  workflow_call:$/m);
   assert.doesNotMatch(yaml, /^  (?:pull_request|push|issue_comment|workflow_dispatch):/m);
   assert.match(yaml, /^permissions: \{\}$/m);
-  assert.match(yaml, /permissions:\n      actions: read/);
+  assert.match(yaml, /permissions:\n      # Used only to resolve this reusable workflow's immutable referenced_workflows SHA\.\n      actions: read/);
   assert.doesNotMatch(yaml, /contents:|pull-requests:|issues:/);
   assert.match(yaml, /Kizunad\/review\/\.github\/workflows\/provider-canary\.yml@/);
   assert.match(yaml, /expected exactly one central provider canary workflow reference/);

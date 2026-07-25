@@ -16,6 +16,8 @@ export async function runProviderCanary({
     'RIPGREP_EXECUTABLE',
     'BWRAP_EXECUTABLE',
     'PROVIDER_CANARY_OUTPUT',
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_BASE_URL',
   ];
   for (const key of required) {
     if (typeof environment[key] !== 'string' || environment[key].length === 0) {
@@ -54,13 +56,19 @@ export async function runProviderCanary({
         cwd: repository,
         environment,
         timeoutMs,
+        includeSuccessDiagnostic: true,
         validate: (value) => value?.ok === true,
       });
       probes.push({
         model,
         status: result.status,
         ...(result.status === 'ok'
-          ? { ok: result.data.ok }
+          ? {
+              ok: result.data.ok,
+              ...(typeof result.diagnostic === 'string' && result.diagnostic.length > 0
+                ? { diagnostic: result.diagnostic }
+                : {}),
+            }
           : { error: result.error, diagnostic: result.diagnostic ?? '' }),
       });
     }
