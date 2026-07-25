@@ -115,9 +115,18 @@ test('workflow uses an untrusted checkout only to build a sanitized Claude revie
 
 test('workflow keeps a caller-owned fail-open circuit around automatic infrastructure failures', async () => {
   const yaml = await workflow();
-  const preflight = yaml.match(/\n  preflight:\n([\s\S]*?)\n  review:\n/)?.[1] ?? '';
-  const finalize = yaml.match(/\n  finalize:\n([\s\S]*)$/)?.[1] ?? '';
-  const record = finalize.match(/Record infrastructure failure in caller circuit([\s\S]*?)\n      - name: Preserve validated review outcome/)?.[1] ?? '';
+  const preflightMatch = yaml.match(/\n  preflight:\n([\s\S]*?)\n  review:\n/);
+  const reviewMatch = yaml.match(/\n  review:\n([\s\S]*?)\n  finalize:\n/);
+  const finalizeMatch = yaml.match(/\n  finalize:\n([\s\S]*)$/);
+  assert.ok(preflightMatch, 'preflight job must be extractable');
+  assert.ok(reviewMatch, 'review job must be extractable');
+  assert.ok(finalizeMatch, 'finalize job must be extractable');
+  const preflight = preflightMatch[1];
+  const review = reviewMatch[1];
+  const finalize = finalizeMatch[1];
+  const recordMatch = finalize.match(/Record infrastructure failure in caller circuit([\s\S]*?)\n      - name: Preserve validated review outcome/);
+  assert.ok(recordMatch, 'circuit record step must be extractable');
+  const record = recordMatch[1];
   assert.match(preflight, /node _central\/src\/run-circuit\.mjs preflight/);
   assert.match(preflight, /circuit_should_run: \$\{\{ steps\.circuit\.outputs\.should_run \}\}/);
   assert.doesNotMatch(preflight, /skip-comment|postPullRequestComment/);
@@ -130,6 +139,10 @@ test('workflow keeps a caller-owned fail-open circuit around automatic infrastru
   assert.match(finalize, /steps\.download\.outcome != 'success'/);
   assert.match(finalize, /steps\.publish\.outputs\.decision == 'request_changes' && inputs\.shadow != true/);
   assert.match(yaml, /REVIEW_COMMENT_BODY: \$\{\{ github\.event\.comment\.body \|\| '' \}\}/);
+  assert.match(yaml, /circuit_manual_retry:[\s\S]*?default: false[\s\S]*?type: boolean/);
+  assert.match(preflight, /CIRCUIT_MANUAL_RETRY: \$\{\{ inputs\.circuit_manual_retry \}\}/);
+  assert.doesNotMatch(review, /CIRCUIT_MANUAL_RETRY|circuit_manual_retry/);
+  assert.doesNotMatch(finalize, /CIRCUIT_MANUAL_RETRY|circuit_manual_retry/);
 });
 
 test('every referenced action is pinned to a full commit SHA', async () => {

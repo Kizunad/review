@@ -35,6 +35,11 @@ on:
         required: false
         default: 120000
         type: number
+      circuit_manual_retry:
+        description: Allow a trusted workflow_dispatch retry to bypass an open infrastructure circuit
+        required: false
+        default: false
+        type: boolean
     secrets:
       review_api_key:
         description: Caller-owned provider credential
@@ -114,6 +119,7 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number }}
           REVIEW_TRIGGER: ${{ github.event_name }}
           REVIEW_COMMENT_BODY: ${{ github.event.comment.body || '' }}
+          CIRCUIT_MANUAL_RETRY: ${{ inputs.circuit_manual_retry }}
           CIRCUIT_THRESHOLD: '3'
           CIRCUIT_WINDOW_MINUTES: '60'
           CIRCUIT_DURATION_MINUTES: '60'

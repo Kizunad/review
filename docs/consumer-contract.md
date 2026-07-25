@@ -40,6 +40,7 @@ The caller must not use `@main`, a tag, a short SHA, `secrets: inherit`, or a ca
 | `max_diff_chars` | number | no | Deterministic total diff limit. Raising it expands cost and prompt-injection surface and should be reviewed. |
 | `max_shard_chars` | number | no | Upper bound for each immutable diff shard given to a Luna summarizer. |
 | `worker_timeout_ms` | number | no | Per-process timeout enforced outside Claude Code. |
+| `circuit_manual_retry` | boolean | no | Defaults to `false`. When `true`, only a trusted `workflow_dispatch` run bypasses an open infrastructure circuit; other trigger types and comment commands remain circuit-protected. |
 
 Model routing is a platform invariant rather than caller input: `sol` is the Opus alias, `terra` the Sonnet alias, and `luna` the Haiku alias. Every worker runs at `--effort max`.
 
@@ -91,7 +92,7 @@ The review job uploads exactly the platform-defined outcome, Markdown, and manif
 - content whose SHA-256 differs from the signed manifest fields;
 - results produced for a stale PR head.
 
-Infrastructure failures are explicit outcomes and fail the stable review check; they are not converted into approval or findings. Validator confirmations are countable only when the same vote marks the defect reachable; semantically contradictory confirmation votes are discarded and their seats are retried. The platform also maintains a caller-owned GitHub issue as a trusted failure log: three distinct run-attempt infrastructure failures within one hour open a one-hour automatic circuit. Circuit state reads fail open, and an exact trusted `/review` issue comment bypasses the circuit for a manual retry. An automatic run skipped by an open circuit remains a failing non-verdict check, so required review protection cannot turn green without a review. Gate failures never enter the circuit count.
+Infrastructure failures are explicit outcomes and fail the stable review check; they are not converted into approval or findings. Validator confirmations are countable only when the same vote marks the defect reachable; semantically contradictory confirmation votes are discarded and their seats are retried. The platform also maintains a caller-owned GitHub issue as a trusted failure log: three distinct run-attempt infrastructure failures within one hour open a one-hour automatic circuit. Circuit state reads fail open, and an exact trusted `/review` issue comment bypasses the circuit for a manual retry. A caller may also set `circuit_manual_retry: true` for a trusted `workflow_dispatch` canary; that opt-in has no effect for any other event or comment command. An automatic run skipped by an open circuit remains a failing non-verdict check, so required review protection cannot turn green without a review. Gate failures never enter the circuit count.
 
 ## Upgrade and rollback
 
