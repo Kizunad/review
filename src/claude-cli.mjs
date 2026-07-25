@@ -15,6 +15,7 @@ const ALLOWED_ENV = new Set([
   'SSL_CERT_DIR',
   'NODE_EXTRA_CA_CERTS',
 ]);
+const EMPTY_MCP_CONFIG = '{"mcpServers":{}}';
 const SECRET_ENV = /(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)/i;
 
 export function sanitizedEnv(environment = process.env) {
@@ -59,7 +60,9 @@ export function buildClaudeArgs({ model, prompt, jsonSchema }) {
   if (!MODELS.has(model)) throw new TypeError('model must be sol, terra, or luna');
   if (typeof prompt !== 'string' || prompt.length === 0) throw new TypeError('prompt must be non-empty');
   return [
-    '--bare', '-p', prompt, '--no-session-persistence', '--model', model,
+    '--bare', '--safe-mode', '--disable-slash-commands', '--no-chrome',
+    '--strict-mcp-config', '--mcp-config', EMPTY_MCP_CONFIG,
+    '-p', prompt, '--no-session-persistence', '--model', model,
     '--effort', 'max', '--tools', READ_ONLY_TOOLS, '--allowedTools', READ_ONLY_TOOLS,
     '--permission-mode', 'dontAsk', '--output-format', 'json', '--json-schema', schemaJson(jsonSchema),
   ];

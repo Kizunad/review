@@ -5,11 +5,26 @@ import { canFinalize, finalize } from '../src/finalizer.mjs';
 
 const context = { repository: 'org/repo', pullNumber: 4, baseOid: 'a'.repeat(40), headOid: 'b'.repeat(40) };
 const artifacts = { 'review.json': '{"decision":"approve"}', 'review.md': '## Review\n\nApproved.\n' };
-const input = { context, runId: 88, workflowRef: 'c'.repeat(40), reviewOid: 'b'.repeat(40), artifacts };
+const input = {
+  context,
+  runId: 88,
+  runAttempt: 2,
+  workflowRef: 'c'.repeat(40),
+  reviewOid: 'b'.repeat(40),
+  policySha256: 'd'.repeat(64),
+  artifacts,
+};
 
 test('manifest binds every published artifact byte to exact caller PR and run', () => {
   const manifest = createManifest(input);
-  assert.equal(verifyManifest(manifest, context, artifacts), true);
+  assert.equal(verifyManifest(manifest, context, artifacts, {
+    runId: 88,
+    runAttempt: 2,
+    workflowRef: 'c'.repeat(40),
+    policySha256: 'd'.repeat(64),
+  }), true);
+  assert.throws(() => verifyManifest(manifest, context, artifacts, { runAttempt: 3 }), /runAttempt/);
+  assert.throws(() => verifyManifest(manifest, context, artifacts, { policySha256: 'e'.repeat(64) }), /policySha256/);
   assert.throws(() => verifyManifest(manifest, { ...context, headOid: 'd'.repeat(40) }, artifacts), /headOid/);
   assert.throws(() => verifyManifest(manifest, context, { ...artifacts, 'review.json': '{"decision":"request_changes"}' }), /review.json hash/);
   assert.throws(() => verifyManifest(manifest, context, { ...artifacts, 'review.md': `${artifacts['review.md']}\n` }), /review.md hash/);
@@ -33,6 +48,12 @@ test('finalizer refetches, rejects stale head, and publishes only bound markdown
     postComment: async (target, body) => comments.push({ target, body }),
     manifest,
     artifacts,
+    binding: {
+      runId: 88,
+      runAttempt: 2,
+      workflowRef: 'c'.repeat(40),
+      policySha256: 'd'.repeat(64),
+    },
   });
   assert.deepEqual(comments, [{
     target: { repository: 'org/repo', pullNumber: 4, headOid: 'b'.repeat(40) },

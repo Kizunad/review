@@ -1,7 +1,7 @@
 import { canonicalJson, parsePullRequest, sha256 } from './pr-context.mjs';
 
 const ARTIFACT_FILES = ['review.json', 'review.md'];
-const REQUIRED = ['version', 'repository', 'pullNumber', 'runId', 'workflowRef', 'baseOid', 'headOid', 'reviewOid', 'artifacts', 'manifestSha256'];
+const REQUIRED = ['version', 'repository', 'pullNumber', 'runId', 'runAttempt', 'workflowRef', 'baseOid', 'headOid', 'reviewOid', 'policySha256', 'artifacts', 'manifestSha256'];
 const SHA256 = /^[0-9a-f]{64}$/;
 
 function assertExactKeys(value, required, label) {
@@ -25,6 +25,10 @@ function artifactHashes(artifacts) {
 function assertManifestFields(manifest) {
   if (manifest.version !== 1) throw new Error('manifest version must be 1');
   if (!Number.isSafeInteger(manifest.runId) || manifest.runId <= 0) throw new Error('manifest run ID must be a positive integer');
+  if (!Number.isSafeInteger(manifest.runAttempt) || manifest.runAttempt <= 0) throw new Error('manifest run attempt must be a positive integer');
+  if (typeof manifest.policySha256 !== 'string' || !SHA256.test(manifest.policySha256)) {
+    throw new Error('manifest policySha256 must be a lowercase SHA-256');
+  }
   if (typeof manifest.workflowRef !== 'string' || !/^[0-9a-f]{40}$/.test(manifest.workflowRef)) {
     throw new Error('manifest workflow ref must be a lowercase 40-character commit SHA');
   }
@@ -40,9 +44,11 @@ function assertManifestFields(manifest) {
   }
 }
 
-export function createManifest({ context, runId, workflowRef, reviewOid, artifacts }) {
+export function createManifest({ context, runId, runAttempt, workflowRef, reviewOid, policySha256, artifacts }) {
   const pr = parsePullRequest(context);
   if (!Number.isSafeInteger(Number(runId)) || Number(runId) <= 0) throw new Error('run ID must be a positive integer');
+  if (!Number.isSafeInteger(Number(runAttempt)) || Number(runAttempt) <= 0) throw new Error('run attempt must be a positive integer');
+  if (typeof policySha256 !== 'string' || !SHA256.test(policySha256)) throw new Error('policySha256 must be a lowercase SHA-256');
   if (typeof workflowRef !== 'string' || !/^[0-9a-f]{40}$/i.test(workflowRef)) {
     throw new Error('workflow ref must be immutable 40-character commit SHA');
   }
@@ -51,17 +57,19 @@ export function createManifest({ context, runId, workflowRef, reviewOid, artifac
     repository: pr.repository,
     pullNumber: pr.pullNumber,
     runId: Number(runId),
+    runAttempt: Number(runAttempt),
     workflowRef: workflowRef.toLowerCase(),
     baseOid: pr.baseOid,
     headOid: pr.headOid,
     reviewOid: reviewOid.toLowerCase(),
+    policySha256,
     artifacts: artifactHashes(artifacts),
   };
   if (manifest.reviewOid !== manifest.headOid) throw new Error('review OID must equal the API-fetched head OID');
   return { ...manifest, manifestSha256: sha256(canonicalJson(manifest)) };
 }
 
-export function verifyManifest(manifest, expected, artifacts) {
+export function verifyManifest(manifest, expected, artifacts, binding = {}) {
   assertExactKeys(manifest, REQUIRED, 'manifest');
   assertManifestFields(manifest);
   const recomputed = sha256(canonicalJson(Object.fromEntries(Object.entries(manifest).filter(([key]) => key !== 'manifestSha256'))));
@@ -75,6 +83,10 @@ export function verifyManifest(manifest, expected, artifacts) {
   for (const key of ['repository', 'pullNumber', 'baseOid', 'headOid']) {
     if (actual[key] !== wanted[key]) throw new Error(`manifest ${key} does not match current pull request`);
   }
+  if (binding.runId !== undefined && manifest.runId !== Number(binding.runId)) throw new Error('manifest runId does not match current workflow run');
+  if (binding.runAttempt !== undefined && manifest.runAttempt !== Number(binding.runAttempt)) throw new Error('manifest runAttempt does not match current workflow attempt');
+  if (binding.workflowRef !== undefined && manifest.workflowRef !== String(binding.workflowRef).toLowerCase()) throw new Error('manifest workflowRef does not match current workflow ref');
+  if (binding.policySha256 !== undefined && manifest.policySha256 !== binding.policySha256) throw new Error('manifest policySha256 does not match trusted policy');
   if (manifest.reviewOid !== wanted.headOid) throw new Error('artifacts were not reviewed at the current head OID');
   return true;
 }

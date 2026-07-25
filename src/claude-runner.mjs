@@ -55,6 +55,7 @@ function stagePrompt(request, { policy, repository, skillPath, skill }) {
         'You do not know other candidates, validators, vote totals, or earlier transcripts. Your candidateFingerprint must exactly match the supplied fingerprint.',
         `Trusted caller policy:\n${json(policy)}`,
         `Candidate:\n${json(request.candidate)}`,
+        `Related immutable diff:\n${request.relatedDiff}`,
       ].join('\n\n');
     case 'adjudicate':
       return [

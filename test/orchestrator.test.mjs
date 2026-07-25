@@ -33,6 +33,7 @@ test('keeps all Sol output out of Terra input and accepts four confirmations', a
   assert.equal('transcript' in finder, false);
   assert.deepEqual(finder.summaries, [{ assignment: 'a', data: { summary: 'one file', files: ['a.mjs'] } }]);
   assert.equal(requests.filter((request) => request.stage === 'validate').length, 5);
+  assert.ok(requests.filter((request) => request.stage === 'validate').every((request) => request.relatedDiff.includes('diff --git a/a.mjs b/a.mjs')));
 });
 
 test('runs every Luna assignment and fills uncovered shards deterministically', async () => {

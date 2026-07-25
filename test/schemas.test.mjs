@@ -29,13 +29,15 @@ test('artifact manifest schema matches the implementation contract', async () =>
   const manifest = createManifest({
     context: { repository: 'org/repo', pullNumber: 4, baseOid: 'a'.repeat(40), headOid: 'b'.repeat(40) },
     runId: 88,
+    runAttempt: 1,
     workflowRef: 'c'.repeat(40),
     reviewOid: 'b'.repeat(40),
+    policySha256: 'd'.repeat(64),
     artifacts: { 'review.json': '{"decision":"approve"}', 'review.md': 'Approved.\n' },
   });
   assert.deepEqual(Object.keys(manifest).sort(), schema.required.slice().sort());
   assert.equal(schema.properties.version.const, manifest.version);
-  for (const key of ['workflowRef', 'baseOid', 'headOid', 'reviewOid', 'manifestSha256']) {
+  for (const key of ['workflowRef', 'baseOid', 'headOid', 'reviewOid', 'policySha256', 'manifestSha256']) {
     assert.match(manifest[key], new RegExp(schema.properties[key].pattern));
   }
   for (const [file, hash] of Object.entries(manifest.artifacts)) {

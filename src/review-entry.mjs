@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { runReview } from './orchestrator.mjs';
 import { createClaudeRunner } from './claude-runner.mjs';
+import { createSanitizedCallerSnapshot } from './caller-snapshot.mjs';
 
 const SEVERITIES = new Set(['blocker', 'major', 'minor']);
 
@@ -53,13 +54,14 @@ function publicFinding(finding) {
   };
 }
 
-export function renderReviewMarkdown(review, { headOid, policyVersion, shadow = false }) {
+export function renderReviewMarkdown(review, { headOid, policyVersion, policySha256, shadow = false }) {
   const lines = [
     shadow ? '## Central review (shadow)' : '## Central review',
     '',
     `**Decision:** \`${review.decision}\``,
     `**Reviewed head:** \`${headOid}\``,
     `**Policy:** \`${policyVersion}\``,
+    `**Policy SHA-256:** \`${policySha256}\``,
   ];
   if (review.decision === 'infrastructure_failure') {
     lines.push('', 'The review could not complete safely. No approval or code finding was inferred from the failed stages.', '');
@@ -92,6 +94,7 @@ export async function executeReview({
   repository,
   diff,
   policy,
+  policySha256,
   environment,
   executable = 'claude',
   maxDiffChars = 40_000,
@@ -102,19 +105,22 @@ export async function executeReview({
   if (typeof diff !== 'string') throw new TypeError('diff must be a string');
   const diffLimit = positiveInteger(maxDiffChars, 'maxDiffChars', 40_000);
   if (Buffer.byteLength(diff) > diffLimit) throw new Error(`diff exceeds ${diffLimit} bytes`);
+  if (typeof policySha256 !== 'string' || !/^[0-9a-f]{64}$/.test(policySha256)) throw new Error('policySha256 must be a lowercase SHA-256');
   const trustedPolicy = parsePolicy(policy, repository);
   const catalog = JSON.parse(await readFile(path.join(centralRoot, 'catalog/review-dimensions.v1.json'), 'utf8'));
-  const runner = createClaudeRunner({
-    centralRoot,
-    callerRoot,
-    policy: trustedPolicy,
-    repository,
-    environment,
-    executable,
-    timeoutMs: positiveInteger(workerTimeoutMs, 'workerTimeoutMs', 120_000),
-  });
+  let snapshot;
   let result;
   try {
+    snapshot = await createSanitizedCallerSnapshot(callerRoot);
+    const runner = createClaudeRunner({
+      centralRoot,
+      callerRoot: snapshot.root,
+      policy: trustedPolicy,
+      repository,
+      environment: { ...environment, HOME: snapshot.home },
+      executable,
+      timeoutMs: positiveInteger(workerTimeoutMs, 'workerTimeoutMs', 120_000),
+    });
     result = await runReview({
       diff,
       taxonomy: catalog.dimensions,
@@ -123,6 +129,8 @@ export async function executeReview({
     });
   } catch (error) {
     result = { findings: [], failures: [{ stage: 'orchestrator', status: 'infra_error', error: error.message }] };
+  } finally {
+    await snapshot?.cleanup();
   }
   const review = {
     version: 'v1',
@@ -132,7 +140,12 @@ export async function executeReview({
   };
   return {
     review,
-    markdown: renderReviewMarkdown(review, { headOid: environment?.REVIEW_HEAD_OID ?? 'unknown', policyVersion: trustedPolicy.version, shadow }),
+    markdown: renderReviewMarkdown(review, {
+      headOid: environment?.REVIEW_HEAD_OID ?? 'unknown',
+      policyVersion: trustedPolicy.version,
+      policySha256,
+      shadow,
+    }),
     policy: trustedPolicy,
   };
 }

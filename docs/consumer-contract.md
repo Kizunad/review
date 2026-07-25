@@ -77,11 +77,11 @@ Rules must be declarative review data. A policy cannot configure tools, commands
 
 The reusable workflow obtains repository identity, `baseRefOid`, and `headRefOid` from the GitHub API. Both OIDs must be lowercase 40-character Git object IDs.
 
-The workflow stages the central runner and caller policy from trusted revisions, then checks out the exact PR head detached. Review proceeds only when `git rev-parse HEAD` equals the authoritative head OID. The finalizer re-fetches the PR and refuses to publish a normal verdict if either OID changed.
+The workflow stages the central runner and caller policy from trusted revisions, then checks out the exact PR head detached. Review proceeds only when `git rev-parse HEAD` equals the authoritative head OID. Before a Claude process receives the provider credential, the platform copies regular repository files into a temporary snapshot, rejects all symlinks and non-regular entries, excludes `.git`, `.claude`, `.mcp.json`, `CLAUDE.md`, and `AGENTS.md`, and supplies a temporary empty `HOME`. Claude also starts with `--bare --safe-mode --disable-slash-commands --strict-mcp-config` and an empty MCP configuration. The finalizer re-fetches the PR and refuses to publish a normal verdict if either OID changed.
 
 ## Artifact contract
 
-The review job uploads exactly the platform-defined outcome, Markdown, and manifest files under a run/attempt-specific artifact name. The finalizer rejects:
+The review job uploads exactly the platform-defined outcome, Markdown, and manifest files under a run/attempt-specific artifact name. The manifest binds the run ID, run attempt, immutable central workflow SHA, trusted policy SHA-256, PR OIDs, and the exact bytes of both published artifacts. The finalizer rejects:
 
 - missing, duplicate, or extra files;
 - symlinks, non-regular files, path traversal, or size-limit violations;
@@ -102,4 +102,6 @@ Infrastructure failures are explicit outcomes and fail the stable review check; 
 
 ## Fork pull requests
 
-The workflow must remain safe when PR code is fully attacker-controlled. It never executes caller-head scripts, project builds, package installation, hooks, `.claude` content, `CLAUDE.md`, MCP configuration, or user memory. Claude Code is limited to repository reads, and the only write-capable process is the trusted finalizer after artifact and OID verification.
+The workflow must remain safe when PR code is fully attacker-controlled. It never executes caller-head scripts, project builds, package installation, hooks, repository Claude configuration, MCP configuration, or user memory. Symlinks and special files are rejected instead of followed. Claude Code is limited to regular-file reads from the sanitized snapshot, and the only write-capable process is the trusted finalizer after artifact and OID verification.
+
+The finalizer re-fetches PR OIDs immediately before validating and posting. GitHub's issue-comment API has no atomic expected-head precondition, so a narrow refetch-to-POST race cannot be eliminated; any subsequent run is still bound to its own exact head, run attempt, and artifact hashes.

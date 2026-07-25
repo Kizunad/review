@@ -33,6 +33,9 @@ test('workflow wires pinned Claude Code to the deterministic read-only runner', 
   assert.match(yaml, /ANTHROPIC_API_KEY: \$\{\{ secrets\.review_api_key \}\}/);
   assert.match(yaml, /ANTHROPIC_BASE_URL: \$\{\{ inputs\.review_base_url \}\}/);
   assert.match(yaml, /POLICY_FILE: \$\{\{ github\.workspace \}\}\/_trusted\/policy\.json/);
+  assert.match(yaml, /POLICY_SHA256=.*assertRegularFileInsideWorkspace/s);
+  assert.match(yaml, /runAttempt: process\.env\.EXPECTED_RUN_ATTEMPT/);
+  assert.match(yaml, /policySha256: process\.env\.POLICY_SHA256/);
   assert.doesNotMatch(yaml, /secrets:\s*inherit/);
 });
 
@@ -47,6 +50,13 @@ test('workflow separates read-only review from the only write-capable finalizer'
   assert.match(finalize, /issues: write/);
   assert.doesNotMatch(finalize, /ANTHROPIC_API_KEY|review_api_key/);
 });
+test('workflow uses an untrusted checkout only to build a sanitized Claude review snapshot', async () => {
+  const yaml = await workflow();
+  assert.match(yaml, /CALLER_ROOT: \$\{\{ github\.workspace \}\}\/_caller/);
+  assert.match(yaml, /node _central\/src\/run-review\.mjs/);
+  assert.doesNotMatch(yaml, /cwd:\s*_caller|claude\s+.*_caller/);
+});
+
 test('every referenced action is pinned to a full commit SHA', async () => {
   const yaml = await workflow();
   const uses = [...yaml.matchAll(/^\s*uses:\s*[^@\s]+@([^\s#]+)\s*$/gm)];

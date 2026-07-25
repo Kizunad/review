@@ -38,7 +38,13 @@ function assignmentDiff(assignment, shards) {
   return assignment.shardIndexes.map((index) => byIndex.get(index)?.text || '').join('');
 }
 
-async function collectFiveVotes({ runner, candidate, round, validatorCount, maxAttempts, failures }) {
+function relatedDiff(candidate, diff) {
+  const sections = String(diff).split(/(?=^diff --git )/m).filter(Boolean);
+  const match = sections.filter((section) => section.split('\n', 1)[0] === `diff --git a/${candidate.path} b/${candidate.path}`);
+  return match.length > 0 ? match.join('') : diff;
+}
+
+async function collectFiveVotes({ runner, candidate, diff, round, validatorCount, maxAttempts, failures }) {
   const votesBySeat = new Map();
   let attempt = 0;
   while (votesBySeat.size < validatorCount && attempt < maxAttempts) {
@@ -48,7 +54,7 @@ async function collectFiveVotes({ runner, candidate, round, validatorCount, maxA
       const requestAttempt = attempt;
       attempt += 1;
       return runner.run({
-        stage: 'validate', model: 'terra', candidate, round, validator: seat, attempt: requestAttempt,
+        stage: 'validate', model: 'terra', candidate, relatedDiff: relatedDiff(candidate, diff), round, validator: seat, attempt: requestAttempt,
       }).then((validation) => ({ seat, requestAttempt, validation }));
     });
     const results = await Promise.all(batch);
@@ -133,7 +139,7 @@ export async function runReview({
     const voteRounds = [];
     for (let round = 1; round <= maxVoteRounds; round += 1) {
       const votes = await collectFiveVotes({
-        runner, candidate, round, validatorCount, maxAttempts: maxValidatorAttempts, failures,
+        runner, candidate, diff, round, validatorCount, maxAttempts: maxValidatorAttempts, failures,
       });
       if (votes.length !== validatorCount) {
         failures.push({

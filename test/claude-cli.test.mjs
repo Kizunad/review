@@ -36,11 +36,16 @@ function fakeSpawn({ stdout = '{}', stderr = '', code = 0, error, neverClose = f
 test('builds the fixed fresh read-only Claude command with inline schema JSON', () => {
   const args = buildClaudeArgs({ model: 'terra', prompt: 'review', jsonSchema: schema });
   assert.deepEqual(args, [
-    '--bare', '-p', 'review', '--no-session-persistence', '--model', 'terra', '--effort', 'max',
+    '--bare', '--safe-mode', '--disable-slash-commands', '--no-chrome',
+    '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+    '-p', 'review', '--no-session-persistence', '--model', 'terra', '--effort', 'max',
     '--tools', 'Read,Glob,Grep', '--allowedTools', 'Read,Glob,Grep', '--permission-mode', 'dontAsk',
     '--output-format', 'json', '--json-schema', JSON.stringify(schema),
   ]);
   assert.equal(args.some((arg) => /resume|Bash|Edit|Write/.test(arg)), false);
+  assert.ok(args.includes('--safe-mode'));
+  assert.ok(args.includes('--disable-slash-commands'));
+  assert.ok(args.includes('--strict-mcp-config'));
   assert.deepEqual(JSON.parse(args.at(-1)), schema);
   assert.throws(() => buildClaudeArgs({ model: 'opus', prompt: 'x', jsonSchema: schema }), /model/);
 });

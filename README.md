@@ -11,10 +11,12 @@
 5. Four or five confirmations accept; four or five rejections reject; a 2/3 split revotes with five fresh validators for at most three rounds.
 6. Only a third split round is sent to a fresh `sol` adjudicator. Infrastructure and schema failures never count as votes.
 
-Every Claude Code process is sessionless and read-only:
+Every Claude Code process is sessionless and read-only. It runs from a temporary sanitized snapshot with a temporary empty `HOME`; repository `.claude`, `.mcp.json`, `CLAUDE.md`, `AGENTS.md`, `.git`, and every symlink are excluded before the provider credential enters the process:
 
 ```text
-claude --bare -p <prompt> --no-session-persistence \
+claude --bare --safe-mode --disable-slash-commands --no-chrome \
+  --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
+  -p <prompt> --no-session-persistence \
   --model sol|terra|luna --effort max \
   --tools Read,Glob,Grep --allowedTools Read,Glob,Grep \
   --permission-mode dontAsk --output-format json \
@@ -25,10 +27,10 @@ claude --bare -p <prompt> --no-session-persistence \
 
 - Public workflow and action references must be pinned to a complete 40-character commit SHA.
 - The caller's base and head OIDs are read from GitHub and checked before review and again before publication.
-- Pull-request code is only read; caller scripts, hooks, MCP configuration, skills, and `CLAUDE.md` are not executed.
+- Pull-request files are copied into a temporary read-only review snapshot; repository scripts, symlinks, `.git`, hooks, MCP configuration, skills, `CLAUDE.md`, and `AGENTS.md` are excluded before Claude starts.
 - The review job has no GitHub write permission. The finalizer is the only job that can publish a comment.
 - GitHub credentials are removed from every Claude child process.
-- Review artifacts are schema-checked and cryptographically bound to the exact repository, PR, run, workflow revision, base OID, and head OID.
+- Review artifacts are schema-checked and cryptographically bound to the exact repository, PR, run ID, run attempt, workflow revision, policy SHA-256, base OID, and head OID.
 - Provider, CLI, timeout, schema, stale-head, and artifact failures fail closed as infrastructure failures rather than fabricated code findings.
 
 ## Repository layout

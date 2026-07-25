@@ -239,6 +239,14 @@ jobs:
           path: _central
           persist-credentials: false
           fetch-depth: 1
+      - name: Checkout trusted caller base for policy binding
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ needs.preflight.outputs.base_oid }}
+          path: _base
+          persist-credentials: false
+          fetch-depth: 1
       - name: Download bound review artifacts
         continue-on-error: true
         id: download
@@ -254,6 +262,10 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number }}
           EXPECTED_BASE: ${{ needs.preflight.outputs.base_oid }}
           EXPECTED_HEAD: ${{ needs.preflight.outputs.head_oid }}
+          POLICY_PATH: ${{ inputs.policy_path }}
+          EXPECTED_RUN_ID: ${{ github.run_id }}
+          EXPECTED_RUN_ATTEMPT: ${{ github.run_attempt }}
+          EXPECTED_WORKFLOW_REF: ${{ needs.preflight.outputs.workflow_ref }}
         run: |
           set -euo pipefail
           mapfile -t files < <(find _review -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
@@ -267,7 +279,14 @@ jobs:
           [[ "$(wc -c < _review/review.json)" -le 1048576 ]] || { echo 'review.json exceeds size limit.' >&2; exit 1; }
           [[ "$(wc -c < _review/review.md)" -le 65536 ]] || { echo 'review.md exceeds size limit.' >&2; exit 1; }
           [[ "$(wc -c < _review/manifest.json)" -le 16384 ]] || { echo 'manifest.json exceeds size limit.' >&2; exit 1; }
-          BASE_OID="$base_oid" HEAD_OID="$head_oid" REPOSITORY="$GITHUB_REPOSITORY" node --input-type=module -e '
+          POLICY_SHA256="$(POLICY_PATH="$POLICY_PATH" node --input-type=module -e '
+            import { readFile } from "node:fs/promises";
+            import { assertRegularFileInsideWorkspace } from "./_central/src/workspace-boundary.mjs";
+            import { sha256 } from "./_central/src/pr-context.mjs";
+            const source = await assertRegularFileInsideWorkspace("_base", process.env.POLICY_PATH);
+            process.stdout.write(sha256(await readFile(source.path, "utf8")));
+          ')"
+          BASE_OID="$base_oid" HEAD_OID="$head_oid" REPOSITORY="$GITHUB_REPOSITORY" POLICY_SHA256="$POLICY_SHA256" EXPECTED_RUN_ID="$EXPECTED_RUN_ID" EXPECTED_RUN_ATTEMPT="$EXPECTED_RUN_ATTEMPT" EXPECTED_WORKFLOW_REF="$EXPECTED_WORKFLOW_REF" node --input-type=module -e '
             import { readFile } from "node:fs/promises";
             import { canFinalize } from "./_central/src/finalizer.mjs";
             const manifest = JSON.parse(await readFile("_review/manifest.json", "utf8"));
@@ -275,7 +294,22 @@ jobs:
               "review.json": await readFile("_review/review.json", "utf8"),
               "review.md": await readFile("_review/review.md", "utf8"),
             };
-            canFinalize({ manifest, currentPullRequest: { repository: process.env.REPOSITORY, pullNumber: Number(process.env.PR_NUMBER), baseOid: process.env.BASE_OID, headOid: process.env.HEAD_OID }, artifacts });
+            canFinalize({
+              manifest,
+              currentPullRequest: {
+                repository: process.env.REPOSITORY,
+                pullNumber: Number(process.env.PR_NUMBER),
+                baseOid: process.env.BASE_OID,
+                headOid: process.env.HEAD_OID,
+              },
+              artifacts,
+              binding: {
+                runId: process.env.EXPECTED_RUN_ID,
+                runAttempt: process.env.EXPECTED_RUN_ATTEMPT,
+                workflowRef: process.env.EXPECTED_WORKFLOW_REF,
+                policySha256: process.env.POLICY_SHA256,
+              },
+            });
           '
           jq -n --rawfile body _review/review.md '{body:$body}' | curl --fail-with-body --silent --show-error -X POST \
             -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" \

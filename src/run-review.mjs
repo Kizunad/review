@@ -3,10 +3,11 @@ import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { executeReview } from './review-entry.mjs';
 import { createManifest } from './artifact-manifest.mjs';
+import { sha256 } from './pr-context.mjs';
 
 const required = [
   'CENTRAL_ROOT', 'CALLER_ROOT', 'REPOSITORY', 'POLICY_FILE', 'DIFF_PATH', 'CONTEXT_PATH',
-  'OUTPUT_DIRECTORY', 'WORKFLOW_REF', 'REVIEW_HEAD_OID', 'GITHUB_RUN_ID',
+  'OUTPUT_DIRECTORY', 'WORKFLOW_REF', 'REVIEW_HEAD_OID', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT',
 ];
 for (const key of required) {
   if (typeof process.env[key] !== 'string' || process.env[key].length === 0) throw new Error(`${key} is required`);
@@ -16,7 +17,9 @@ const centralRoot = path.resolve(process.env.CENTRAL_ROOT);
 const callerRoot = path.resolve(process.env.CALLER_ROOT);
 const outputDirectory = path.resolve(process.env.OUTPUT_DIRECTORY);
 const context = JSON.parse(await readFile(process.env.CONTEXT_PATH, 'utf8'));
-const policy = JSON.parse(await readFile(process.env.POLICY_FILE, 'utf8'));
+const policyBytes = await readFile(process.env.POLICY_FILE, 'utf8');
+const policy = JSON.parse(policyBytes);
+const policySha256 = sha256(policyBytes);
 const diff = await readFile(process.env.DIFF_PATH, 'utf8');
 const { review, markdown } = await executeReview({
   centralRoot,
@@ -24,6 +27,7 @@ const { review, markdown } = await executeReview({
   repository: process.env.REPOSITORY,
   diff,
   policy,
+  policySha256,
   environment: process.env,
   maxDiffChars: process.env.MAX_DIFF_CHARS,
   maxShardChars: process.env.MAX_SHARD_CHARS,
@@ -37,8 +41,10 @@ const artifacts = {
 const manifest = createManifest({
   context,
   runId: process.env.GITHUB_RUN_ID,
+  runAttempt: process.env.GITHUB_RUN_ATTEMPT,
   workflowRef: process.env.WORKFLOW_REF,
   reviewOid: process.env.REVIEW_HEAD_OID,
+  policySha256,
   artifacts,
 });
 await Promise.all([
