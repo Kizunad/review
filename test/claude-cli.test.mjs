@@ -169,14 +169,13 @@ function toolResultFrom(message) {
 test('builds the fixed fresh read-only Claude command with inline schema JSON', () => {
   const args = buildClaudeArgs({ model: 'terra', prompt: 'review', jsonSchema: schema });
   assert.deepEqual(args, [
-    '--bare', '--safe-mode', '--disable-slash-commands', '--no-chrome',
+    '--safe-mode', '--disable-slash-commands', '--no-chrome',
     '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
     '-p', 'review', '--no-session-persistence', '--model', 'terra', '--effort', 'max',
-    '--tools', 'Read,Glob,Grep', '--allowedTools', 'Read(//workspace/**),Glob(*),Grep(*)', '--permission-mode', 'dontAsk',
+    '--tools', 'Read,Glob,Grep', '--allowedTools', 'Read(//workspace/**),Glob(//workspace/**),Grep(//workspace/**)', '--permission-mode', 'dontAsk',
     '--output-format', 'stream-json', '--verbose', '--json-schema', JSON.stringify(schema),
   ]);
-  assert.equal(args.some((arg) => /resume|Bash|Edit|Write/.test(arg)), false);
-  assert.ok(args.includes('--bare'));
+  assert.equal(args.some((arg) => /resume|Bash|Edit|Write|--bare/.test(arg)), false);
   assert.ok(args.includes('--safe-mode'));
   assert.ok(args.includes('--disable-slash-commands'));
   assert.ok(args.includes('--strict-mcp-config'));
@@ -242,11 +241,12 @@ test('builds a mount namespace exposing only the read-only repository and fixed 
   assert.deepEqual(args.slice(-claudeArgs.length), claudeArgs);
 });
 
-test('keeps Read path-scoped while Glob and Grep rely on sandbox path confinement', () => {
+test('path-scopes every repository tool to the sanitized workspace', () => {
   const args = buildClaudeArgs({ model: 'terra', prompt: 'review', jsonSchema: schema });
   const allowed = args[args.indexOf('--allowedTools') + 1];
-  assert.equal(allowed, 'Read(//workspace/**),Glob(*),Grep(*)');
-  assert.match(allowed, /^Read\(\/\/workspace\/\*\*\),Glob\(\*\),Grep\(\*\)$/);
+  assert.equal(allowed, 'Read(//workspace/**),Glob(//workspace/**),Grep(//workspace/**)');
+  assert.equal(/(?:^|,)Glob(?:,|$)|(?:^|,)Grep(?:,|$)/.test(allowed), false);
+  for (const tool of ['Read', 'Glob', 'Grep']) assert.match(allowed, new RegExp(`${tool}\\(//workspace/\\*\\*\\)`));
 });
 
 

@@ -36,7 +36,8 @@
         "properties": {
           "stage": { "type": "string", "minLength": 1, "maxLength": 300 },
           "status": { "type": "string", "enum": ["infra_error", "schema_error"] },
-          "error": { "type": "string", "minLength": 1, "maxLength": 4000 }
+          "error": { "type": "string", "minLength": 1, "maxLength": 4000 },
+          "diagnostic": { "type": "string", "minLength": 1, "maxLength": 4000 }
         }
       }
     }

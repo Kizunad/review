@@ -2,7 +2,7 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 
 export const READ_ONLY_TOOLS = 'Read,Glob,Grep';
-export const READ_ONLY_PERMISSIONS = 'Read(//workspace/**),Glob(*),Grep(*)';
+export const READ_ONLY_PERMISSIONS = 'Read(//workspace/**),Glob(//workspace/**),Grep(//workspace/**)';
 const SANDBOX_REPOSITORY = '/workspace';
 const SANDBOX_HOME = '/home/claude';
 const SANDBOX_EXECUTABLE = '/sandbox/claude';
@@ -63,7 +63,7 @@ export function buildClaudeArgs({ model, prompt, jsonSchema }) {
   if (!MODELS.has(model)) throw new TypeError('model must be sol, terra, or luna');
   if (typeof prompt !== 'string' || prompt.length === 0) throw new TypeError('prompt must be non-empty');
   return [
-    '--bare', '--safe-mode', '--disable-slash-commands', '--no-chrome',
+    '--safe-mode', '--disable-slash-commands', '--no-chrome',
     '--strict-mcp-config', '--mcp-config', EMPTY_MCP_CONFIG,
     '-p', prompt, '--no-session-persistence', '--model', model,
     '--effort', 'max', '--tools', READ_ONLY_TOOLS, '--allowedTools', READ_ONLY_PERMISSIONS,
