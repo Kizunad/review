@@ -25,7 +25,7 @@ async function copyTree(sourceDirectory, targetDirectory, relativeDirectory = ''
     const source = path.join(sourceDirectory, entry.name);
     const target = path.join(targetDirectory, relative);
     const info = await lstat(source);
-    if (info.isSymbolicLink()) throw new Error(`caller snapshot contains a symlink: ${relative}`);
+    if (info.isSymbolicLink()) continue;
     if (info.isDirectory()) {
       await mkdir(target, { recursive: true });
       await copyTree(source, targetDirectory, relative);
