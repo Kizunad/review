@@ -53,11 +53,21 @@ test('cleanup restores traversal before removing nested read-only directories', 
   await missing(snapshot.root);
 });
 
-test('rejects symlinks instead of following content outside the reviewed checkout', async () => {
+test('excludes symlinks without following content inside or outside the reviewed checkout', async () => {
   const source = await mkdtemp(path.join(tmpdir(), 'caller-symlink-'));
+  await mkdir(path.join(source, 'nested'));
   await writeFile(path.join(source, 'real.txt'), 'trusted bytes');
   await symlink('real.txt', path.join(source, 'link.txt'));
-  await assert.rejects(createSanitizedCallerSnapshot(source), /symlink/);
+  await symlink(tmpdir(), path.join(source, 'nested', 'escape'));
+
+  const snapshot = await createSanitizedCallerSnapshot(source);
+  try {
+    assert.equal(await readFile(path.join(snapshot.root, 'real.txt'), 'utf8'), 'trusted bytes');
+    await missing(path.join(snapshot.root, 'link.txt'));
+    await missing(path.join(snapshot.root, 'nested', 'escape'));
+  } finally {
+    await snapshot.cleanup();
+  }
 });
 
 test('classifies every excluded review configuration path component', () => {
