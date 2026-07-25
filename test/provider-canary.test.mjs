@@ -45,7 +45,7 @@ async function execute(failModel = null) {
       ...options,
       spawn: (_sandbox, args, spawnOptions) => {
         const separator = args.indexOf('--');
-        return spawn(executable, args.slice(separator + 2), spawnOptions);
+        return spawn(process.execPath, [executable, ...args.slice(separator + 2)], spawnOptions);
       },
     }),
   });
