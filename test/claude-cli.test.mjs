@@ -133,21 +133,24 @@ test('timeout escalates from TERM to KILL when the child ignores TERM', async ()
   assert.deepEqual(child.signals, ['SIGTERM', 'SIGKILL']);
 });
 
-test('redacts inherited secrets from every returned diagnostic', async () => {
+test('redacts inherited credentials and provider endpoints from every returned diagnostic', async () => {
   const secret = 'super-secret-provider-value';
-  const environment = { PATH: '/bin', ANTHROPIC_API_KEY: secret, GITHUB_TOKEN: 'github-secret' };
+  const baseUrl = 'https://private-gateway.example/tenant';
+  const environment = { PATH: '/bin', ANTHROPIC_API_KEY: secret, ANTHROPIC_BASE_URL: baseUrl, GITHUB_TOKEN: 'github-secret' };
   const nonzero = await runFreshClaude({
     model: 'terra', prompt: 'x', jsonSchema: schema, environment,
-    spawn: fakeSpawn({ code: 2, stderr: `provider=${secret} token=github-secret` }),
+    spawn: fakeSpawn({ code: 2, stderr: `provider=${secret} base=${baseUrl} token=github-secret` }),
   });
   assert.equal(JSON.stringify(nonzero).includes(secret), false);
+  assert.equal(JSON.stringify(nonzero).includes(baseUrl), false);
   assert.equal(JSON.stringify(nonzero).includes('github-secret'), false);
   assert.match(nonzero.stderr, /REDACTED/);
 
   const malformed = await runFreshClaude({
     model: 'terra', prompt: 'x', jsonSchema: schema, environment,
-    spawn: fakeSpawn({ stdout: `not-json-${secret}` }),
+    spawn: fakeSpawn({ stdout: `not-json-${secret}-${baseUrl}` }),
   });
   assert.equal(JSON.stringify(malformed).includes(secret), false);
+  assert.equal(JSON.stringify(malformed).includes(baseUrl), false);
   assert.match(malformed.stdout, /REDACTED/);
 });

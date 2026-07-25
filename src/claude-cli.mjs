@@ -16,7 +16,7 @@ const ALLOWED_ENV = new Set([
   'NODE_EXTRA_CA_CERTS',
 ]);
 const EMPTY_MCP_CONFIG = '{"mcpServers":{}}';
-const SECRET_ENV = /(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)/i;
+const SECRET_ENV = /(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|BASE_URL)/i;
 
 export function sanitizedEnv(environment = process.env) {
   const safe = {};
