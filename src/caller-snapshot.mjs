@@ -40,8 +40,8 @@ async function copyTree(sourceDirectory, targetDirectory, relativeDirectory = ''
 }
 
 async function makeTreeWritable(directory) {
-  const entries = await readdir(directory, { withFileTypes: true });
   await chmod(directory, 0o700);
+  const entries = await readdir(directory, { withFileTypes: true });
   for (const entry of entries) {
     const target = path.join(directory, entry.name);
     if (entry.isDirectory()) await makeTreeWritable(target);
