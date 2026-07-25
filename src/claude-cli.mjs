@@ -2,18 +2,21 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 
 export const READ_ONLY_TOOLS = 'Read,Glob,Grep';
+export const READ_ONLY_PERMISSIONS = 'Read(//workspace/**),Glob(//workspace/**),Grep(//workspace/**)';
+const SANDBOX_REPOSITORY = '/workspace';
+const SANDBOX_HOME = '/home/claude';
+const SANDBOX_EXECUTABLE = '/sandbox/claude';
+const SANDBOX_RIPGREP = '/sandbox/rg';
+const SANDBOX_PATH = '/sandbox:/usr/local/bin:/usr/bin:/bin';
 const MODELS = new Set(['sol', 'terra', 'luna']);
 const ALLOWED_ENV = new Set([
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_BASE_URL',
   'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
-  'HOME',
   'LANG',
   'LC_ALL',
-  'PATH',
   'SSL_CERT_FILE',
   'SSL_CERT_DIR',
-  'NODE_EXTRA_CA_CERTS',
 ]);
 const EMPTY_MCP_CONFIG = '{"mcpServers":{}}';
 const SECRET_ENV = /(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|BASE_URL)/i;
@@ -60,12 +63,74 @@ export function buildClaudeArgs({ model, prompt, jsonSchema }) {
   if (!MODELS.has(model)) throw new TypeError('model must be sol, terra, or luna');
   if (typeof prompt !== 'string' || prompt.length === 0) throw new TypeError('prompt must be non-empty');
   return [
-    '--bare', '--safe-mode', '--disable-slash-commands', '--no-chrome',
+    '--safe-mode', '--disable-slash-commands', '--no-chrome',
     '--strict-mcp-config', '--mcp-config', EMPTY_MCP_CONFIG,
     '-p', prompt, '--no-session-persistence', '--model', model,
-    '--effort', 'max', '--tools', READ_ONLY_TOOLS, '--allowedTools', READ_ONLY_TOOLS,
+    '--effort', 'max', '--tools', READ_ONLY_TOOLS, '--allowedTools', READ_ONLY_PERMISSIONS,
     '--permission-mode', 'dontAsk', '--output-format', 'json', '--json-schema', schemaJson(jsonSchema),
   ];
+}
+
+function nonEmptyPath(value, name) {
+  if (typeof value !== 'string' || value.length === 0 || !value.startsWith('/')) {
+    throw new TypeError(`${name} must be an absolute path`);
+  }
+  return value;
+}
+
+export function buildSandboxArgs({ executable, ripgrepExecutable, repositoryRoot, environment, claudeArgs }) {
+  const hostExecutable = nonEmptyPath(executable, 'executable');
+  const hostRipgrep = nonEmptyPath(ripgrepExecutable, 'ripgrepExecutable');
+  const hostRepository = nonEmptyPath(repositoryRoot, 'repositoryRoot');
+  const safeEnvironment = sanitizedEnv(environment);
+  const args = [
+    '--unshare-all', '--share-net', '--die-with-parent', '--new-session', '--as-pid-1',
+    '--hostname', 'central-review',
+    '--ro-bind', '/usr', '/usr',
+    '--symlink', 'usr/bin', '/bin',
+    '--symlink', 'usr/sbin', '/sbin',
+    '--symlink', 'usr/lib', '/lib',
+    '--symlink', 'usr/lib64', '/lib64',
+    '--dev', '/dev',
+    '--proc', '/proc',
+    '--ro-bind', '/dev/null', '/proc/self/environ',
+    '--ro-bind', '/dev/null', '/proc/1/environ',
+    '--tmpfs', '/proc/1/task',
+    '--tmpfs', '/tmp',
+    '--tmpfs', '/home',
+    '--dir', SANDBOX_HOME,
+    '--dir', '/etc',
+    '--dir', '/etc/ssl',
+    '--dir', '/etc/ssl/certs',
+    '--dir', '/etc/pki',
+    '--dir', '/etc/pki/tls',
+    '--dir', '/etc/pki/tls/certs',
+    '--dir', '/etc/ca-certificates',
+    '--ro-bind-try', '/etc/resolv.conf', '/etc/resolv.conf',
+    '--ro-bind-try', '/etc/hosts', '/etc/hosts',
+    '--ro-bind-try', '/etc/nsswitch.conf', '/etc/nsswitch.conf',
+    '--ro-bind-try', '/etc/gai.conf', '/etc/gai.conf',
+    '--ro-bind-try', '/etc/ssl/certs/ca-certificates.crt', '/etc/ssl/certs/ca-certificates.crt',
+    '--ro-bind-try', '/etc/pki/tls/certs/ca-bundle.crt', '/etc/pki/tls/certs/ca-bundle.crt',
+    '--ro-bind-try', '/etc/ca-certificates', '/etc/ca-certificates',
+    '--dir', '/sandbox',
+    '--ro-bind', hostExecutable, SANDBOX_EXECUTABLE,
+    '--ro-bind', hostRipgrep, SANDBOX_RIPGREP,
+    '--dir', SANDBOX_REPOSITORY,
+    '--ro-bind', hostRepository, SANDBOX_REPOSITORY,
+    '--chdir', SANDBOX_REPOSITORY,
+    '--clearenv',
+  ];
+  const sandboxEnvironment = {
+    ...safeEnvironment,
+    HOME: SANDBOX_HOME,
+    PATH: SANDBOX_PATH,
+    USE_BUILTIN_RIPGREP: '0',
+  };
+  for (const [key, value] of Object.entries(sandboxEnvironment)) {
+    args.push('--setenv', key, value);
+  }
+  return [...args, '--', SANDBOX_EXECUTABLE, ...claudeArgs];
 }
 
 function extractStructuredOutput(envelope) {
@@ -103,7 +168,9 @@ export async function runFreshClaude({
   prompt,
   jsonSchemaPath,
   jsonSchema,
-  executable = 'claude',
+  executable,
+  ripgrepExecutable = process.env.RIPGREP_EXECUTABLE,
+  sandboxExecutable = process.env.BWRAP_EXECUTABLE ?? 'bwrap',
   cwd,
   environment,
   timeoutMs = 120_000,
@@ -121,9 +188,17 @@ export async function runFreshClaude({
     return { status: 'infra_error', error: diagnostic(`schema load: ${error.message}`, sourceEnvironment) };
   }
 
-  let args;
+  let claudeArgs;
+  let sandboxArgs;
   try {
-    args = buildClaudeArgs({ model, prompt, jsonSchema: schema });
+    claudeArgs = buildClaudeArgs({ model, prompt, jsonSchema: schema });
+    sandboxArgs = buildSandboxArgs({
+      executable,
+      ripgrepExecutable,
+      repositoryRoot: cwd,
+      environment: sourceEnvironment,
+      claudeArgs,
+    });
   } catch (error) {
     return { status: 'infra_error', error: diagnostic(`claude arguments: ${error.message}`, sourceEnvironment) };
   }
@@ -136,8 +211,7 @@ export async function runFreshClaude({
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(executable, args, {
-        cwd,
+      child = spawn(sandboxExecutable, sandboxArgs, {
         env: sanitizedEnv(sourceEnvironment),
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',

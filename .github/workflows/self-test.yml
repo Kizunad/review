@@ -23,8 +23,62 @@ jobs:
         with:
           node-version: '24'
           check-latest: false
+      - name: Install hash-pinned Claude Code
+        uses: ./.github/actions/setup-claude
+      - name: Install pinned Bubblewrap sandbox
+        shell: bash
+        env:
+          BWRAP_URL: https://security.ubuntu.com/ubuntu/pool/main/b/bubblewrap/bubblewrap_0.9.0-1ubuntu0.1_amd64.deb
+          BWRAP_SHA256: 1b506492bd9c7fd0cdb4f02ac822f1d3e336b0aead5113c1239baf8db5db562a
+        run: |
+          set -euo pipefail
+          mkdir -p _sandbox-package
+          curl --fail-with-body --silent --show-error --location "$BWRAP_URL" -o _sandbox-package/bubblewrap.deb
+          printf '%s  %s\n' "$BWRAP_SHA256" '_sandbox-package/bubblewrap.deb' | sha256sum --check --strict
+          dpkg-deb --extract _sandbox-package/bubblewrap.deb _sandbox-package/root
+          bwrap_executable="$GITHUB_WORKSPACE/_sandbox-package/root/usr/bin/bwrap"
+          [[ -f "$bwrap_executable" && -x "$bwrap_executable" ]] || { echo 'Pinned Bubblewrap executable is missing.' >&2; exit 1; }
+          [[ "$($bwrap_executable --version)" == 'bubblewrap 0.9.0' ]]
+          sudo chown root:root "$bwrap_executable"
+          sudo chmod 4755 "$bwrap_executable"
+          [[ "$(stat -c '%U:%G %a' "$bwrap_executable")" == 'root:root 4755' ]]
+          "$bwrap_executable" --unshare-all --share-net --die-with-parent --new-session \
+            --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 \
+            --dev /dev --proc /proc --tmpfs /tmp -- /bin/true
+          printf 'BWRAP_EXECUTABLE=%s\n' "$bwrap_executable" >> "$GITHUB_ENV"
+      - name: Smoke-test production Claude namespace
+        shell: bash
+        env:
+          CLAUDE_EXECUTABLE: ${{ env.CLAUDE_EXECUTABLE }}
+          RIPGREP_EXECUTABLE: ${{ env.RIPGREP_EXECUTABLE }}
+          BWRAP_EXECUTABLE: ${{ env.BWRAP_EXECUTABLE }}
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import { spawnSync } from "node:child_process";
+            import { buildSandboxArgs } from "./src/claude-cli.mjs";
+            const args = buildSandboxArgs({
+              executable: process.env.CLAUDE_EXECUTABLE,
+              ripgrepExecutable: process.env.RIPGREP_EXECUTABLE,
+              repositoryRoot: process.cwd(),
+              environment: {},
+              claudeArgs: ["--version"],
+            });
+            const result = spawnSync(process.env.BWRAP_EXECUTABLE, args, {
+              encoding: "utf8",
+              env: {},
+            });
+            if (result.error) throw result.error;
+            if (result.status !== 0 || result.stdout.trim() !== "2.1.220 (Claude Code)") {
+              throw new Error(`sandboxed Claude startup failed: status=${result.status} stdout=${JSON.stringify(result.stdout)} stderr=${JSON.stringify(result.stderr)}`);
+            }
+          '
       - name: Run syntax and contract tests
         shell: bash
+        env:
+          CLAUDE_EXECUTABLE: ${{ env.CLAUDE_EXECUTABLE }}
+          BWRAP_EXECUTABLE: ${{ env.BWRAP_EXECUTABLE }}
+          RIPGREP_EXECUTABLE: ${{ env.RIPGREP_EXECUTABLE }}
         run: |
           set -euo pipefail
           node --check src/*.mjs

@@ -76,6 +76,7 @@ function validVote(data, fingerprint) {
     && data.candidateFingerprint === fingerprint
     && (data.verdict === 'confirm' || data.verdict === 'reject')
     && typeof data.reachable === 'boolean'
+    && (data.verdict !== 'confirm' || data.reachable === true)
     && typeof data.evidence === 'string' && data.evidence.length > 0
     && typeof data.reason === 'string' && data.reason.length > 0;
 }
@@ -100,7 +101,17 @@ function validateStage(stage, data, request) {
   }
 }
 
-export function createClaudeRunner({ centralRoot, callerRoot, policy, repository, environment, executable = 'claude', timeoutMs = 120_000 }) {
+export function createClaudeRunner({
+  centralRoot,
+  callerRoot,
+  policy,
+  repository,
+  environment,
+  executable,
+  ripgrepExecutable = process.env.RIPGREP_EXECUTABLE,
+  sandboxExecutable = process.env.BWRAP_EXECUTABLE ?? 'bwrap',
+  timeoutMs = 120_000,
+}) {
   if (typeof centralRoot !== 'string' || centralRoot.length === 0) throw new TypeError('centralRoot is required');
   if (typeof callerRoot !== 'string' || callerRoot.length === 0) throw new TypeError('callerRoot is required');
   if (!policy || typeof policy !== 'object' || Array.isArray(policy)) throw new TypeError('policy must be an object');
@@ -130,6 +141,8 @@ export function createClaudeRunner({ centralRoot, callerRoot, policy, repository
         prompt,
         jsonSchema: schema,
         executable,
+        ripgrepExecutable,
+        sandboxExecutable,
         cwd: callerRoot,
         environment,
         timeoutMs,

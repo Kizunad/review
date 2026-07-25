@@ -49,5 +49,7 @@ test('validator and adjudication schemas constrain their decisions', async () =>
   const vote = JSON.parse(await readFile(path.join(schemasDirectory, 'validator-vote.schema.json'), 'utf8'));
   const adjudication = JSON.parse(await readFile(path.join(schemasDirectory, 'adjudication.schema.json'), 'utf8'));
   assert.deepEqual(vote.properties.verdict.enum, ['confirm', 'reject']);
+  assert.equal(vote.allOf[0].if.properties.verdict.const, 'confirm');
+  assert.equal(vote.allOf[0].then.properties.reachable.const, true);
   assert.deepEqual(adjudication.properties.decision.enum, ['accept', 'reject']);
 });

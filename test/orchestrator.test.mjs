@@ -23,7 +23,10 @@ test('keeps all Sol output out of Terra input and accepts four confirmations', a
       if (request.stage === 'plan') return plan();
       if (request.stage === 'summary') return { status: 'ok', data: { summary: 'one file', files: ['a.mjs'] } };
       if (request.stage === 'find') return { status: 'ok', data: [finding] };
-      if (request.stage === 'validate') return { status: 'ok', data: { verdict: request.validator === 4 ? 'reject' : 'confirm' } };
+      if (request.stage === 'validate') {
+        const verdict = request.validator === 4 ? 'reject' : 'confirm';
+        return { status: 'ok', data: { verdict, reachable: verdict === 'confirm' } };
+      }
       throw new Error(`unexpected ${request.stage}`);
     }),
   });
@@ -34,6 +37,28 @@ test('keeps all Sol output out of Terra input and accepts four confirmations', a
   assert.deepEqual(finder.summaries, [{ assignment: 'a', data: { summary: 'one file', files: ['a.mjs'] } }]);
   assert.equal(requests.filter((request) => request.stage === 'validate').length, 5);
   assert.ok(requests.filter((request) => request.stage === 'validate').every((request) => request.relatedDiff.includes('diff --git a/a.mjs b/a.mjs')));
+});
+
+
+test('starts one independent Terra finder for every taxonomy dimension', async () => {
+  const dimensions = ['correctness', 'security', 'performance'];
+  const finders = [];
+  const result = await runReview({
+    diff: 'diff --git a/a.mjs b/a.mjs\n', taxonomy: dimensions,
+    runner: runnerFor((request) => {
+      if (request.stage === 'plan') return plan();
+      if (request.stage === 'summary') return { status: 'ok', data: { summary: 'one file', files: ['a.mjs'] } };
+      if (request.stage === 'find') {
+        finders.push(request);
+        return { status: 'ok', data: [] };
+      }
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+  assert.deepEqual(result.findings, []);
+  assert.deepEqual(finders.map((request) => request.taxonomy).sort(), dimensions.sort());
+  assert.ok(finders.every((request) => request.model === 'terra'));
+  assert.ok(finders.every((request) => !('plan' in request) && !('transcript' in request)));
 });
 
 test('runs every Luna assignment and fills uncovered shards deterministically', async () => {
@@ -65,7 +90,10 @@ test('retries split votes three times then sends only structured votes to Sol ad
       if (request.stage === 'plan') return plan([]);
       if (request.stage === 'summary') return { status: 'ok', data: { summary: 's', files: [] } };
       if (request.stage === 'find') return { status: 'ok', data: [finding] };
-      if (request.stage === 'validate') return { status: 'ok', data: { verdict: request.validator < 2 ? 'confirm' : 'reject' } };
+      if (request.stage === 'validate') {
+        const verdict = request.validator < 2 ? 'confirm' : 'reject';
+        return { status: 'ok', data: { verdict, reachable: verdict === 'confirm' } };
+      }
       if (request.stage === 'adjudicate') return { status: 'ok', data: { decision: 'accept' } };
       throw new Error(`unexpected ${request.stage}`);
     }),
@@ -89,7 +117,8 @@ test('replaces failed validator seats until five valid votes are collected', asy
       if (request.stage === 'validate') {
         attempts += 1;
         if (attempts <= 2) return { status: 'infra_error', error: 'timeout' };
-        return { status: 'ok', data: { verdict: attempts === 7 ? 'reject' : 'confirm' } };
+        const verdict = attempts === 7 ? 'reject' : 'confirm';
+        return { status: 'ok', data: { verdict, reachable: verdict === 'confirm' } };
       }
       throw new Error(`unexpected ${request.stage}`);
     }),
@@ -97,6 +126,29 @@ test('replaces failed validator seats until five valid votes are collected', asy
   assert.equal(attempts, 7);
   assert.equal(result.findings.length, 1);
   assert.equal(result.failures.filter((failure) => failure.status === 'infra_error').length, 2);
+});
+
+test('replaces unreachable confirmation votes instead of counting them', async () => {
+  let attempts = 0;
+  const result = await runReview({
+    diff: 'd', taxonomy: ['security'],
+    runner: runnerFor((request) => {
+      if (request.stage === 'plan') return plan([]);
+      if (request.stage === 'summary') return { status: 'ok', data: { summary: 's', files: [] } };
+      if (request.stage === 'find') return { status: 'ok', data: [finding] };
+      if (request.stage === 'validate') {
+        attempts += 1;
+        if (attempts <= 2) return { status: 'ok', data: { verdict: 'confirm', reachable: false } };
+        const verdict = attempts === 7 ? 'reject' : 'confirm';
+        return { status: 'ok', data: { verdict, reachable: verdict === 'confirm' } };
+      }
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+  assert.equal(attempts, 7);
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.failures.filter((failure) => failure.status === 'schema_error').length, 2);
+  assert.ok(result.failures.every((failure) => !/could not collect 5/.test(failure.error)));
 });
 
 test('fails infrastructure when five validator seats cannot be filled and never adjudicates', async () => {

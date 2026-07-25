@@ -1,5 +1,5 @@
 import { dedupeFindings } from './findings.mjs';
-import { decideRound } from './vote-gate.mjs';
+import { decideRound, isCountableVote } from './vote-gate.mjs';
 import { shardDiff } from './diff-sharder.mjs';
 
 function stageFailure(stage, result) {
@@ -59,8 +59,13 @@ async function collectFiveVotes({ runner, candidate, diff, round, validatorCount
     });
     const results = await Promise.all(batch);
     for (const { seat, requestAttempt, validation } of results) {
+      const stage = `validate:${candidate.fingerprint}:${round}:${seat}:attempt-${requestAttempt + 1}`;
       if (!stageOk(validation)) {
-        failures.push(stageFailure(`validate:${candidate.fingerprint}:${round}:${seat}:attempt-${requestAttempt + 1}`, validation));
+        failures.push(stageFailure(stage, validation));
+        continue;
+      }
+      if (!isCountableVote(validation.data)) {
+        failures.push({ stage, status: 'schema_error', error: 'validator vote is not semantically countable' });
         continue;
       }
       votesBySeat.set(seat, validation.data);

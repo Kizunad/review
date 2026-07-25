@@ -26,7 +26,7 @@ jobs:
       review_api_key: ${{ secrets.REVIEW_CLAUDE_API_KEY }}
 ```
 
-The caller must not use `@main`, a tag, a short SHA, `secrets: inherit`, or a caller-controlled action/workflow ref. The referenced central commit is the release and rollback unit.
+The caller must not use `@main`, a tag, a short SHA, `secrets: inherit`, or a caller-controlled action/workflow ref. The referenced central commit is the release and rollback unit. The reusable workflow derives that commit from GitHub's called-job `job.workflow_ref` rather than the caller-bound `github.workflow_ref`, then verifies the checkout OID before running central code.
 
 ## Inputs
 
@@ -77,7 +77,7 @@ Rules must be declarative review data. A policy cannot configure tools, commands
 
 The reusable workflow obtains repository identity, `baseRefOid`, and `headRefOid` from the GitHub API. Both OIDs must be lowercase 40-character Git object IDs.
 
-The workflow stages the central runner and caller policy from trusted revisions, then checks out the exact PR head detached. Review proceeds only when `git rev-parse HEAD` equals the authoritative head OID. Before a Claude process receives the provider credential, the platform copies regular repository files into a temporary snapshot, rejects all symlinks and non-regular entries, excludes `.git`, `.claude`, `.mcp.json`, `CLAUDE.md`, and `AGENTS.md`, and supplies a temporary empty `HOME`. Claude also starts with `--bare --safe-mode --disable-slash-commands --strict-mcp-config` and an empty MCP configuration. The finalizer re-fetches the PR and refuses to publish a normal verdict if either OID changed.
+The workflow stages the central runner and caller policy from trusted revisions, then checks out the exact PR head detached. Review proceeds only when `git rev-parse HEAD` equals the authoritative head OID. Before a Claude process receives the provider credential, the platform copies regular repository files into a temporary snapshot, rejects all symlinks and non-regular entries, and excludes `.git`, `.claude`, `.mcp.json`, `CLAUDE.md`, and `AGENTS.md`. Each worker then enters a root-owned, hash-pinned setuid Bubblewrap mount namespace, avoiding dependence on Ubuntu 24.04 unprivileged-user-namespace policy. Only the snapshot is mounted read-only at `/workspace`, alongside the SHA-256-verified native Claude and ripgrep executables installed without package scripts, a minimal read-only runtime, DNS/TLS material, an empty `/home`, and an ephemeral `/tmp`; the original checkout and runner workspace are not mounted, and `/proc/self/environ` plus `/proc/1/environ` are masked. Claude starts with `--safe-mode --disable-slash-commands --strict-mcp-config`, an empty MCP configuration, and path-scoped allow rules for `Read`, `Glob`, and `Grep` under `/workspace` only. Native regression tests verify that safe mode advertises exactly those repository tools, normal `/workspace` Grep remains functional, and exact/concurrent procfs credential-oracle attempts fail without returning credential bytes. The finalizer re-fetches the PR and refuses to publish a normal verdict if either OID changed.
 
 ## Artifact contract
 
@@ -90,7 +90,7 @@ The review job uploads exactly the platform-defined outcome, Markdown, and manif
 - content whose SHA-256 differs from the signed manifest fields;
 - results produced for a stale PR head.
 
-Infrastructure failures are explicit outcomes and fail the stable review check; they are not converted into approval or findings.
+Infrastructure failures are explicit outcomes and fail the stable review check; they are not converted into approval or findings. Validator confirmations are countable only when the same vote marks the defect reachable; semantically contradictory confirmation votes are discarded and their seats are retried. The platform also maintains a caller-owned GitHub issue as a trusted failure log: three distinct run-attempt infrastructure failures within one hour open a one-hour automatic circuit. Circuit state reads fail open, and an exact trusted `/review` issue comment bypasses the circuit for a manual retry. An automatic run skipped by an open circuit remains a failing non-verdict check, so required review protection cannot turn green without a review. Gate failures never enter the circuit count.
 
 ## Upgrade and rollback
 
@@ -102,6 +102,6 @@ Infrastructure failures are explicit outcomes and fail the stable review check; 
 
 ## Fork pull requests
 
-The workflow must remain safe when PR code is fully attacker-controlled. It never executes caller-head scripts, project builds, package installation, hooks, repository Claude configuration, MCP configuration, or user memory. Symlinks and special files are rejected instead of followed. Claude Code is limited to regular-file reads from the sanitized snapshot, and the only write-capable process is the trusted finalizer after artifact and OID verification.
+The workflow must remain safe when PR code is fully attacker-controlled. It never executes caller-head scripts, project builds, package installation, hooks, repository Claude configuration, MCP configuration, or user memory. Symlinks and special files are rejected instead of followed. Claude Code can see only regular caller files in the read-only sanitized snapshot and cannot resolve absolute paths into the original checkout or runner workspace; the only write-capable process is the trusted finalizer after artifact and OID verification.
 
 The finalizer re-fetches PR OIDs immediately before validating and posting. GitHub's issue-comment API has no atomic expected-head precondition, so a narrow refetch-to-POST race cannot be eliminated; any subsequent run is still bound to its own exact head, run attempt, and artifact hashes.

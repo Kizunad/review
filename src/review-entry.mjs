@@ -96,7 +96,9 @@ export async function executeReview({
   policy,
   policySha256,
   environment,
-  executable = 'claude',
+  executable,
+  ripgrepExecutable = process.env.RIPGREP_EXECUTABLE,
+  sandboxExecutable = process.env.BWRAP_EXECUTABLE ?? 'bwrap',
   maxDiffChars = 40_000,
   maxShardChars = 12_000,
   workerTimeoutMs = 120_000,
@@ -119,6 +121,8 @@ export async function executeReview({
       repository,
       environment: { ...environment, HOME: snapshot.home },
       executable,
+      ripgrepExecutable,
+      sandboxExecutable,
       timeoutMs: positiveInteger(workerTimeoutMs, 'workerTimeoutMs', 120_000),
     });
     result = await runReview({

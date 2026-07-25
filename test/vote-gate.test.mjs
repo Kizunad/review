@@ -2,7 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { decideRound, tallyVotes } from '../src/vote-gate.mjs';
 
-const votes = (confirm) => Array.from({ length: 5 }, (_, index) => ({ verdict: index < confirm ? 'confirm' : 'reject' }));
+const votes = (confirm) => Array.from({ length: 5 }, (_, index) => ({
+  verdict: index < confirm ? 'confirm' : 'reject',
+  reachable: index < confirm,
+}));
 
 test('accepts four or five confirmations and rejects four or five rejections', () => {
   assert.equal(decideRound(votes(4), 1).decision, 'accept');
@@ -17,8 +20,10 @@ test('revotes split votes until the third round then adjudicates', () => {
   assert.equal(decideRound(votes(2), 3).decision, 'adjudicate');
 });
 
-test('excludes malformed or incomplete validator outputs', () => {
+test('excludes malformed, incomplete, and unreachable confirmation votes', () => {
   assert.throws(() => tallyVotes(votes(3).slice(0, 4)), /exactly 5/);
-  assert.throws(() => tallyVotes([...votes(4).slice(0, 4), { verdict: 'infra_error' }]), /structured/);
+  assert.throws(() => tallyVotes([...votes(4).slice(0, 4), { verdict: 'infra_error', reachable: false }]), /structured/);
+  assert.throws(() => tallyVotes([...votes(4).slice(0, 4), { verdict: 'confirm', reachable: false }]), /reachable/);
+  assert.doesNotThrow(() => tallyVotes([...votes(4).slice(0, 4), { verdict: 'reject', reachable: false }]));
   assert.throws(() => decideRound(votes(2), 0), /between/);
 });

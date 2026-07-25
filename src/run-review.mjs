@@ -8,6 +8,7 @@ import { sha256 } from './pr-context.mjs';
 const required = [
   'CENTRAL_ROOT', 'CALLER_ROOT', 'REPOSITORY', 'POLICY_FILE', 'DIFF_PATH', 'CONTEXT_PATH',
   'OUTPUT_DIRECTORY', 'WORKFLOW_REF', 'REVIEW_HEAD_OID', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT',
+  'CLAUDE_EXECUTABLE', 'RIPGREP_EXECUTABLE', 'BWRAP_EXECUTABLE',
 ];
 for (const key of required) {
   if (typeof process.env[key] !== 'string' || process.env[key].length === 0) throw new Error(`${key} is required`);
@@ -21,6 +22,9 @@ const policyBytes = await readFile(process.env.POLICY_FILE, 'utf8');
 const policy = JSON.parse(policyBytes);
 const policySha256 = sha256(policyBytes);
 const diff = await readFile(process.env.DIFF_PATH, 'utf8');
+const executable = path.resolve(process.env.CLAUDE_EXECUTABLE);
+const ripgrepExecutable = path.resolve(process.env.RIPGREP_EXECUTABLE);
+const sandboxExecutable = path.resolve(process.env.BWRAP_EXECUTABLE);
 const { review, markdown } = await executeReview({
   centralRoot,
   callerRoot,
@@ -29,6 +33,9 @@ const { review, markdown } = await executeReview({
   policy,
   policySha256,
   environment: process.env,
+  executable,
+  ripgrepExecutable,
+  sandboxExecutable,
   maxDiffChars: process.env.MAX_DIFF_CHARS,
   maxShardChars: process.env.MAX_SHARD_CHARS,
   workerTimeoutMs: process.env.WORKER_TIMEOUT_MS,

@@ -49,17 +49,21 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      issues: read
     outputs:
       base_oid: ${{ steps.pr.outputs.base_oid }}
       head_oid: ${{ steps.pr.outputs.head_oid }}
       workflow_ref: ${{ steps.central.outputs.workflow_ref }}
       central_repository: ${{ steps.central.outputs.central_repository }}
+      circuit_should_run: ${{ steps.circuit.outputs.should_run }}
+      circuit_open_until: ${{ steps.circuit.outputs.open_until }}
     steps:
       - name: Parse and checkout fixed central implementation
         id: central
         shell: bash
         env:
-          WORKFLOW_REF: ${{ github.workflow_ref }}
+          # github.workflow_ref remains bound to the caller inside a reusable workflow.
+          WORKFLOW_REF: ${{ job.workflow_ref }}
         run: |
           set -euo pipefail
           if [[ ! "$WORKFLOW_REF" =~ ^([^/]+/[^/]+)/\.github/workflows/review\.yml@([0-9a-fA-F]{40})$ ]]; then
@@ -93,6 +97,20 @@ jobs:
           jq -n --arg repository "$GITHUB_REPOSITORY" --argjson pullNumber "$PR_NUMBER" --arg baseOid "$base_oid" --arg headOid "$head_oid" \
             '{repository:$repository,pullNumber:$pullNumber,baseOid:$baseOid,headOid:$headOid}' > pr-context.json
           printf 'base_oid=%s\nhead_oid=%s\n' "$base_oid" "$head_oid" >> "$GITHUB_OUTPUT"
+      - name: Evaluate caller infrastructure circuit
+        id: circuit
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REVIEW_TRIGGER: ${{ github.event_name }}
+          REVIEW_COMMENT_BODY: ${{ github.event.comment.body || '' }}
+          CIRCUIT_THRESHOLD: '3'
+          CIRCUIT_WINDOW_MINUTES: '60'
+          CIRCUIT_DURATION_MINUTES: '60'
+        run: |
+          set -euo pipefail
+          node _central/src/run-circuit.mjs preflight
       - name: Upload trusted PR context
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -104,6 +122,7 @@ jobs:
   review:
     name: read-only review
     needs: preflight
+    if: needs.preflight.outputs.circuit_should_run == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -165,15 +184,29 @@ jobs:
         with:
           node-version: '24'
           check-latest: false
-      - name: Install pinned Claude Code
+      - name: Install hash-pinned Claude Code
+        uses: ./_central/.github/actions/setup-claude
+      - name: Install pinned Bubblewrap sandbox
         shell: bash
+        env:
+          BWRAP_URL: https://security.ubuntu.com/ubuntu/pool/main/b/bubblewrap/bubblewrap_0.9.0-1ubuntu0.1_amd64.deb
+          BWRAP_SHA256: 1b506492bd9c7fd0cdb4f02ac822f1d3e336b0aead5113c1239baf8db5db562a
         run: |
           set -euo pipefail
-          expected='sha512-ogBrvwkqF9f8okmnXKxmRNHuvtFxFEffe5pWdqOV3iQDxlUOKirFqnyWC7NGXXnDA4WkkbPH8pvSbwyCR2Auyw=='
-          actual="$(npm view @anthropic-ai/claude-code@2.1.220 dist.integrity --json | jq -er '.')"
-          [[ "$actual" == "$expected" ]] || { echo 'Claude Code package integrity mismatch.' >&2; exit 1; }
-          npm install --global --ignore-scripts @anthropic-ai/claude-code@2.1.220
-          [[ "$(claude --version)" == '2.1.220 (Claude Code)' ]]
+          mkdir -p _sandbox-package
+          curl --fail-with-body --silent --show-error --location "$BWRAP_URL" -o _sandbox-package/bubblewrap.deb
+          printf '%s  %s\n' "$BWRAP_SHA256" '_sandbox-package/bubblewrap.deb' | sha256sum --check --strict
+          dpkg-deb --extract _sandbox-package/bubblewrap.deb _sandbox-package/root
+          bwrap_executable="$GITHUB_WORKSPACE/_sandbox-package/root/usr/bin/bwrap"
+          [[ -f "$bwrap_executable" && -x "$bwrap_executable" ]] || { echo 'Pinned Bubblewrap executable is missing.' >&2; exit 1; }
+          [[ "$($bwrap_executable --version)" == 'bubblewrap 0.9.0' ]]
+          sudo chown root:root "$bwrap_executable"
+          sudo chmod 4755 "$bwrap_executable"
+          [[ "$(stat -c '%U:%G %a' "$bwrap_executable")" == 'root:root 4755' ]]
+          "$bwrap_executable" --unshare-all --share-net --die-with-parent --new-session \
+            --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 \
+            --dev /dev --proc /proc --tmpfs /tmp -- /bin/true
+          printf 'BWRAP_EXECUTABLE=%s\n' "$bwrap_executable" >> "$GITHUB_ENV"
       - name: Verify caller checkout and build immutable diff
         shell: bash
         env:
@@ -205,6 +238,9 @@ jobs:
           MAX_SHARD_CHARS: ${{ inputs.max_shard_chars }}
           WORKER_TIMEOUT_MS: ${{ inputs.worker_timeout_ms }}
           SHADOW: ${{ inputs.shadow }}
+          CLAUDE_EXECUTABLE: ${{ env.CLAUDE_EXECUTABLE }}
+          RIPGREP_EXECUTABLE: ${{ env.RIPGREP_EXECUTABLE }}
+          BWRAP_EXECUTABLE: ${{ env.BWRAP_EXECUTABLE }}
         run: |
           set -euo pipefail
           mkdir -p _output
@@ -239,7 +275,19 @@ jobs:
           path: _central
           persist-credentials: false
           fetch-depth: 1
+      - name: Publish circuit skip notice
+        if: needs.preflight.outputs.circuit_should_run == 'false'
+        continue-on-error: true
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          CIRCUIT_OPEN_UNTIL: ${{ needs.preflight.outputs.circuit_open_until }}
+        run: |
+          set -euo pipefail
+          node _central/src/run-circuit.mjs skip-comment
       - name: Checkout trusted caller base for policy binding
+        if: needs.preflight.outputs.circuit_should_run == 'true'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: ${{ github.repository }}
@@ -248,6 +296,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
       - name: Download bound review artifacts
+        if: needs.preflight.outputs.circuit_should_run == 'true'
         continue-on-error: true
         id: download
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -255,7 +304,9 @@ jobs:
           name: central-review-${{ github.run_id }}-${{ github.run_attempt }}
           path: _review
       - name: Refetch PR, validate artifacts, and publish
-        if: steps.download.outcome == 'success'
+        id: publish
+        continue-on-error: true
+        if: needs.preflight.outputs.circuit_should_run == 'true' && steps.download.outcome == 'success'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -311,23 +362,25 @@ jobs:
               },
             });
           '
+          decision="$(jq -er '
+            if (
+              type == "object" and
+              (keys | sort == ["decision","failures","findings","version"]) and
+              .version == "v1" and
+              (.decision == "approve" or .decision == "request_changes" or .decision == "infrastructure_failure") and
+              (.findings | type == "array") and
+              (.failures | type == "array")
+            ) then .decision else error("invalid final review schema") end
+          ' _review/review.json)"
+          printf 'decision=%s\n' "$decision" >> "$GITHUB_OUTPUT"
           jq -n --rawfile body _review/review.md '{body:$body}' | curl --fail-with-body --silent --show-error -X POST \
             -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" \
             -H 'Content-Type: application/json' \
             "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --data-binary @-
-          decision="$(jq -er '.decision' _review/review.json)"
-          jq -e '
-            type == "object" and
-            (keys | sort == ["decision","failures","findings","version"]) and
-            .version == "v1" and
-            (.decision == "approve" or .decision == "request_changes" or .decision == "infrastructure_failure") and
-            (.findings | type == "array") and
-            (.failures | type == "array")
-          ' _review/review.json >/dev/null
-          if [[ "$decision" == 'infrastructure_failure' ]]; then exit 2; fi
-          if [[ "$decision" == 'request_changes' && '${{ inputs.shadow }}' != 'true' ]]; then exit 3; fi
       - name: Publish missing-artifact infrastructure handoff
-        if: steps.download.outcome != 'success'
+        id: handoff
+        continue-on-error: true
+        if: needs.preflight.outputs.circuit_should_run == 'true' && steps.download.outcome != 'success'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -339,4 +392,48 @@ jobs:
             -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" \
             -H 'Content-Type: application/json' \
             "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --data-binary @-
-          exit 2
+      - name: Record infrastructure failure in caller circuit
+        if: >-
+          always() &&
+          needs.preflight.outputs.circuit_should_run == 'true' &&
+          (steps.download.outcome != 'success' ||
+           steps.publish.outcome == 'failure' ||
+           steps.publish.outputs.decision == 'infrastructure_failure')
+        continue-on-error: true
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
+          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
+          REVIEW_DECISION: ${{ steps.publish.outputs.decision }}
+          CIRCUIT_THRESHOLD: '3'
+          CIRCUIT_WINDOW_MINUTES: '60'
+          CIRCUIT_DURATION_MINUTES: '60'
+        run: |
+          set -euo pipefail
+          if [[ "$DOWNLOAD_OUTCOME" != 'success' ]]; then
+            phase='artifact_download'
+          elif [[ "$PUBLISH_OUTCOME" != 'success' ]]; then
+            phase='finalize_publish'
+          elif [[ "$REVIEW_DECISION" == 'infrastructure_failure' ]]; then
+            phase='review'
+          else
+            echo 'No infrastructure failure is eligible for circuit recording.' >&2
+            exit 1
+          fi
+          FAILURE_PHASE="$phase" node _central/src/run-circuit.mjs record
+      - name: Preserve circuit skip as a non-verdict failure
+        if: needs.preflight.outputs.circuit_should_run == 'false'
+        shell: bash
+        run: exit 1
+      - name: Preserve validated review outcome
+        if: >-
+          needs.preflight.outputs.circuit_should_run == 'true' &&
+          (steps.download.outcome != 'success' ||
+           steps.publish.outcome != 'success' ||
+           steps.handoff.outcome == 'failure' ||
+           steps.publish.outputs.decision == 'infrastructure_failure' ||
+           (steps.publish.outputs.decision == 'request_changes' && inputs.shadow != true))
+        shell: bash
+        run: exit 1

@@ -11,5 +11,21 @@
     "reachable": { "type": "boolean" },
     "evidence": { "type": "string", "minLength": 1, "maxLength": 4000 },
     "reason": { "type": "string", "minLength": 1, "maxLength": 4000 }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "verdict": { "const": "confirm" }
+        },
+        "required": ["verdict"]
+      },
+      "then": {
+        "properties": {
+          "reachable": { "const": true }
+        },
+        "required": ["reachable"]
+      }
+    }
+  ]
 }
