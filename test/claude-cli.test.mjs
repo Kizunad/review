@@ -482,6 +482,7 @@ test('redacts inherited credentials and provider endpoints from every returned d
   assert.equal(JSON.stringify(nonzero).includes(secret), false);
   assert.equal(JSON.stringify(nonzero).includes(baseUrl), false);
   assert.equal(JSON.stringify(nonzero).includes('github-secret'), false);
+  assert.match(nonzero.error, /claude exited 2: .*REDACTED/);
   assert.match(nonzero.stderr, /REDACTED/);
 
   const malformed = await runFreshClaude(baseRun({
