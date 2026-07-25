@@ -46,12 +46,12 @@ function diagnostic(value, environment, maxBytes = 4_000) {
 }
 
 function schemaJson(jsonSchema) {
-  if (jsonSchema && typeof jsonSchema === 'object' && !Array.isArray(jsonSchema)) return JSON.stringify(jsonSchema);
-  if (typeof jsonSchema === 'string') {
-    const parsed = JSON.parse(jsonSchema);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return JSON.stringify(parsed);
+  const parsed = typeof jsonSchema === 'string' ? JSON.parse(jsonSchema) : jsonSchema;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new TypeError('jsonSchema must be a JSON Schema object or JSON object string');
   }
-  throw new TypeError('jsonSchema must be a JSON Schema object or JSON object string');
+  const { $schema: _draft, $id: _identifier, ...cliSchema } = parsed;
+  return JSON.stringify(cliSchema);
 }
 
 export async function loadJsonSchema(jsonSchemaPath) {
