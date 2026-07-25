@@ -2,7 +2,7 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 
 export const READ_ONLY_TOOLS = 'Read,Glob,Grep';
-export const READ_ONLY_PERMISSIONS = 'Read(//workspace/**),Glob(//workspace/**),Grep(//workspace/**)';
+export const READ_ONLY_PERMISSIONS = 'Read(//workspace/**),Glob,Grep';
 const SANDBOX_REPOSITORY = '/workspace';
 const SANDBOX_HOME = '/home/claude';
 const SANDBOX_EXECUTABLE = '/sandbox/claude';
