@@ -30,7 +30,7 @@ bwrap --unshare-all --share-net --as-pid-1 ... \
 
 ## Trust model
 
-- Public workflow and action references must be pinned to a complete 40-character commit SHA.
+- Public workflow and action references must be pinned to a complete 40-character commit SHA. Preflight resolves the called central revision from GitHub's current run-attempt `referenced_workflows` metadata, requires the canonical `Kizunad/review/.github/workflows/review.yml@<SHA>` path and reported SHA to agree, then verifies the central checkout OID.
 - The caller's base and head OIDs are read from GitHub and checked before review and again before publication.
 - Pull-request files are copied into a temporary read-only review snapshot; repository scripts, symlinks, `.git`, hooks, MCP configuration, skills, `CLAUDE.md`, and `AGENTS.md` are excluded before Claude starts. Bubblewrap then makes that snapshot the only repository tree visible to Claude, so absolute paths cannot recover the original checkout or runner workspace.
 - The review job has no GitHub write permission. The finalizer is the only job that can publish a comment.

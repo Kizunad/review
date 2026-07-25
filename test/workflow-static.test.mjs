@@ -5,22 +5,37 @@ import { readFile } from 'node:fs/promises';
 const workflowPath = new URL('../.github/workflows/review.yml', import.meta.url);
 const setupClaudePath = new URL('../.github/actions/setup-claude/action.yml', import.meta.url);
 
+const consumerContractPath = new URL('../docs/consumer-contract.md', import.meta.url);
+
 async function workflow() {
   return readFile(workflowPath, 'utf8');
+}
+
+async function consumerContract() {
+  return readFile(consumerContractPath, 'utf8');
 }
 
 async function setupClaude() {
   return readFile(setupClaudePath, 'utf8');
 }
 
-test('workflow derives central checkout identity from immutable called workflow_ref', async () => {
+test('workflow derives central checkout identity from the immutable run reference', async () => {
   const yaml = await workflow();
-  assert.match(yaml, /WORKFLOW_REF: \$\{\{ job\.workflow_ref \}\}/);
-  assert.doesNotMatch(yaml, /WORKFLOW_REF: \$\{\{ github\.workflow_ref \}\}/);
-  assert.match(yaml, /\.github\/workflows\/review\\\.yml@\(\[0-9a-fA-F\]\{40\}\)/);
-  assert.match(yaml, /repository="\$\{BASH_REMATCH\[1\]\}"/);
-  assert.match(yaml, /ref="\$\{BASH_REMATCH\[2\],,\}"/);
-  assert.doesNotMatch(yaml, /github\.action_(?:repository|ref)/);
+  assert.match(yaml, /actions: read/);
+  assert.match(yaml, /actions\/runs\/\$GITHUB_RUN_ID\/attempts\/\$GITHUB_RUN_ATTEMPT/);
+  assert.match(yaml, /\.referenced_workflows\[\]\?/);
+  assert.match(yaml, /Kizunad\/review\/\.github\/workflows\/review\.yml@/);
+  assert.match(yaml, /expected exactly one central review workflow reference/);
+  assert.match(yaml, /select\(\.path == \(\"Kizunad\/review\/\.github\/workflows\/review\.yml@\" \+ \.sha\)\)/);
+  assert.match(yaml, /select\(test\(\"\^\[0-9a-f\]\{40\}\$\"\)\)/);
+  assert.match(yaml, /remote add origin https:\/\/github\.com\/Kizunad\/review\.git/);
+  assert.match(yaml, /repository: Kizunad\/review/);
+  assert.doesNotMatch(yaml, /job\.workflow_ref|github\.workflow_ref|github\.action_(?:repository|ref)/);
+});
+
+test('consumer grants the reusable workflow actions metadata permission', async () => {
+  const contract = await consumerContract();
+  assert.match(contract, /permissions:\n\s+actions: read\n\s+contents: read\n\s+pull-requests: write\n\s+issues: write/);
 });
 
 test('workflow obtains base history and never runs caller scripts', async () => {
@@ -79,6 +94,7 @@ test('workflow separates read-only control and review jobs from the only write-c
   const preflight = yaml.match(/\n  preflight:\n([\s\S]*?)\n  review:\n/)?.[1] ?? '';
   const review = yaml.match(/\n  review:\n([\s\S]*?)\n  finalize:\n/)?.[1] ?? '';
   const finalize = yaml.match(/\n  finalize:\n([\s\S]*)$/)?.[1] ?? '';
+  assert.match(preflight, /actions: read/);
   assert.match(preflight, /contents: read/);
   assert.match(preflight, /pull-requests: read/);
   assert.match(preflight, /issues: read/);
