@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createSanitizedCallerSnapshot, isExcludedReviewPath } from '../src/caller-snapshot.mjs';
@@ -22,6 +22,8 @@ test('copies regular caller files while excluding repository-controlled Claude c
   const snapshot = await createSanitizedCallerSnapshot(source);
   try {
     assert.equal(await readFile(path.join(snapshot.root, 'src', 'main.mjs'), 'utf8'), 'export const value = 1;\n');
+    assert.equal((await stat(snapshot.root)).mode & 0o222, 0);
+    assert.equal((await stat(path.join(snapshot.root, 'src', 'main.mjs'))).mode & 0o222, 0);
     await missing(path.join(snapshot.root, '.claude'));
     await missing(path.join(snapshot.root, '.mcp.json'));
     await missing(path.join(snapshot.root, 'CLAUDE.md'));

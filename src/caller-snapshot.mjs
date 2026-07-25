@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 
 const EXCLUDED_NAMES = new Set([
@@ -31,10 +31,20 @@ async function copyTree(sourceDirectory, targetDirectory, relativeDirectory = ''
       await copyTree(source, targetDirectory, relative);
     } else if (info.isFile()) {
       await mkdir(path.dirname(target), { recursive: true });
-      await writeFile(target, await readFile(source), { mode: info.mode & 0o777 });
+      await writeFile(target, await readFile(source), { mode: 0o444 });
     } else {
       throw new Error(`caller snapshot contains a non-regular entry: ${relative}`);
     }
+  }
+}
+
+async function makeTreeWritable(directory) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  await chmod(directory, 0o700);
+  for (const entry of entries) {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) await makeTreeWritable(target);
+    else await chmod(target, 0o600);
   }
 }
 
@@ -48,6 +58,7 @@ export async function createSanitizedCallerSnapshot(callerRoot, { temporaryRoot 
   await Promise.all([mkdir(root), mkdir(home)]);
   try {
     await copyTree(source, root);
+    await chmod(root, 0o555);
   } catch (error) {
     await rm(container, { recursive: true, force: true });
     throw error;
@@ -55,7 +66,10 @@ export async function createSanitizedCallerSnapshot(callerRoot, { temporaryRoot 
   return {
     root,
     home,
-    cleanup: () => rm(container, { recursive: true, force: true }),
+    cleanup: async () => {
+      await makeTreeWritable(root);
+      await rm(container, { recursive: true, force: true });
+    },
   };
 }
 
