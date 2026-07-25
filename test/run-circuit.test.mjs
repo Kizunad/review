@@ -71,12 +71,17 @@ test('exact manual review bypasses the circuit without reading or writing GitHub
 
 test('explicit trusted workflow dispatch retry bypasses the circuit without reading or writing state', async () => {
   const outputs = [];
+  let fetched = false;
   await runCircuit('preflight', {
     environment: environment({ REVIEW_TRIGGER: 'workflow_dispatch', CIRCUIT_MANUAL_RETRY: 'true' }),
-    fetchImpl: async () => { throw new Error('GitHub state must not be accessed'); },
+    fetchImpl: async () => {
+      fetched = true;
+      return response(200, []);
+    },
     append: async (_path, value) => outputs.push(value),
   });
   assert.deepEqual(outputs, ['should_run=true\n']);
+  assert.equal(fetched, false);
 });
 
 test('workflow dispatch without explicit retry opt-in remains protected by the open circuit', async () => {
