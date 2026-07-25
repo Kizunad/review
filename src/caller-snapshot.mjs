@@ -29,6 +29,7 @@ async function copyTree(sourceDirectory, targetDirectory, relativeDirectory = ''
     if (info.isDirectory()) {
       await mkdir(target, { recursive: true });
       await copyTree(source, targetDirectory, relative);
+      await chmod(target, 0o555);
     } else if (info.isFile()) {
       await mkdir(path.dirname(target), { recursive: true });
       await writeFile(target, await readFile(source), { mode: 0o444 });

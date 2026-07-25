@@ -23,6 +23,7 @@ test('copies regular caller files while excluding repository-controlled Claude c
   try {
     assert.equal(await readFile(path.join(snapshot.root, 'src', 'main.mjs'), 'utf8'), 'export const value = 1;\n');
     assert.equal((await stat(snapshot.root)).mode & 0o222, 0);
+    assert.equal((await stat(path.join(snapshot.root, 'src'))).mode & 0o222, 0);
     assert.equal((await stat(path.join(snapshot.root, 'src', 'main.mjs'))).mode & 0o222, 0);
     await missing(path.join(snapshot.root, '.claude'));
     await missing(path.join(snapshot.root, '.mcp.json'));
