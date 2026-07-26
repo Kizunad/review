@@ -61,3 +61,35 @@ export function shardDiff(diffText, { maxChars = 12_000 } = {}) {
   flush();
   return shards;
 }
+
+export function groupShards(shards, { maxChars } = {}) {
+  if (!Array.isArray(shards)) throw new TypeError('shards must be an array');
+  if (!Number.isInteger(maxChars) || maxChars < 1) throw new RangeError('maxChars must be positive');
+  const groups = [];
+  let current = [];
+  let chars = 0;
+  const flush = () => {
+    if (current.length > 0) {
+      groups.push({
+        index: groups.length,
+        shardIndexes: current.map((shard) => shard.index),
+        text: current.map((shard) => shard.text).join(''),
+        paths: [...new Set(current.flatMap((shard) => shard.paths))],
+      });
+    }
+    current = [];
+    chars = 0;
+  };
+
+  for (const shard of shards) {
+    if (!shard || !Number.isInteger(shard.index) || typeof shard.text !== 'string' || !Array.isArray(shard.paths)) {
+      throw new TypeError('every shard must contain an integer index, text, and paths');
+    }
+    if (shard.text.length > maxChars) throw new RangeError(`shard ${shard.index} exceeds ${maxChars} characters`);
+    if (current.length > 0 && chars + shard.text.length > maxChars) flush();
+    current.push(shard);
+    chars += shard.text.length;
+  }
+  flush();
+  return groups;
+}

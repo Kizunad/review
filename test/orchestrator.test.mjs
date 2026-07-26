@@ -102,6 +102,42 @@ test('runs every Luna assignment and fills uncovered shards deterministically', 
   assert.ok(summaries.length >= 2);
   assert.equal(summaries[0].model, 'luna');
   assert.ok(summaries.every((request) => !('plan' in request)));
+  assert.ok(summaries.every((request) => request.diff.length <= 30));
+});
+
+test('shards every finder dimension without dropping diff content or continuation paths', async () => {
+  const finders = [];
+  const summaries = [];
+  const diff = `diff --git a/large.js b/large.js\n${'x'.repeat(41)}`;
+  const shardCount = Math.ceil(diff.length / 10);
+  await runReview({
+    diff,
+    taxonomy: ['security', 'performance'],
+    maxShardChars: 10,
+    maxFinderChars: 15,
+    runner: runnerFor((request) => {
+      if (request.stage === 'plan') return plan([{ id: 'first', shardIndexes: [0] }]);
+      if (request.stage === 'summary') {
+        summaries.push(request);
+        return { status: 'ok', data: { summary: 'bounded', files: request.assignment.paths } };
+      }
+      if (request.stage === 'find') {
+        finders.push(request);
+        return { status: 'ok', data: [] };
+      }
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+  assert.equal(summaries.length, shardCount);
+  assert.ok(summaries.every((request) => request.diff.length <= 10));
+  assert.ok(summaries.every((request) => request.assignment.paths[0] === 'large.js'));
+  for (const dimension of ['security', 'performance']) {
+    const scoped = finders.filter((request) => request.taxonomy === dimension);
+    assert.ok(scoped.length > 1);
+    assert.ok(scoped.every((request) => request.diff.length <= 15));
+    assert.ok(scoped.every((request) => request.paths[0] === 'large.js'));
+    assert.equal(scoped.map((request) => request.diff).join(''), diff);
+  }
 });
 
 test('retries split votes three times then sends only structured votes to Sol adjudication', async () => {

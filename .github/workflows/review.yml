@@ -21,7 +21,7 @@ on:
         default: false
         type: boolean
       max_diff_chars:
-        description: Maximum immutable diff bytes
+        description: Maximum immutable diff characters per Terra finder
         required: false
         default: 40000
         type: number
