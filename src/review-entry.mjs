@@ -5,6 +5,7 @@ import { createClaudeRunner } from './claude-runner.mjs';
 import { createSanitizedCallerSnapshot } from './caller-snapshot.mjs';
 
 const SEVERITIES = new Set(['blocker', 'major', 'minor']);
+export const ABSOLUTE_DIFF_BYTES = 262_144;
 
 function markdownCodeSpan(value) {
   const text = String(value);
@@ -108,6 +109,7 @@ export async function executeReview({
   callerRoot,
   repository,
   diff,
+  diffByteLength,
   policy,
   policySha256,
   environment,
@@ -120,14 +122,23 @@ export async function executeReview({
   shadow = false,
 }) {
   if (typeof diff !== 'string') throw new TypeError('diff must be a string');
-  const diffLimit = positiveInteger(maxDiffChars, 'maxDiffChars', 40_000);
-  if (Buffer.byteLength(diff) > diffLimit) throw new Error(`diff exceeds ${diffLimit} bytes`);
+  const finderLimit = positiveInteger(maxDiffChars, 'maxDiffChars', 40_000);
+  const shardLimit = positiveInteger(maxShardChars, 'maxShardChars', 12_000);
   if (typeof policySha256 !== 'string' || !/^[0-9a-f]{64}$/.test(policySha256)) throw new Error('policySha256 must be a lowercase SHA-256');
   const trustedPolicy = parsePolicy(policy, repository);
   const catalog = JSON.parse(await readFile(path.join(centralRoot, 'catalog/review-dimensions.v1.json'), 'utf8'));
   let snapshot;
   let result;
   try {
+    const measuredDiffBytes = Buffer.byteLength(diff);
+    const diffBytes = diffByteLength === undefined ? measuredDiffBytes : Number(diffByteLength);
+    if (!Number.isSafeInteger(diffBytes) || diffBytes < measuredDiffBytes) {
+      throw new Error('diffByteLength must be a safe integer no smaller than the supplied diff bytes');
+    }
+    if (diffBytes > ABSOLUTE_DIFF_BYTES) {
+      throw new Error(`diff exceeds absolute ${ABSOLUTE_DIFF_BYTES} byte safety limit`);
+    }
+    if (finderLimit < shardLimit) throw new Error('maxDiffChars must be at least maxShardChars');
     snapshot = await createSanitizedCallerSnapshot(callerRoot);
     const runner = createClaudeRunner({
       centralRoot,
@@ -144,7 +155,8 @@ export async function executeReview({
       diff,
       taxonomy: catalog.dimensions,
       runner,
-      maxShardChars: positiveInteger(maxShardChars, 'maxShardChars', 12_000),
+      maxShardChars: shardLimit,
+      maxFinderChars: finderLimit,
     });
   } catch (error) {
     result = { findings: [], failures: [{ stage: 'orchestrator', status: 'infra_error', error: error.message }] };

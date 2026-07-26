@@ -46,7 +46,8 @@ function stagePrompt(request, { policy, repository, skillPath, skill }) {
         `Assigned taxonomy dimension:\n${json(request.taxonomy)}`,
         `Trusted caller policy:\n${json(policy)}`,
         `Validated Luna summaries:\n${json(request.summaries)}`,
-        `Immutable pull-request diff:\n${request.diff}`,
+        `Diff batch paths:\n${json(request.paths)}`,
+        `Immutable pull-request diff batch:\n${request.diff}`,
       ].join('\n\n');
     case 'validate':
       return [

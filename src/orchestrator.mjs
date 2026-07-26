@@ -1,6 +1,6 @@
 import { dedupeFindings } from './findings.mjs';
 import { decideRound, isCountableVote } from './vote-gate.mjs';
-import { shardDiff } from './diff-sharder.mjs';
+import { groupShards, shardDiff } from './diff-sharder.mjs';
 
 function stageFailure(stage, result) {
   return {
@@ -17,7 +17,7 @@ function stageOk(result) {
   return result?.status === 'ok';
 }
 
-function normalizeAssignments(plan, shards) {
+function normalizeAssignments(plan, shards, maxChars) {
   const byIndex = new Map(shards.map((shard) => [shard.index, shard]));
   const requested = Array.isArray(plan?.assignments) ? plan.assignments : [];
   const assignments = requested
@@ -30,14 +30,22 @@ function normalizeAssignments(plan, shards) {
     .filter(Boolean);
 
   if (!assignments.length) {
-    return shards.map((shard) => ({ id: `summary-${shard.index}`, shardIndexes: [shard.index] }));
+    assignments.push(...shards.map((shard) => ({ id: `summary-${shard.index}`, shardIndexes: [shard.index] })));
+  } else {
+    const covered = new Set(assignments.flatMap((assignment) => assignment.shardIndexes));
+    for (const shard of shards) {
+      if (!covered.has(shard.index)) assignments.push({ id: `summary-${shard.index}`, shardIndexes: [shard.index] });
+    }
   }
 
-  const covered = new Set(assignments.flatMap((assignment) => assignment.shardIndexes));
-  for (const shard of shards) {
-    if (!covered.has(shard.index)) assignments.push({ id: `summary-${shard.index}`, shardIndexes: [shard.index] });
-  }
-  return assignments;
+  return assignments.flatMap((assignment) => {
+    const groups = groupShards(assignment.shardIndexes.map((index) => byIndex.get(index)), { maxChars });
+    return groups.map((group, index) => ({
+      id: groups.length === 1 ? assignment.id : `${assignment.id}-part-${index + 1}`,
+      shardIndexes: group.shardIndexes,
+      paths: group.paths,
+    }));
+  });
 }
 
 function assignmentDiff(assignment, shards) {
@@ -89,6 +97,7 @@ export async function runReview({
   maxVoteRounds = 3,
   maxValidatorAttempts = 15,
   maxShardChars = 12_000,
+  maxFinderChars = 40_000,
 }) {
   if (!runner || typeof runner.run !== 'function') throw new TypeError('runner.run is required');
   if (!Array.isArray(taxonomy) || taxonomy.length === 0) throw new TypeError('taxonomy must be non-empty');
@@ -96,6 +105,10 @@ export async function runReview({
   if (!Number.isInteger(maxVoteRounds) || maxVoteRounds !== 3) throw new RangeError('review requires exactly three vote rounds');
   if (!Number.isInteger(maxValidatorAttempts) || maxValidatorAttempts < validatorCount) {
     throw new RangeError('maxValidatorAttempts must allow five valid votes');
+  }
+  if (!Number.isInteger(maxShardChars) || maxShardChars < 1) throw new RangeError('maxShardChars must be positive');
+  if (!Number.isInteger(maxFinderChars) || maxFinderChars < maxShardChars) {
+    throw new RangeError('maxFinderChars must be at least maxShardChars');
   }
 
   const failures = [];
@@ -108,7 +121,7 @@ export async function runReview({
   });
   if (!stageOk(plan)) return { findings: [], failures: [stageFailure('plan', plan)] };
 
-  const assignments = normalizeAssignments(plan.data, shards);
+  const assignments = normalizeAssignments(plan.data, shards, maxShardChars);
   const summaryResults = await Promise.all(assignments.map(async (assignment) => {
     const summary = await runner.run({
       stage: 'summary', model: 'luna', assignment, diff: assignmentDiff(assignment, shards),
@@ -125,21 +138,32 @@ export async function runReview({
   }
   if (summaries.length !== assignments.length) return { findings: [], failures };
 
-  const finderResults = await Promise.all(taxonomy.map(async (dimension) => ({
-    dimension,
-    finder: await runner.run({
-      stage: 'find', model: 'terra', taxonomy: dimension, diff, summaries,
-    }),
-  })));
+  const finderBatches = shards.length > 0
+    ? groupShards(shards, { maxChars: maxFinderChars })
+    : [{ index: 0, shardIndexes: [], text: '', paths: [] }];
+  const finderResults = (await Promise.all(taxonomy.map(async (dimension) => {
+    const results = [];
+    for (const batch of finderBatches) {
+      results.push({
+        dimension,
+        batch,
+        finder: await runner.run({
+          stage: 'find', model: 'terra', taxonomy: dimension, paths: batch.paths, diff: batch.text, summaries,
+        }),
+      });
+    }
+    return results;
+  }))).flat();
   const candidates = [];
-  for (const { dimension, finder } of finderResults) {
+  for (const { dimension, batch, finder } of finderResults) {
     const dimensionId = typeof dimension === 'string' ? dimension : dimension?.id ?? 'unknown';
+    const stage = `find:${dimensionId}:batch-${batch.index}`;
     if (!stageOk(finder)) {
-      failures.push(stageFailure(`find:${dimensionId}`, finder));
+      failures.push(stageFailure(stage, finder));
       continue;
     }
     if (!Array.isArray(finder.data)) {
-      failures.push({ stage: `find:${dimensionId}`, status: 'schema_error', error: 'finder data must be an array' });
+      failures.push({ stage, status: 'schema_error', error: 'finder data must be an array' });
       continue;
     }
     candidates.push(...finder.data);

@@ -6,7 +6,7 @@
 
 1. A fresh `sol` worker assigns immutable diff shards to one or more `luna` workers.
 2. Fresh `luna` workers summarize their assigned shards. They do not produce findings or verdicts.
-3. Fresh `terra` finders receive only the diff, validated Luna summaries, one taxonomy dimension, and the caller policy. Sol output and transcripts are never forwarded.
+3. Fresh `terra` finders receive one bounded diff batch, validated Luna summaries, one taxonomy dimension, and the caller policy. Larger diffs are split across fresh finders for every dimension without dropping content. Sol output and transcripts are never forwarded.
 4. Every deduplicated candidate receives five valid votes from fresh `terra` validators per round. A confirmation is valid only when the validator also proves the candidate reachable.
 5. Four or five confirmations accept; four or five rejections reject; a 2/3 split revotes with five fresh validators for at most three rounds.
 6. Only a third split round is sent to a fresh `sol` adjudicator. Infrastructure and schema failures never count as votes.
@@ -38,6 +38,7 @@ bwrap --unshare-all --share-net --as-pid-1 ... \
 - GitHub credentials are removed from every Claude child process.
 - Review artifacts are schema-checked and cryptographically bound to the exact repository, PR, run ID, run attempt, workflow revision, policy SHA-256, base OID, and head OID.
 - Provider, CLI, timeout, schema, stale-head, and artifact failures fail closed as infrastructure failures rather than fabricated code findings.
+- Raw diffs are read with a fixed 262,144-byte safety bound. The lower caller budget controls each Terra finder batch rather than rejecting the complete diff before deterministic sharding; absolute-limit failures still produce bound infrastructure artifacts.
 
 ## Repository layout
 
