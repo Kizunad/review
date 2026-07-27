@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import {
+  MAX_PUBLIC_FAILURES,
+  MAX_PUBLIC_FINDINGS,
+  MAX_PUBLIC_SUGGESTIONS,
+  PUBLIC_FAILURE_TEXT_LIMITS,
+  PUBLIC_FINDING_TEXT_LIMITS,
+} from '../src/review-entry.mjs';
 
 const workflowPath = new URL('../.github/workflows/review.yml', import.meta.url);
 const setupClaudePath = new URL('../.github/actions/setup-claude/action.yml', import.meta.url);
@@ -147,16 +154,42 @@ test('workflow keeps a caller-owned fail-open circuit around automatic infrastru
 
 test('finalizer accepts only the layered v2 review envelope', async () => {
   const yaml = await workflow();
+  const boundedString = (field, limit) => {
+    assert.match(
+      yaml,
+      new RegExp(`\\.${field} \\| type == "string" and length >= 1 and length <= ${limit}`),
+    );
+  };
   assert.match(yaml, /keys \| sort == \["decision","failures","findings","omittedSuggestions","suggestions","version"\]/);
   assert.match(yaml, /\.version == "v2"/);
-  assert.match(yaml, /\.findings \| type == "array" and length <= 128/);
+  assert.match(
+    yaml,
+    new RegExp(`\\.findings \\| type == "array" and length <= ${MAX_PUBLIC_FINDINGS}`),
+  );
   assert.match(yaml, /keys \| sort == \["evidence","fingerprint","level","line","path","rootCause","taxonomy","title"\]/);
   assert.match(yaml, /\.level == "blocker" or \.level == "major" or \.level == "minor"/);
-  assert.match(yaml, /\.suggestions \| type == "array" and length <= 16/);
+  assert.match(
+    yaml,
+    new RegExp(`\\.suggestions \\| type == "array" and length <= ${MAX_PUBLIC_SUGGESTIONS}`),
+  );
+  assert.ok(
+    yaml.includes(`test("^[a-z][a-z0-9-]{0,${PUBLIC_FINDING_TEXT_LIMITS.taxonomy - 1}}$")`),
+    'workflow taxonomy bound must match the runtime contract',
+  );
+  for (const field of ['path', 'title', 'evidence', 'rootCause']) {
+    boundedString(field, PUBLIC_FINDING_TEXT_LIMITS[field]);
+  }
   assert.match(yaml, /\.level == "suggestion"/);
   assert.match(yaml, /\.omittedSuggestions \| type == "number" and \. >= 0 and floor == \./);
+  assert.match(
+    yaml,
+    new RegExp(`\\.failures \\| type == "array" and length <= ${MAX_PUBLIC_FAILURES}`),
+  );
+  for (const field of ['stage', 'error', 'diagnostic']) {
+    boundedString(field, PUBLIC_FAILURE_TEXT_LIMITS[field]);
+  }
   assert.match(yaml, /keys \| sort == \["diagnostic","error","stage","status"\]/);
-  assert.match(yaml, /if \.decision == "infrastructure_failure"[\s\S]*?then \(\.findings \| length == 0\)[\s\S]*?else \(\.failures \| length == 0\)/);
+  assert.match(yaml, /if \.decision == "infrastructure_failure"[\s\S]*?then \(\.findings \| length == 0\)[\s\S]*?elif \.decision == "approve"[\s\S]*?all\(\.findings\[\]; \.level == "minor"\)[\s\S]*?else \(\.failures \| length == 0\) and \(\.findings \| length >= 1\)/);
   assert.doesNotMatch(yaml, /\.version == "v1"/);
 });
 

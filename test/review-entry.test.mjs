@@ -195,11 +195,18 @@ test('publishes at most sixteen ranked suggestions and reports the omitted count
   assert.equal(partitioned.findings[0].level, 'minor');
   assert.equal(partitioned.suggestions.length, MAX_PUBLIC_SUGGESTIONS);
   assert.equal(partitioned.omittedSuggestions, 4);
-  const ranked = [...suggestions].sort((left, right) => right.voteSupport - left.voteSupport
-    || left.fingerprint.localeCompare(right.fingerprint));
+  const expectedIndexes = [
+    4, 9, 14, 19,
+    3, 8, 13, 18,
+    2, 7, 12, 17,
+    1, 6, 11, 16,
+  ];
+  const expectedFingerprints = expectedIndexes.map(
+    (index) => index.toString(16).padStart(64, '0'),
+  );
   assert.deepEqual(
     partitioned.suggestions.map((entry) => entry.fingerprint),
-    ranked.slice(0, MAX_PUBLIC_SUGGESTIONS).map((entry) => entry.fingerprint),
+    expectedFingerprints,
   );
   assert.ok(partitioned.suggestions.every((entry) => !('voteSupport' in entry)));
 });
@@ -487,6 +494,40 @@ test('keeps Markdown decision aligned with a normal JSON verdict when detail sec
   assert.ok(Buffer.byteLength(markdown) <= MAX_REVIEW_MARKDOWN_BYTES);
   assert.match(markdown, /\*\*Decision:\*\* ` request_changes `/);
   assert.doesNotMatch(markdown, /\*\*Decision:\*\* ` infrastructure_failure `/);
+});
+
+test('fails closed on contradictory final review decisions', () => {
+  const finding = {
+    taxonomy: 'correctness', path: 'src/a.mjs', line: 1, title: 'Title', evidence: 'Evidence',
+    rootCause: 'Cause', level: 'major', fingerprint: 'a'.repeat(64),
+  };
+  for (const contradictory of [
+    {
+      version: 'v2', decision: 'approve', findings: [finding],
+      suggestions: [], omittedSuggestions: 0, failures: [],
+    },
+    {
+      version: 'v2', decision: 'request_changes', findings: [],
+      suggestions: [], omittedSuggestions: 0, failures: [],
+    },
+    {
+      version: 'v2', decision: 'infrastructure_failure', findings: [],
+      suggestions: [], omittedSuggestions: 0, failures: [],
+    },
+  ]) {
+    const compacted = compactFinalReview(contradictory);
+    assert.equal(compacted.decision, 'infrastructure_failure');
+    assert.equal(compacted.failures[0].stage, 'artifact-budget');
+  }
+
+  assert.equal(compactFinalReview({
+    version: 'v2', decision: 'approve', findings: [{ ...finding, level: 'minor' }],
+    suggestions: [], omittedSuggestions: 0, failures: [],
+  }).decision, 'approve');
+  assert.equal(compactFinalReview({
+    version: 'v2', decision: 'request_changes', findings: [finding],
+    suggestions: [], omittedSuggestions: 0, failures: [],
+  }).decision, 'request_changes');
 });
 
 test('fails closed when final-review item cardinality exceeds the schema contract', () => {

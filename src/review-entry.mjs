@@ -1,13 +1,26 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { runReview } from './orchestrator.mjs';
-import { createClaudeRunner } from './claude-runner.mjs';
 import { createSanitizedCallerSnapshot } from './caller-snapshot.mjs';
+import { createClaudeRunner } from './claude-runner.mjs';
+import { compareStrings } from './deterministic.mjs';
+import { runReview } from './orchestrator.mjs';
+import {
+  MAX_PUBLIC_FAILURES,
+  MAX_PUBLIC_FINDINGS,
+  MAX_PUBLIC_SUGGESTIONS,
+  PUBLIC_FAILURE_TEXT_LIMITS,
+  PUBLIC_FINDING_TEXT_LIMITS,
+} from './review-limits.mjs';
+
+export {
+  MAX_PUBLIC_FAILURES,
+  MAX_PUBLIC_FINDINGS,
+  MAX_PUBLIC_SUGGESTIONS,
+  PUBLIC_FAILURE_TEXT_LIMITS,
+  PUBLIC_FINDING_TEXT_LIMITS,
+};
 
 const LEVELS = new Set(['blocker', 'major', 'minor', 'suggestion']);
-const MAX_PUBLIC_FAILURES = 512;
-const MAX_PUBLIC_FINDINGS = 128;
-export const MAX_PUBLIC_SUGGESTIONS = 16;
 export const MAX_REVIEW_JSON_BYTES = 1_048_576;
 export const MAX_REVIEW_MARKDOWN_BYTES = 65_536;
 export const ABSOLUTE_DIFF_BYTES = 1_048_576;
@@ -83,7 +96,7 @@ export function partitionValidatedFindings(findings) {
     }
   }
   advisory.sort((left, right) => right.voteSupport - left.voteSupport
-    || left.publicValue.fingerprint.localeCompare(right.publicValue.fingerprint));
+    || compareStrings(left.publicValue.fingerprint, right.publicValue.fingerprint));
   return {
     findings: defects,
     suggestions: advisory.slice(0, MAX_PUBLIC_SUGGESTIONS).map(({ publicValue }) => publicValue),
@@ -114,11 +127,17 @@ function nonEmptyBoundedText(value, maxLength, fallback) {
 
 function publicFailure(failure) {
   return {
-    stage: nonEmptyBoundedText(failure?.stage, 300, 'unknown-stage'),
+    stage: nonEmptyBoundedText(failure?.stage, PUBLIC_FAILURE_TEXT_LIMITS.stage, 'unknown-stage'),
     status: failureStatus(failure?.status),
-    error: nonEmptyBoundedText(failure?.error, 4_000, 'runner returned no result'),
+    error: nonEmptyBoundedText(failure?.error, PUBLIC_FAILURE_TEXT_LIMITS.error, 'runner returned no result'),
     ...(typeof failure?.diagnostic === 'string' && failure.diagnostic.trim().length > 0
-      ? { diagnostic: nonEmptyBoundedText(failure.diagnostic, 4_000, 'diagnostic unavailable') }
+      ? {
+        diagnostic: nonEmptyBoundedText(
+          failure.diagnostic,
+          PUBLIC_FAILURE_TEXT_LIMITS.diagnostic,
+          'diagnostic unavailable',
+        ),
+      }
       : {}),
   };
 }
@@ -236,6 +255,7 @@ export function compactFinalReview(review, maxBytes = MAX_REVIEW_JSON_BYTES) {
     throw new TypeError('review omittedSuggestions must be a non-negative safe integer');
   }
   if (review.decision === 'infrastructure_failure') {
+    if (review.failures.length === 0) return artifactBudgetFallback();
     if (review.findings.length === 0
       && review.suggestions.length === 0
       && review.omittedSuggestions === 0
@@ -252,9 +272,13 @@ export function compactFinalReview(review, maxBytes = MAX_REVIEW_JSON_BYTES) {
       failures,
     };
   }
-  if (review.findings.length <= MAX_PUBLIC_FINDINGS
+  const decisionContentsAreValid = review.failures.length === 0
+    && (review.decision === 'approve'
+      ? review.findings.every((finding) => finding?.level === 'minor')
+      : review.decision === 'request_changes' && review.findings.length > 0);
+  if (decisionContentsAreValid
+    && review.findings.length <= MAX_PUBLIC_FINDINGS
     && review.suggestions.length <= MAX_PUBLIC_SUGGESTIONS
-    && review.failures.length === 0
     && reviewJsonBytes(review) <= maxBytes) return review;
   const fallback = artifactBudgetFallback();
   if (reviewJsonBytes(fallback) > maxBytes) throw new Error('review.json publication fallback exceeds size limit');

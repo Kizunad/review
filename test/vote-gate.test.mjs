@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { calibrateLevel, decideRound, tallyVotes } from '../src/vote-gate.mjs';
+import { validAdjudication } from '../src/review-contract.mjs';
+import {
+  calibrateLevel,
+  decideRound,
+  isCountableVote,
+  tallyVotes,
+} from '../src/vote-gate.mjs';
 
 const fingerprint = 'a'.repeat(64);
 function votes(confirm, levels = Array.from({ length: 5 }, (_, index) => (index < confirm ? 'major' : 'suggestion'))) {
@@ -97,4 +103,35 @@ test('excludes malformed, incomplete, and contradictory votes', () => {
     () => tallyVotes([...votes(4).slice(0, 4), { ...votes(4)[4], level: 'suggestion' }]),
   );
   assert.throws(() => decideRound(votes(2), 0), /between/);
+});
+
+test('shares exact v2 vote and adjudication semantics across review stages', () => {
+  const confirmation = votes(4)[0];
+  assert.equal(isCountableVote(confirmation), true);
+  assert.equal(isCountableVote(confirmation, fingerprint), true);
+  assert.equal(isCountableVote(confirmation, 'b'.repeat(64)), false);
+  assert.equal(isCountableVote({ ...confirmation, evidence: '😀'.repeat(4_000) }), true);
+  assert.equal(isCountableVote({ ...confirmation, evidence: '😀'.repeat(4_001) }), false);
+  assert.equal(isCountableVote({ ...confirmation, extra: true }), false);
+
+  const accepted = {
+    version: 'v2',
+    candidateFingerprint: fingerprint,
+    decision: 'accept',
+    level: 'major',
+    reason: 'defect survives refutation',
+  };
+  const rejected = {
+    version: 'v2',
+    candidateFingerprint: fingerprint,
+    decision: 'reject',
+    reason: 'defect is not proven',
+  };
+  assert.equal(validAdjudication(accepted, fingerprint), true);
+  assert.equal(validAdjudication(rejected, fingerprint), true);
+  assert.equal(validAdjudication({ ...rejected, level: 'suggestion' }, fingerprint), false);
+  assert.equal(validAdjudication({ ...accepted, level: undefined }, fingerprint), false);
+  assert.equal(validAdjudication({ ...accepted, reason: '😀'.repeat(4_001) }, fingerprint), false);
+  assert.equal(validAdjudication({ ...accepted, extra: true }, fingerprint), false);
+  assert.equal(validAdjudication(accepted, 'b'.repeat(64)), false);
 });

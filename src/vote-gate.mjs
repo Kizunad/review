@@ -1,30 +1,7 @@
 import { REVIEW_LEVELS } from './findings.mjs';
+import { isCountableVote } from './review-contract.mjs';
 
-const VALID_VERDICTS = new Set(['confirm', 'reject', 'split']);
-const VALID_LEVELS = new Set(REVIEW_LEVELS);
-const FINGERPRINT = /^[a-f0-9]{64}$/;
-const VOTE_FIELDS = ['version', 'candidateFingerprint', 'verdict', 'reachable', 'level', 'evidence', 'reason'].sort();
-
-function boundedText(value, maxLength) {
-  return typeof value === 'string' && [...value].length >= 1 && [...value].length <= maxLength;
-}
-
-export function isCountableVote(vote) {
-  if (vote === null || typeof vote !== 'object' || Array.isArray(vote)) return false;
-  const fields = Object.keys(vote).sort();
-  return fields.length === VOTE_FIELDS.length
-    && fields.every((field, index) => field === VOTE_FIELDS[index])
-    && vote.version === 'v2'
-    && FINGERPRINT.test(vote.candidateFingerprint)
-    && VALID_VERDICTS.has(vote.verdict)
-    && typeof vote.reachable === 'boolean'
-    && VALID_LEVELS.has(vote.level)
-    && boundedText(vote.evidence, 4_000)
-    && boundedText(vote.reason, 4_000)
-    && (vote.verdict === 'confirm'
-      ? vote.reachable === true
-      : vote.reachable === false && vote.level === 'suggestion');
-}
+export { isCountableVote };
 
 function assertRound(round, maxRounds) {
   if (!Number.isInteger(round) || round < 1 || round > maxRounds) {

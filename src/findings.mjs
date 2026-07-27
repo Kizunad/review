@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
+import { compareStrings } from './deterministic.mjs';
 import { safeRelativePath } from './diff-sharder.mjs';
+import { PUBLIC_FINDING_TEXT_LIMITS } from './review-limits.mjs';
 
 const REQUIRED = ['taxonomy', 'path', 'line', 'title', 'evidence', 'rootCause', 'level'];
 const FINDER_FIELDS = ['version', ...REQUIRED].sort();
@@ -9,13 +11,6 @@ const TAXONOMY_ID = /^[a-z][a-z0-9-]{0,63}$/;
 const FINGERPRINT = /^[a-f0-9]{64}$/;
 const MAX_FINDER_CANDIDATES = 128;
 export const MAX_CONSOLIDATION_CANDIDATES = 128;
-const MAX_TEXT_LENGTH = Object.freeze({
-  taxonomy: 64,
-  path: 500,
-  title: 180,
-  evidence: 6_000,
-  rootCause: 2_000,
-});
 
 function textLength(value) {
   return [...value].length;
@@ -23,8 +18,8 @@ function textLength(value) {
 
 function normalizedText(value, name) {
   if (typeof value !== 'string' || value.trim() === '') throw new TypeError(`${name} must be a non-empty string`);
-  if (MAX_TEXT_LENGTH[name] !== undefined && textLength(value) > MAX_TEXT_LENGTH[name]) {
-    throw new TypeError(`${name} must be at most ${MAX_TEXT_LENGTH[name]} characters`);
+  if (PUBLIC_FINDING_TEXT_LIMITS[name] !== undefined && textLength(value) > PUBLIC_FINDING_TEXT_LIMITS[name]) {
+    throw new TypeError(`${name} must be at most ${PUBLIC_FINDING_TEXT_LIMITS[name]} characters`);
   }
   return value.trim().replace(/\s+/g, ' ');
 }
@@ -120,7 +115,7 @@ export function dedupeFindings(findings) {
     }
     unique.set(fingerprint, { ...canonical, fingerprint, provenance: [canonical] });
   }
-  return [...unique.values()].sort((a, b) => a.fingerprint.localeCompare(b.fingerprint));
+  return [...unique.values()].sort((a, b) => compareStrings(a.fingerprint, b.fingerprint));
 }
 
 export function consolidateFindings(findings, consolidation) {
@@ -178,8 +173,8 @@ export function consolidateFindings(findings, consolidation) {
       throw new TypeError(`cluster-${clusterIndex} cannot merge candidates from different paths`);
     }
     const validationCandidates = [...members]
-      .sort((left, right) => left.rootCause.localeCompare(right.rootCause)
-        || left.fingerprint.localeCompare(right.fingerprint))
+      .sort((left, right) => compareStrings(left.rootCause, right.rootCause)
+        || compareStrings(left.fingerprint, right.fingerprint))
       .map((candidate) => ({
         taxonomy: candidate.taxonomy,
         path: candidate.path,
@@ -204,5 +199,5 @@ export function consolidateFindings(findings, consolidation) {
     const missing = [...candidates.keys()].find((fingerprint) => !seen.has(fingerprint));
     throw new TypeError(`consolidation omitted member ${missing}`);
   }
-  return merged.sort((a, b) => a.fingerprint.localeCompare(b.fingerprint));
+  return merged.sort((a, b) => compareStrings(a.fingerprint, b.fingerprint));
 }

@@ -3,6 +3,13 @@ import assert from 'node:assert/strict';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createManifest } from '../src/artifact-manifest.mjs';
+import {
+  MAX_PUBLIC_FAILURES,
+  MAX_PUBLIC_FINDINGS,
+  MAX_PUBLIC_SUGGESTIONS,
+  PUBLIC_FAILURE_TEXT_LIMITS,
+  PUBLIC_FINDING_TEXT_LIMITS,
+} from '../src/review-entry.mjs';
 
 const schemasDirectory = path.resolve('schemas');
 
@@ -78,10 +85,100 @@ test('v2 schemas separate validated defects from bounded suggestions', async () 
     'failures',
   ]);
   assert.equal(review.properties.version.const, 'v2');
+  assert.equal(review.properties.findings.maxItems, MAX_PUBLIC_FINDINGS);
   assert.deepEqual(review.properties.findings.items.properties.level.enum, ['blocker', 'major', 'minor']);
-  assert.equal(review.properties.suggestions.maxItems, 16);
+  assert.equal(review.properties.suggestions.maxItems, MAX_PUBLIC_SUGGESTIONS);
   assert.equal(review.properties.suggestions.items.properties.level.const, 'suggestion');
+  assert.equal(review.properties.failures.maxItems, MAX_PUBLIC_FAILURES);
+  for (const property of ['taxonomy', 'path', 'title', 'evidence', 'rootCause']) {
+    const itemProperty = review.properties.findings.items.properties[property];
+    const suggestionProperty = review.properties.suggestions.items.properties[property];
+    if (property === 'taxonomy') {
+      const bound = PUBLIC_FINDING_TEXT_LIMITS.taxonomy - 1;
+      assert.equal(itemProperty.pattern, `^[a-z][a-z0-9-]{0,${bound}}$`);
+      assert.equal(suggestionProperty.pattern, itemProperty.pattern);
+    } else {
+      assert.equal(itemProperty.maxLength, PUBLIC_FINDING_TEXT_LIMITS[property]);
+      assert.equal(suggestionProperty.maxLength, PUBLIC_FINDING_TEXT_LIMITS[property]);
+    }
+  }
+  for (const property of ['stage', 'error', 'diagnostic']) {
+    assert.equal(
+      review.properties.failures.items.properties[property].maxLength,
+      PUBLIC_FAILURE_TEXT_LIMITS[property],
+    );
+  }
   assert.equal(review.properties.omittedSuggestions.minimum, 0);
+});
+
+test('final review schema locks decision and content semantics', async () => {
+  const schema = JSON.parse(await readFile(path.join(schemasDirectory, 'final-review.schema.json'), 'utf8'));
+  const obeysProperties = (review, properties) => Object.entries(properties ?? {})
+    .every(([property, rule]) => {
+      const value = review[property];
+      if ('const' in rule && value !== rule.const) return false;
+      if ('minItems' in rule && value.length < rule.minItems) return false;
+      if ('maxItems' in rule && value.length > rule.maxItems) return false;
+      const requiredLevel = rule.items?.properties?.level?.const;
+      return requiredLevel === undefined || value.every((item) => item.level === requiredLevel);
+    });
+  const obeysConditional = (review, conditional) => {
+    const matches = Object.entries(conditional.if.properties)
+      .every(([property, rule]) => review[property] === rule.const);
+    const branch = matches ? conditional.then : conditional.else;
+    if (!branch) return true;
+    if (!obeysProperties(review, branch.properties)) return false;
+    if (!branch.if) return true;
+    const nestedMatches = Object.entries(branch.if.properties)
+      .every(([property, rule]) => review[property] === rule.const);
+    const nestedBranch = nestedMatches ? branch.then : branch.else;
+    return !nestedBranch || obeysProperties(review, nestedBranch.properties);
+  };
+  const acceptsDecisionContract = (review) => schema.allOf
+    .every((conditional) => obeysConditional(review, conditional));
+  const base = {
+    version: 'v2',
+    decision: 'approve',
+    findings: [],
+    suggestions: [],
+    omittedSuggestions: 0,
+    failures: [],
+  };
+  const major = { level: 'major' };
+  const minor = { level: 'minor' };
+  const suggestion = { level: 'suggestion' };
+  const failure = { status: 'infra_error' };
+
+  assert.equal(acceptsDecisionContract(base), true);
+  assert.equal(acceptsDecisionContract({ ...base, findings: [minor] }), true);
+  assert.equal(acceptsDecisionContract({ ...base, findings: [major] }), false);
+  assert.equal(acceptsDecisionContract({ ...base, decision: 'request_changes', findings: [major] }), true);
+  assert.equal(acceptsDecisionContract({ ...base, decision: 'request_changes' }), false);
+  assert.equal(acceptsDecisionContract({ ...base, decision: 'request_changes', failures: [failure] }), false);
+  assert.equal(acceptsDecisionContract({
+    ...base,
+    decision: 'infrastructure_failure',
+    failures: [failure],
+  }), true);
+  assert.equal(acceptsDecisionContract({ ...base, decision: 'infrastructure_failure' }), false);
+  assert.equal(acceptsDecisionContract({
+    ...base,
+    decision: 'infrastructure_failure',
+    findings: [minor],
+    failures: [failure],
+  }), false);
+  assert.equal(acceptsDecisionContract({
+    ...base,
+    decision: 'infrastructure_failure',
+    suggestions: [suggestion],
+    failures: [failure],
+  }), false);
+  assert.equal(acceptsDecisionContract({
+    ...base,
+    decision: 'infrastructure_failure',
+    omittedSuggestions: 1,
+    failures: [failure],
+  }), false);
 });
 
 test('validator and adjudication schemas constrain their decisions and levels', async () => {
@@ -99,4 +196,5 @@ test('validator and adjudication schemas constrain their decisions and levels', 
   assert.deepEqual(adjudication.properties.decision.enum, ['accept', 'reject']);
   assert.deepEqual(adjudication.properties.level.enum, ['blocker', 'major', 'minor', 'suggestion']);
   assert.deepEqual(adjudication.allOf[0].then.required, ['level']);
+  assert.deepEqual(adjudication.allOf[0].else.not.required, ['level']);
 });

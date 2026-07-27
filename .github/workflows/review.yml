@@ -415,7 +415,9 @@ jobs:
                 (has("diagnostic") == false or (.diagnostic | type == "string" and length >= 1 and length <= 4000)))) and
               (if .decision == "infrastructure_failure"
                then (.findings | length == 0) and (.suggestions | length == 0) and .omittedSuggestions == 0 and (.failures | length >= 1)
-               else (.failures | length == 0)
+               elif .decision == "approve"
+               then (.failures | length == 0) and all(.findings[]; .level == "minor")
+               else (.failures | length == 0) and (.findings | length >= 1)
                end)
             ) then .decision else error("invalid final review schema") end
           ' _review/review.json)"

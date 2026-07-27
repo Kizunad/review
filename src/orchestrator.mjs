@@ -1,10 +1,11 @@
+import { compareStrings } from './deterministic.mjs';
 import {
   canonicalizeFinderCandidates,
   consolidateFindings,
   dedupeFindings,
   MAX_CONSOLIDATION_CANDIDATES,
-  REVIEW_LEVELS,
 } from './findings.mjs';
+import { validAdjudication } from './review-contract.mjs';
 import { decideRound, isCountableVote } from './vote-gate.mjs';
 import { groupShards, shardDiff } from './diff-sharder.mjs';
 
@@ -12,8 +13,6 @@ const MAX_FINDER_CONCURRENCY = 2;
 const MAX_FAILURE_SAMPLES = 4;
 const MAX_FAILURE_TEXT = 4_000;
 const FAILURE_STATUSES = ['infra_error', 'schema_error'];
-const LEVELS = new Set(REVIEW_LEVELS);
-const FINGERPRINT = /^[a-f0-9]{64}$/;
 
 function boundedFailureText(value, limit = MAX_FAILURE_TEXT) {
   const text = String(value ?? 'runner returned no result');
@@ -87,29 +86,6 @@ function stageOk(result) {
   return result?.status === 'ok';
 }
 
-function exactFields(value, fields) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const actual = Object.keys(value).sort();
-  const expected = [...fields].sort();
-  return actual.length === expected.length
-    && actual.every((field, index) => field === expected[index]);
-}
-
-function validAdjudication(data, fingerprint) {
-  const baseFields = ['version', 'candidateFingerprint', 'decision', 'reason'];
-  const fields = data?.level === undefined ? baseFields : [...baseFields, 'level'];
-  return exactFields(data, fields)
-    && data.version === 'v2'
-    && FINGERPRINT.test(data.candidateFingerprint)
-    && data.candidateFingerprint === fingerprint
-    && (data.decision === 'accept' || data.decision === 'reject')
-    && (data.decision !== 'accept' || LEVELS.has(data.level))
-    && (data.level === undefined || LEVELS.has(data.level))
-    && typeof data.reason === 'string'
-    && [...data.reason].length >= 1
-    && [...data.reason].length <= 4_000;
-}
-
 function normalizeAssignments(plan, shards, maxChars) {
   const byIndex = new Map(shards.map((shard) => [shard.index, shard]));
   const requested = Array.isArray(plan?.assignments) ? plan.assignments : [];
@@ -160,7 +136,7 @@ function splitClusterMembers(candidate) {
       memberFingerprints: [member.fingerprint],
       validationCandidates: [member],
     }))
-    .sort((left, right) => left.fingerprint.localeCompare(right.fingerprint));
+    .sort((left, right) => compareStrings(left.fingerprint, right.fingerprint));
 }
 
 async function collectFiveVotes({ runner, candidate, diff, round, validatorCount, maxAttempts, failures }) {

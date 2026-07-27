@@ -167,6 +167,27 @@ test('consolidates same-path semantic variants without rewriting or dropping val
   );
 });
 
+test('orders free-text validation context with locale-independent string comparison', () => {
+  const candidates = exactCandidates(
+    { rootCause: '😀 cause', line: 10 },
+    { rootCause: '中 cause', line: 11 },
+    { rootCause: 'é cause', line: 12 },
+    { rootCause: 'z cause', line: 13 },
+  );
+  const consolidated = consolidateFindings(candidates, {
+    version: 'v2',
+    clusters: [{
+      representativeFingerprint: candidates[0].fingerprint,
+      memberFingerprints: candidates.map((candidate) => candidate.fingerprint),
+    }],
+  });
+
+  assert.deepEqual(
+    consolidated[0].validationCandidates.map((candidate) => candidate.rootCause),
+    ['z cause', 'é cause', '中 cause', '😀 cause'],
+  );
+});
+
 test('consolidation rejects missing, duplicate, unknown, and invalid representatives', () => {
   const candidates = exactCandidates(
     { rootCause: 'first cause', line: 10 },

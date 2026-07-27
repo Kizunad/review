@@ -1,10 +1,9 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { runFreshClaude } from './claude-cli.mjs';
-import { canonicalizeFinderCandidates, consolidateFindings, REVIEW_LEVELS } from './findings.mjs';
+import { canonicalizeFinderCandidates, consolidateFindings } from './findings.mjs';
+import { isCountableVote, validAdjudication } from './review-contract.mjs';
 
-const FINGERPRINT = /^[a-f0-9]{64}$/;
-const LEVELS = new Set(REVIEW_LEVELS);
 const STAGE_SCHEMA = Object.freeze({
   plan: 'review-plan.schema.json',
   summary: 'luna-summary.schema.json',
@@ -103,49 +102,6 @@ function stagePrompt(request, { policy, repository, skillPath, skill }) {
   }
 }
 
-function exactFields(value, fields) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const actual = Object.keys(value).sort();
-  const expected = [...fields].sort();
-  return actual.length === expected.length
-    && actual.every((field, index) => field === expected[index]);
-}
-
-function boundedText(value, maxLength) {
-  return typeof value === 'string' && [...value].length >= 1 && [...value].length <= maxLength;
-}
-
-function validVote(data, fingerprint) {
-  return exactFields(data, ['version', 'candidateFingerprint', 'verdict', 'reachable', 'level', 'evidence', 'reason'])
-    && data.version === 'v2'
-    && FINGERPRINT.test(data.candidateFingerprint)
-    && data.candidateFingerprint === fingerprint
-    && (data.verdict === 'confirm' || data.verdict === 'reject' || data.verdict === 'split')
-    && typeof data.reachable === 'boolean'
-    && LEVELS.has(data.level)
-    && (data.verdict === 'confirm'
-      ? data.reachable === true
-      : data.reachable === false && data.level === 'suggestion')
-    && boundedText(data.evidence, 4_000)
-    && boundedText(data.reason, 4_000);
-}
-
-function validAdjudication(data, fingerprint) {
-  const fields = data?.decision === 'accept'
-    ? ['version', 'candidateFingerprint', 'decision', 'level', 'reason']
-    : ['version', 'candidateFingerprint', 'decision', 'reason'];
-  const allowedRejectWithLevel = data?.decision === 'reject'
-    && exactFields(data, [...fields, 'level'])
-    && LEVELS.has(data.level);
-  return (exactFields(data, fields) || allowedRejectWithLevel)
-    && data.version === 'v2'
-    && FINGERPRINT.test(data.candidateFingerprint)
-    && data.candidateFingerprint === fingerprint
-    && (data.decision === 'accept' || data.decision === 'reject')
-    && (data.decision !== 'accept' || LEVELS.has(data.level))
-    && boundedText(data.reason, 4_000);
-}
-
 function validateStage(stage, data, request) {
   switch (stage) {
     case 'plan':
@@ -159,7 +115,7 @@ function validateStage(stage, data, request) {
       consolidateFindings(request.candidates, data);
       return true;
     case 'validate':
-      return validVote(data, request.candidate.fingerprint);
+      return isCountableVote(data, request.candidate.fingerprint);
     case 'adjudicate':
       return validAdjudication(data, request.candidate.fingerprint);
     default:

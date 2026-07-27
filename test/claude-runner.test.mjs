@@ -150,6 +150,7 @@ test('adjudicator requires v2 and a final level for accept', async () => {
   assert.equal((await runStage(request, { ...base, level: 'critical' })).status, 'schema_error');
   assert.equal((await runStage(request, { ...base, version: 'v1', level: 'major' })).status, 'schema_error');
   assert.equal((await runStage(request, { ...base, decision: 'reject' })).status, 'ok');
+  assert.equal((await runStage(request, { ...base, decision: 'reject', level: 'suggestion' })).status, 'schema_error');
 });
 
 test('prompts lock clean v2, independent level voting, and no partial candidates', async () => {
