@@ -4,9 +4,10 @@ import { runReview } from './orchestrator.mjs';
 import { createClaudeRunner } from './claude-runner.mjs';
 import { createSanitizedCallerSnapshot } from './caller-snapshot.mjs';
 
-const SEVERITIES = new Set(['blocker', 'major', 'minor']);
+const LEVELS = new Set(['blocker', 'major', 'minor', 'suggestion']);
 const MAX_PUBLIC_FAILURES = 512;
 const MAX_PUBLIC_FINDINGS = 128;
+export const MAX_PUBLIC_SUGGESTIONS = 16;
 export const MAX_REVIEW_JSON_BYTES = 1_048_576;
 export const MAX_REVIEW_MARKDOWN_BYTES = 65_536;
 export const ABSOLUTE_DIFF_BYTES = 1_048_576;
@@ -33,26 +34,26 @@ function parsePolicy(value, repository) {
   const keys = Object.keys(value).sort();
   const expected = ['minorFindingsRequestChanges', 'project', 'rules', 'version'].sort();
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
-    throw new Error('policy fields do not match the v1 contract');
+    throw new Error('policy fields do not match the v2 contract');
   }
-  if (value.version !== 'project-review-policy.v1') throw new Error('unsupported policy version');
+  if (value.version !== 'project-review-policy.v2') throw new Error('unsupported policy version');
   if (value.project !== repository) throw new Error('policy project does not match caller repository');
   if (typeof value.minorFindingsRequestChanges !== 'boolean') throw new Error('minorFindingsRequestChanges must be boolean');
   if (!Array.isArray(value.rules) || value.rules.length > 256) throw new Error('policy rules must be an array with at most 256 entries');
   for (const rule of value.rules) {
     if (!rule || typeof rule !== 'object' || Array.isArray(rule)) throw new Error('policy rule must be an object');
-    if (Object.keys(rule).sort().join(',') !== 'id,severity,text') throw new Error('policy rule fields do not match the v1 contract');
+    if (Object.keys(rule).sort().join(',') !== 'id,level,text') throw new Error('policy rule fields do not match the v2 contract');
     if (typeof rule.id !== 'string' || !/^[a-z][a-z0-9-]{0,79}$/.test(rule.id)) throw new Error('policy rule ID is invalid');
-    if (!SEVERITIES.has(rule.severity)) throw new Error('policy rule severity is invalid');
-    if (typeof rule.text !== 'string' || rule.text.length < 1 || rule.text.length > 4000) throw new Error('policy rule text is invalid');
+    if (!LEVELS.has(rule.level)) throw new Error('policy rule level is invalid');
+    if (typeof rule.text !== 'string' || [...rule.text].length < 1 || [...rule.text].length > 4_000) throw new Error('policy rule text is invalid');
   }
   return value;
 }
 
-function finalDecision(result, policy) {
-  if (result.failures.length > 0) return 'infrastructure_failure';
-  if (result.findings.some((finding) => finding.severity === 'blocker' || finding.severity === 'major')) return 'request_changes';
-  if (policy.minorFindingsRequestChanges && result.findings.some((finding) => finding.severity === 'minor')) return 'request_changes';
+export function finalDecision({ findings, failures }, policy) {
+  if (failures.length > 0) return 'infrastructure_failure';
+  if (findings.some((finding) => finding.level === 'blocker' || finding.level === 'major')) return 'request_changes';
+  if (policy.minorFindingsRequestChanges && findings.some((finding) => finding.level === 'minor')) return 'request_changes';
   return 'approve';
 }
 
@@ -64,8 +65,29 @@ function publicFinding(finding) {
     title: finding.title,
     evidence: finding.evidence,
     rootCause: finding.rootCause,
-    severity: finding.severity,
+    level: finding.level,
     fingerprint: finding.fingerprint,
+  };
+}
+
+export function partitionValidatedFindings(findings) {
+  if (!Array.isArray(findings)) throw new TypeError('findings must be an array');
+  const defects = [];
+  const advisory = [];
+  for (const finding of findings) {
+    const publicValue = publicFinding(finding);
+    if (finding.level === 'suggestion') {
+      advisory.push({ publicValue, voteSupport: Number.isInteger(finding.voteSupport) ? finding.voteSupport : 0 });
+    } else {
+      defects.push(publicValue);
+    }
+  }
+  advisory.sort((left, right) => right.voteSupport - left.voteSupport
+    || left.publicValue.fingerprint.localeCompare(right.publicValue.fingerprint));
+  return {
+    findings: defects,
+    suggestions: advisory.slice(0, MAX_PUBLIC_SUGGESTIONS).map(({ publicValue }) => publicValue),
+    omittedSuggestions: Math.max(0, advisory.length - MAX_PUBLIC_SUGGESTIONS),
   };
 }
 
@@ -130,10 +152,17 @@ function publicFailureCounts(failures) {
 
 export function compactReviewFailures(failures, {
   findings = [],
+  suggestions = [],
+  omittedSuggestions = 0,
   maxBytes = MAX_REVIEW_JSON_BYTES,
 } = {}) {
   if (!Array.isArray(failures)) throw new TypeError('failures must be an array');
-  if (!Array.isArray(findings)) throw new TypeError('findings must be an array');
+  if (!Array.isArray(findings) || !Array.isArray(suggestions)) {
+    throw new TypeError('findings and suggestions must be arrays');
+  }
+  if (!Number.isSafeInteger(omittedSuggestions) || omittedSuggestions < 0) {
+    throw new TypeError('omittedSuggestions must be a non-negative safe integer');
+  }
   const total = failures.length;
   const omittedCounts = publicFailureCounts(failures);
   const retained = [];
@@ -147,7 +176,12 @@ export function compactReviewFailures(failures, {
       ? [...retained, candidate, failureReport(total, retained.length + 1, omittedCounts)]
       : [...retained, candidate];
     if (compacted.length > MAX_PUBLIC_FAILURES || reviewJsonBytes({
-      version: 'v1', decision: 'infrastructure_failure', findings, failures: compacted,
+      version: 'v2',
+      decision: 'infrastructure_failure',
+      findings,
+      suggestions,
+      omittedSuggestions,
+      failures: compacted,
     }) > maxBytes) {
       omittedCounts[candidateStatus] += 1;
       break;
@@ -158,41 +192,71 @@ export function compactReviewFailures(failures, {
   const report = failureReport(total, retained.length, omittedCounts);
   const compacted = [...retained.slice(0, MAX_PUBLIC_FAILURES - 1), report];
   if (reviewJsonBytes({
-    version: 'v1', decision: 'infrastructure_failure', findings, failures: compacted,
+    version: 'v2',
+    decision: 'infrastructure_failure',
+    findings,
+    suggestions,
+    omittedSuggestions,
+    failures: compacted,
   }) <= maxBytes) return compacted;
   const allCounts = publicFailureCounts(failures);
   const fallback = [failureReport(total, 0, allCounts)];
   if (reviewJsonBytes({
-    version: 'v1', decision: 'infrastructure_failure', findings: [], failures: fallback,
+    version: 'v2',
+    decision: 'infrastructure_failure',
+    findings: [],
+    suggestions: [],
+    omittedSuggestions: 0,
+    failures: fallback,
   }) <= maxBytes) return fallback;
   throw new Error('infrastructure failure report exceeds review.json publication budget');
 }
 
-export function compactFinalReview(review, maxBytes = MAX_REVIEW_JSON_BYTES) {
-  if (!review || typeof review !== 'object' || Array.isArray(review)) throw new TypeError('review must be an object');
-  if (!Array.isArray(review.findings) || !Array.isArray(review.failures)) {
-    throw new TypeError('review findings and failures must be arrays');
-  }
-  if (review.decision === 'infrastructure_failure') {
-    if (review.findings.length === 0
-      && review.failures.length <= MAX_PUBLIC_FAILURES
-      && reviewJsonBytes(review) <= maxBytes) return review;
-    const failures = compactReviewFailures(review.failures, { findings: [], maxBytes });
-    return { ...review, findings: [], failures };
-  }
-  if (review.findings.length <= MAX_PUBLIC_FINDINGS
-    && review.failures.length === 0
-    && reviewJsonBytes(review) <= maxBytes) return review;
-  const fallback = {
-    version: 'v1',
+function artifactBudgetFallback() {
+  return {
+    version: 'v2',
     decision: 'infrastructure_failure',
     findings: [],
+    suggestions: [],
+    omittedSuggestions: 0,
     failures: [{
       stage: 'artifact-budget',
       status: 'infra_error',
       error: 'Validated review output exceeded the final review publication contract; no code verdict was published.',
     }],
   };
+}
+
+export function compactFinalReview(review, maxBytes = MAX_REVIEW_JSON_BYTES) {
+  if (!review || typeof review !== 'object' || Array.isArray(review)) throw new TypeError('review must be an object');
+  if (!Array.isArray(review.findings) || !Array.isArray(review.suggestions) || !Array.isArray(review.failures)) {
+    throw new TypeError('review findings, suggestions, and failures must be arrays');
+  }
+  if (!Number.isSafeInteger(review.omittedSuggestions) || review.omittedSuggestions < 0) {
+    throw new TypeError('review omittedSuggestions must be a non-negative safe integer');
+  }
+  if (review.decision === 'infrastructure_failure') {
+    if (review.findings.length === 0
+      && review.suggestions.length === 0
+      && review.omittedSuggestions === 0
+      && review.failures.length <= MAX_PUBLIC_FAILURES
+      && reviewJsonBytes(review) <= maxBytes) return review;
+    const failures = compactReviewFailures(review.failures, {
+      findings: [], suggestions: [], omittedSuggestions: 0, maxBytes,
+    });
+    return {
+      ...review,
+      findings: [],
+      suggestions: [],
+      omittedSuggestions: 0,
+      failures,
+    };
+  }
+  if (review.findings.length <= MAX_PUBLIC_FINDINGS
+    && review.suggestions.length <= MAX_PUBLIC_SUGGESTIONS
+    && review.failures.length === 0
+    && reviewJsonBytes(review) <= maxBytes) return review;
+  const fallback = artifactBudgetFallback();
   if (reviewJsonBytes(fallback) > maxBytes) throw new Error('review.json publication fallback exceeds size limit');
   return fallback;
 }
@@ -205,13 +269,15 @@ function appendMarkdown(lines, entry, footer = []) {
   return markdownBytes([...lines, ...entry, ...footer]) <= MAX_REVIEW_MARKDOWN_BYTES;
 }
 
-function minimalInfrastructureMarkdown({ shadow } = {}) {
+function minimalReviewMarkdown(review, { shadow } = {}) {
   const values = [
     shadow ? '## Central review (shadow)' : '## Central review',
     '',
-    '**Decision:** `infrastructure_failure`',
+    `**Decision:** ${markdownCodeSpan(review.decision)}`,
     '',
-    'The review could not complete safely within the publication budget. No approval or code finding was inferred.',
+    review.decision === 'infrastructure_failure'
+      ? 'The review could not complete safely within the publication budget. No approval or code finding was inferred.'
+      : 'The validated review result exceeded the Markdown publication budget. See the bound review.json artifact for the complete result.',
   ];
   const rendered = `${values.join('\n')}\n`;
   if (Buffer.byteLength(rendered) > MAX_REVIEW_MARKDOWN_BYTES) {
@@ -233,7 +299,7 @@ export function renderReviewMarkdown(review, metadata) {
     `**Policy SHA-256:** ${markdownCodeSpan(policySha256)}`,
   ];
   if (markdownBytes(lines) > MAX_REVIEW_MARKDOWN_BYTES) {
-    return minimalInfrastructureMarkdown(metadata);
+    return minimalReviewMarkdown(review, metadata);
   }
   if (review.decision === 'infrastructure_failure') {
     const introduction = [
@@ -241,7 +307,7 @@ export function renderReviewMarkdown(review, metadata) {
       'The review could not complete safely. No approval or code finding was inferred from the failed stages.',
       '',
     ];
-    if (!appendMarkdown(lines, introduction)) return minimalInfrastructureMarkdown(metadata);
+    if (!appendMarkdown(lines, introduction)) return minimalReviewMarkdown(review, metadata);
     lines.push(...introduction);
     let omitted = 0;
     for (const [index, failure] of review.failures.entries()) {
@@ -261,52 +327,73 @@ export function renderReviewMarkdown(review, metadata) {
     }
     if (omitted > 0) {
       const footer = ['', `${omitted} failure report(s) omitted to stay within the publication budget; decision remains infrastructure_failure.`];
-      if (!appendMarkdown(lines, footer)) return minimalInfrastructureMarkdown(metadata);
+      if (!appendMarkdown(lines, footer)) return minimalReviewMarkdown(review, metadata);
       lines.push(...footer);
     }
     const rendered = `${lines.join('\n')}\n`;
     return Buffer.byteLength(rendered) <= MAX_REVIEW_MARKDOWN_BYTES
       ? rendered
-      : minimalInfrastructureMarkdown(metadata);
+      : minimalReviewMarkdown(review, metadata);
   }
-  if (review.findings.length === 0) {
-    const empty = ['', 'No validated findings survived the five-vote gate.'];
-    if (!appendMarkdown(lines, empty)) return minimalInfrastructureMarkdown(metadata);
+  if (review.findings.length === 0 && review.suggestions.length === 0) {
+    const empty = ['', 'No validated findings or suggestions survived the five-vote gate.'];
+    if (!appendMarkdown(lines, empty)) return minimalReviewMarkdown(review, metadata);
     return `${[...lines, ...empty].join('\n')}\n`;
   }
-  if (!appendMarkdown(lines, [''])) return minimalInfrastructureMarkdown(metadata);
-  lines.push('');
-  let omitted = 0;
-  for (const [index, finding] of review.findings.entries()) {
-    const entry = [
-      `### [${finding.severity}] ${finding.title}`,
-      '',
-      `${markdownCodeSpan(`${finding.path}:${finding.line}`)} · ${markdownCodeSpan(finding.taxonomy)}`,
-      '',
-      finding.evidence,
-      '',
-      `**Root cause:** ${finding.rootCause}`,
+
+  const appendFindingSection = (heading, entries, omittedLabel) => {
+    if (entries.length === 0) return true;
+    const section = ['', heading, ''];
+    if (!appendMarkdown(lines, section)) return false;
+    lines.push(...section);
+    let omitted = 0;
+    for (const [index, finding] of entries.entries()) {
+      const entry = [
+        `### [${finding.level}] ${finding.title}`,
+        '',
+        `${markdownCodeSpan(`${finding.path}:${finding.line}`)} · ${markdownCodeSpan(finding.taxonomy)}`,
+        '',
+        finding.evidence,
+        '',
+        `**Root cause:** ${finding.rootCause}`,
+        '',
+      ];
+      const remaining = entries.length - index - 1;
+      const footer = remaining > 0
+        ? [`${remaining} ${omittedLabel} omitted from Markdown to stay within the publication budget.`, '']
+        : [];
+      if (!appendMarkdown(lines, entry, footer)) {
+        omitted = entries.length - index;
+        break;
+      }
+      lines.push(...entry);
+    }
+    if (omitted > 0) {
+      const footer = [`${omitted} ${omittedLabel} omitted from Markdown to stay within the publication budget.`, ''];
+      if (!appendMarkdown(lines, footer)) return false;
+      lines.push(...footer);
+    }
+    return true;
+  };
+
+  if (!appendFindingSection('## Validated findings', review.findings, 'validated finding(s)')) {
+    return minimalReviewMarkdown(review, metadata);
+  }
+  if (!appendFindingSection('## Suggestions (non-gating)', review.suggestions, 'published suggestion(s)')) {
+    return minimalReviewMarkdown(review, metadata);
+  }
+  if (review.omittedSuggestions > 0) {
+    const footer = [
+      `${review.omittedSuggestions} additional suggestion(s) omitted from publication after semantic deduplication and ranking.`,
       '',
     ];
-    const remaining = review.findings.length - index - 1;
-    const footer = remaining > 0
-      ? [`${remaining} validated finding(s) omitted to stay within the publication budget.`, '']
-      : [];
-    if (!appendMarkdown(lines, entry, footer)) {
-      omitted = review.findings.length - index;
-      break;
-    }
-    lines.push(...entry);
-  }
-  if (omitted > 0) {
-    const footer = [`${omitted} validated finding(s) omitted to stay within the publication budget.`];
-    if (!appendMarkdown(lines, footer)) return minimalInfrastructureMarkdown(metadata);
+    if (!appendMarkdown(lines, footer)) return minimalReviewMarkdown(review, metadata);
     lines.push(...footer);
   }
   const rendered = `${lines.join('\n').trimEnd()}\n`;
   return Buffer.byteLength(rendered) <= MAX_REVIEW_MARKDOWN_BYTES
     ? rendered
-    : minimalInfrastructureMarkdown(metadata);
+    : minimalReviewMarkdown(review, metadata);
 }
 
 export async function executeReview({
@@ -369,14 +456,18 @@ export async function executeReview({
     await snapshot?.cleanup();
   }
   const rawFailures = Array.isArray(result.failures) ? result.failures : [];
-  const publicFindings = result.findings.map(publicFinding);
-  const decision = finalDecision({ ...result, failures: rawFailures }, trustedPolicy);
+  const partitioned = partitionValidatedFindings(Array.isArray(result.findings) ? result.findings : []);
+  const decision = finalDecision({ findings: partitioned.findings, failures: rawFailures }, trustedPolicy);
   const review = compactFinalReview({
-    version: 'v1',
+    version: 'v2',
     decision,
-    findings: decision === 'infrastructure_failure' ? [] : publicFindings,
+    findings: decision === 'infrastructure_failure' ? [] : partitioned.findings,
+    suggestions: decision === 'infrastructure_failure' ? [] : partitioned.suggestions,
+    omittedSuggestions: decision === 'infrastructure_failure' ? 0 : partitioned.omittedSuggestions,
     failures: decision === 'infrastructure_failure'
-      ? compactReviewFailures(rawFailures, { findings: [] })
+      ? compactReviewFailures(rawFailures, {
+        findings: [], suggestions: [], omittedSuggestions: 0,
+      })
       : [],
   });
   return {

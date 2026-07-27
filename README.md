@@ -7,9 +7,11 @@
 1. A fresh `sol` worker assigns immutable diff shards to one or more `luna` workers.
 2. Fresh `luna` workers summarize their assigned shards. They do not produce findings or verdicts.
 3. Fresh `terra` finders receive one bounded diff batch, validated Luna summaries, one taxonomy dimension, and the caller policy. Larger diffs are split across fresh finders for every dimension without dropping content. Sol output and transcripts are never forwarded.
-4. Every deduplicated candidate receives five valid votes from fresh `terra` validators per round. A confirmation is valid only when the validator also proves the candidate reachable.
-5. Four or five confirmations accept; four or five rejections reject; a 2/3 split revotes with five fresh validators for at most three rounds.
-6. Only a third split round is sent to a fresh `sol` adjudicator. Infrastructure and schema failures never count as votes.
+4. Candidates with the same canonical repository path, line, and root cause are deterministically deduplicated across taxonomy dimensions; equivalent `.` segments, repeated separators, and slash styles cannot create path aliases. A fresh `sol` consolidator may then cluster same-path wording or nearby-line variants of one root cause, but cannot add, omit, rewrite, or merge candidates across paths. Every validator receives every member and all provenance in the cluster. A `split` vote means the members require independent gates; four split seats deterministically deconsolidate the cluster and enqueue each exact candidate for its own five-seat gate. A `reject` vote means the cluster is structurally coherent but the claimed defect is unproven or false.
+5. Every consolidated candidate receives five valid votes from fresh `terra` validators per round. A confirmation is valid only when the validator also proves the candidate reachable, and every validator independently assigns `blocker`, `major`, `minor`, or `suggestion` impact without trusting the finder proposal. `reject` and `split` establish no defect level.
+6. Four or five confirmations accept; four or five rejections reject; four or five structural splits deconsolidate; a 2/3 existence split revotes with five fresh validators for at most three rounds. Unresolved structural votes fail closed rather than entering binary adjudication. For an accepted vote round, the final level is the highest level supported by at least four confirming seats.
+7. Only a third split round is sent to a fresh `sol` adjudicator, whose accept result must include the final level. Infrastructure and schema failures never count as votes.
+8. Final review v2 publishes validated `blocker`/`major`/`minor` defects separately from non-gating suggestions. Suggestions are semantically deduplicated first, then ranked by vote support and stable fingerprint; at most 16 are published and `omittedSuggestions` records the remainder.
 
 Every Claude Code process is sessionless and read-only. It runs inside a root-owned, hash-pinned setuid Bubblewrap mount namespace that does not depend on Ubuntu 24.04 unprivileged-user-namespace policy. The namespace exposes only the sanitized caller snapshot at `/workspace`, the pinned Claude executable, a minimal read-only runtime, DNS/TLS files, an empty `/home`, and an ephemeral `/tmp`; `/proc` environment aliases are hidden before the provider credential enters the process. The caller snapshot itself excludes repository `.claude`, `.mcp.json`, `CLAUDE.md`, `AGENTS.md`, `.git`, every symlink, and every non-regular file:
 
@@ -44,7 +46,7 @@ bwrap --unshare-all --share-net --as-pid-1 ... \
 
 - `.github/workflows/review.yml` — reusable workflow.
 - `.github/actions/setup-claude/action.yml` — SHA-256-verifies and installs the reviewed native Claude Code binary without package scripts.
-- `.claude/skills/code-review/SKILL.md` — strict maintainability review policy.
+- `.claude/skills/code-review/SKILL.md` — defect-first classification and maintainability guidance.
 - `catalog/review-dimensions.v1.json` — provider-neutral review taxonomy.
 - `schemas/` — strict stage and artifact contracts.
 - `src/` — deterministic orchestration, caller snapshot, circuit breaker, and trust-boundary modules.

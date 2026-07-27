@@ -5,42 +5,42 @@
     {
       "id": "correctness",
       "title": "Correctness and reachability",
-      "prompt": "Find behaviorally wrong, incomplete, unreachable, stale-state, edge-case, error-path, or lifecycle bugs. Prove the concrete input or state that reaches the defect and the observable wrong result."
+      "prompt": "Find behaviorally wrong, incomplete, unreachable, stale-state, edge-case, error-path, or lifecycle bugs. Prove the concrete input or state that reaches the defect and the observable wrong result. Preserve resource and conservation invariants; classify cleanup without a wrong result as suggestion."
     },
     {
       "id": "wiring",
       "title": "End-to-end wiring",
-      "prompt": "Trace every new producer, consumer, registration, dispatch, event, command, payload, UI handler, and runtime entry point. Find features that compile or test locally but are not reachable through the real production chain."
+      "prompt": "Trace every changed producer, consumer, registration, dispatch, event, command, payload, UI handler, and runtime entry point. A feature that compiles or tests locally but cannot traverse the real production chain is a defect; optional reorganization of an already-working chain is suggestion."
     },
     {
       "id": "schema-contracts",
       "title": "Schemas and boundary contracts",
-      "prompt": "Check serialization shapes, enum variants, generated artifacts, protocol conversions, repository-relative paths, public API assumptions, and caller/callee contracts for drift, ambiguity, or fail-open behavior."
+      "prompt": "Check serialization shapes, enum variants, generated artifacts, protocol conversions, repository-relative paths, public API assumptions, factual documentation, and caller/callee contracts. Report concrete drift, misdecoding, false public claims, or fail-open behavior; classify clearer naming or extra documentation around an already-correct contract as suggestion."
     },
     {
       "id": "security",
       "title": "Security and trust boundaries",
-      "prompt": "Find privilege expansion, untrusted-code execution, secret exposure, injection, path traversal, symlink escape, stale identity, confused-deputy, artifact tampering, unsafe defaults, and authorization failures."
+      "prompt": "Find reachable privilege expansion, untrusted-code execution, secret exposure, injection, path traversal, symlink escape, stale identity, confused-deputy, artifact tampering, unsafe defaults, and authorization failures. Prove the attacker-controlled input and missing or bypassed boundary."
     },
     {
       "id": "concurrency-atomicity",
       "title": "Concurrency and atomicity",
-      "prompt": "Find races, stale reads, non-atomic related updates, partial application, duplicate delivery, ordering assumptions, cancellation leaks, unsafe retries, and independent work serialized without a sound reason."
+      "prompt": "Find races, stale reads, non-atomic related updates, partial application, duplicate delivery, ordering assumptions, cancellation leaks, and unsafe retries that produce a specific wrong state. Needless serialization without a demonstrated correctness, deadline, or bounded-resource failure is suggestion."
     },
     {
       "id": "performance",
       "title": "Performance and resource bounds",
-      "prompt": "Find unbounded work, repeated scans, accidental quadratic behavior, memory or output growth, process leaks, needless serialization, oversized payloads, and hot-path regressions. Require a realistic scale or execution path."
+      "prompt": "Find unbounded work, repeated scans, accidental quadratic behavior, memory or output growth, process leaks, oversized payloads, and hot-path regressions. Require a realistic scale or execution path and a concrete resource or latency consequence; speculative optimization is suggestion."
     },
     {
       "id": "testing",
       "title": "Tests and regression protection",
-      "prompt": "Find important observable behaviors, boundaries, errors, state transitions, integration chains, schemas, and security properties that are not locked by tests, or tests that assert implementation details while missing the real contract."
+      "prompt": "Report a test defect only when a named changed observable contract lacks protection such that a concrete incorrect implementation would still pass, or when documentation or the pull request falsely claims coverage that does not exist. Existing correct coverage that could use finer assertions, cleaner fixtures, less mocking, or more optional cases is suggestion."
     },
     {
       "id": "strict-maintainability",
-      "title": "Strict maintainability and code judo",
-      "prompt": "Apply the repository code-review skill. Seek structural simplifications that delete concepts, branches, wrappers, casts, optionality, duplicated helpers, wrong-layer feature logic, and spaghetti growth. Treat a file crossing from below 1000 lines to above 1000 lines as a presumptive blocker."
+      "title": "Defect-first maintainability",
+      "prompt": "Apply the repository code-review skill. Treat wrong-layer unreachable wiring, non-atomic state, unbounded resources, and duplicated canonical logic that already causes inconsistent behavior as defects. File size, comment repetition, naming, helper extraction, wrappers, casts, optionality, and preferred structural simplifications without a demonstrated wrong result are suggestions and never automatic blockers or majors."
     }
   ]
 }

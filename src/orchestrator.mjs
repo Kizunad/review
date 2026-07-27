@@ -1,4 +1,10 @@
-import { canonicalizeFinderCandidates, dedupeFindings } from './findings.mjs';
+import {
+  canonicalizeFinderCandidates,
+  consolidateFindings,
+  dedupeFindings,
+  MAX_CONSOLIDATION_CANDIDATES,
+  REVIEW_LEVELS,
+} from './findings.mjs';
 import { decideRound, isCountableVote } from './vote-gate.mjs';
 import { groupShards, shardDiff } from './diff-sharder.mjs';
 
@@ -6,6 +12,8 @@ const MAX_FINDER_CONCURRENCY = 2;
 const MAX_FAILURE_SAMPLES = 4;
 const MAX_FAILURE_TEXT = 4_000;
 const FAILURE_STATUSES = ['infra_error', 'schema_error'];
+const LEVELS = new Set(REVIEW_LEVELS);
+const FINGERPRINT = /^[a-f0-9]{64}$/;
 
 function boundedFailureText(value, limit = MAX_FAILURE_TEXT) {
   const text = String(value ?? 'runner returned no result');
@@ -79,6 +87,29 @@ function stageOk(result) {
   return result?.status === 'ok';
 }
 
+function exactFields(value, fields) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...fields].sort();
+  return actual.length === expected.length
+    && actual.every((field, index) => field === expected[index]);
+}
+
+function validAdjudication(data, fingerprint) {
+  const baseFields = ['version', 'candidateFingerprint', 'decision', 'reason'];
+  const fields = data?.level === undefined ? baseFields : [...baseFields, 'level'];
+  return exactFields(data, fields)
+    && data.version === 'v2'
+    && FINGERPRINT.test(data.candidateFingerprint)
+    && data.candidateFingerprint === fingerprint
+    && (data.decision === 'accept' || data.decision === 'reject')
+    && (data.decision !== 'accept' || LEVELS.has(data.level))
+    && (data.level === undefined || LEVELS.has(data.level))
+    && typeof data.reason === 'string'
+    && [...data.reason].length >= 1
+    && [...data.reason].length <= 4_000;
+}
+
 function normalizeAssignments(plan, shards, maxChars) {
   const byIndex = new Map(shards.map((shard) => [shard.index, shard]));
   const requested = Array.isArray(plan?.assignments) ? plan.assignments : [];
@@ -121,8 +152,20 @@ function relatedDiff(candidate, diff) {
   return match.length > 0 ? match.join('') : diff;
 }
 
+function splitClusterMembers(candidate) {
+  if (candidate.memberFingerprints.length <= 1) return [];
+  return candidate.validationCandidates
+    .map((member) => ({
+      ...member,
+      memberFingerprints: [member.fingerprint],
+      validationCandidates: [member],
+    }))
+    .sort((left, right) => left.fingerprint.localeCompare(right.fingerprint));
+}
+
 async function collectFiveVotes({ runner, candidate, diff, round, validatorCount, maxAttempts, failures }) {
   const votesBySeat = new Map();
+  const attemptFailures = [];
   let attempt = 0;
   while (votesBySeat.size < validatorCount && attempt < maxAttempts) {
     const missingSeats = Array.from({ length: validatorCount }, (_, seat) => seat)
@@ -131,23 +174,27 @@ async function collectFiveVotes({ runner, candidate, diff, round, validatorCount
       const requestAttempt = attempt;
       attempt += 1;
       return runner.run({
-        stage: 'validate', model: 'terra', candidate, relatedDiff: relatedDiff(candidate, diff), round, validator: seat, attempt: requestAttempt,
+        stage: 'validate', model: 'terra', candidate,
+        relatedDiff: relatedDiff(candidate, diff), round, validator: seat, attempt: requestAttempt,
       }).then((validation) => ({ seat, requestAttempt, validation }));
     });
     const results = await Promise.all(batch);
     for (const { seat, requestAttempt, validation } of results) {
       const stage = `validate:${candidate.fingerprint}:${round}:${seat}:attempt-${requestAttempt + 1}`;
       if (!stageOk(validation)) {
-        failures.push(stageFailure(stage, validation));
+        attemptFailures.push(stageFailure(stage, validation));
         continue;
       }
-      if (!isCountableVote(validation.data)) {
-        failures.push({ stage, status: 'schema_error', error: 'validator vote is not semantically countable' });
+      if (!isCountableVote(validation.data)
+        || validation.data.candidateFingerprint !== candidate.fingerprint
+        || (validation.data.verdict === 'split' && candidate.memberFingerprints.length === 1)) {
+        attemptFailures.push({ stage, status: 'schema_error', error: 'validator vote is not semantically countable for this cluster or does not match the candidate fingerprint' });
         continue;
       }
       votesBySeat.set(seat, validation.data);
     }
   }
+  if (votesBySeat.size < validatorCount) failures.push(...attemptFailures);
   return Array.from({ length: validatorCount }, (_, seat) => votesBySeat.get(seat)).filter(Boolean);
 }
 
@@ -259,9 +306,38 @@ export async function runReview({
     return { findings: [], failures };
   }
 
+  const exactCandidates = dedupeFindings(candidates);
+  if (exactCandidates.length === 0) return { findings: [], failures };
+  if (exactCandidates.length > MAX_CONSOLIDATION_CANDIDATES) {
+    failures.push({
+      stage: 'consolidate',
+      status: 'schema_error',
+      error: `consolidation input must contain at most ${MAX_CONSOLIDATION_CANDIDATES} candidates`,
+    });
+    return { findings: [], failures };
+  }
+
+  const consolidation = await runner.run({
+    stage: 'consolidate', model: 'sol', candidates: exactCandidates,
+  });
+  if (!stageOk(consolidation)) {
+    failures.push(stageFailure('consolidate', consolidation));
+    return { findings: [], failures };
+  }
+  let consolidatedCandidates;
+  try {
+    consolidatedCandidates = consolidateFindings(exactCandidates, consolidation.data);
+  } catch (error) {
+    failures.push({ stage: 'consolidate', status: 'schema_error', error: error.message });
+    return { findings: [], failures };
+  }
+
   const accepted = [];
-  for (const candidate of dedupeFindings(candidates)) {
+  const pending = [...consolidatedCandidates];
+  while (pending.length > 0) {
+    const candidate = pending.shift();
     let outcome;
+    let sawStructuralVote = false;
     const voteRounds = [];
     for (let round = 1; round <= maxVoteRounds; round += 1) {
       const votes = await collectFiveVotes({
@@ -277,8 +353,12 @@ export async function runReview({
         break;
       }
       voteRounds.push(votes);
+      sawStructuralVote ||= votes.some((vote) => vote.verdict === 'split');
       try {
         outcome = decideRound(votes, round, { validatorCount, maxRounds: maxVoteRounds });
+        if (outcome.decision === 'adjudicate' && sawStructuralVote) {
+          outcome = { ...outcome, decision: 'structural_failure' };
+        }
       } catch (error) {
         failures.push({ stage: `validate:${candidate.fingerprint}:${round}`, status: 'schema_error', error: error.message });
         outcome = { decision: 'infra_error' };
@@ -288,17 +368,38 @@ export async function runReview({
     }
 
     if (outcome?.decision === 'accept') {
-      accepted.push(candidate);
+      accepted.push({
+        ...candidate,
+        level: outcome.level,
+        voteSupport: outcome.confirm,
+      });
+    } else if (outcome?.decision === 'split') {
+      pending.push(...splitClusterMembers(candidate));
+    } else if (outcome?.decision === 'structural_failure') {
+      failures.push({
+        stage: `validate:${candidate.fingerprint}:${maxVoteRounds}`,
+        status: 'infra_error',
+        error: 'validator seats could not resolve whether the consolidated cluster requires independent gates',
+      });
     } else if (outcome?.decision === 'adjudicate') {
       const adjudication = await runner.run({
         stage: 'adjudicate', model: 'sol', candidate, voteRounds,
       });
       if (!stageOk(adjudication)) {
         failures.push(stageFailure(`adjudicate:${candidate.fingerprint}`, adjudication));
-      } else if (adjudication.data?.decision === 'accept') {
-        accepted.push(candidate);
-      } else if (adjudication.data?.decision !== 'reject') {
-        failures.push({ stage: `adjudicate:${candidate.fingerprint}`, status: 'schema_error', error: 'invalid adjudication decision' });
+      } else if (!validAdjudication(adjudication.data, candidate.fingerprint)) {
+        failures.push({
+          stage: `adjudicate:${candidate.fingerprint}`,
+          status: 'schema_error',
+          error: 'adjudication does not match the v2 contract',
+        });
+      } else if (adjudication.data.decision === 'accept') {
+        const lastRound = voteRounds.at(-1) ?? [];
+        accepted.push({
+          ...candidate,
+          level: adjudication.data.level,
+          voteSupport: lastRound.filter((vote) => vote.verdict === 'confirm').length,
+        });
       }
     }
   }

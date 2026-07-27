@@ -16,6 +16,21 @@ test('rejects traversal, absolute paths, NUL, and symlink escapes', async () => 
   await assert.rejects(resolveInsideRoot(root, 'escape'), /escapes/);
 });
 
+test('canonicalizes equivalent relative path aliases', () => {
+  for (const candidate of [
+    'src/a.mjs',
+    './src/a.mjs',
+    'src/./a.mjs',
+    'src//a.mjs',
+    'src\\a.mjs',
+  ]) {
+    assert.equal(safeRelativePath(candidate), 'src/a.mjs');
+  }
+  assert.throws(() => safeRelativePath('.'), /unsafe/);
+  assert.throws(() => safeRelativePath('./'), /unsafe/);
+  assert.throws(() => safeRelativePath('src/../outside'), /unsafe/);
+});
+
 test('shards empty, normal, and oversized diffs deterministically at exact boundaries', () => {
   assert.deepEqual(shardDiff(''), []);
   const first = 'diff --git a/a.js b/a.js\n+one\n';
@@ -23,6 +38,12 @@ test('shards empty, normal, and oversized diffs deterministically at exact bound
   const shards = shardDiff(first + second, { maxChars: first.length + 1 });
   assert.equal(shards.length, 2);
   assert.deepEqual(shards.map((entry) => entry.paths), [['a.js'], ['b.js']]);
+
+  const aliases = shardDiff(
+    'diff --git a/./src/a.js b/./src/a.js\n+x\n',
+    { maxChars: 100 },
+  );
+  assert.deepEqual(aliases[0].paths, ['src/a.js']);
 
   const exact = shardDiff('x'.repeat(15), { maxChars: 15 });
   assert.deepEqual(exact.map((entry) => entry.text.length), [15]);

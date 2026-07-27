@@ -34,13 +34,28 @@ test('review taxonomy is versioned, unique, and keeps project policy separate', 
   assert.equal(JSON.stringify(catalog).includes('Bong'), false);
 });
 
-test('strict code-review skill remains explicitly invoked and pins structural blockers', async () => {
+test('defect-first skill and taxonomy separate proven failures from suggestions', async () => {
   const skill = await read('.claude/skills/code-review/SKILL.md');
+  const catalog = JSON.parse(await read('catalog/review-dimensions.v1.json'));
+  const testing = catalog.dimensions.find((dimension) => dimension.id === 'testing').prompt;
+  const maintainability = catalog.dimensions.find((dimension) => dimension.id === 'strict-maintainability').prompt;
+
   assert.match(skill, /^---\nname: code-review\n/);
   assert.match(skill, /disable-model-invocation: true/);
-  assert.match(skill, /code judo/i);
-  assert.match(skill, /below 1000 lines to above 1000 lines/);
-  assert.match(skill, /spaghetti-growth/);
-  assert.match(skill, /canonical[- ]helper/i);
-  assert.match(skill, /non-atomic updates/);
+  assert.match(skill, /conservation loss/);
+  assert.match(skill, /factual documentation defect/);
+  assert.match(skill, /specific incorrect implementation/);
+  assert.match(skill, /no demonstrated wrong result/);
+  assert.match(skill, /Report one root cause once/);
+  assert.doesNotMatch(skill, /presumptive blockers?/i);
+  assert.doesNotMatch(skill, /Do not approve merely because behavior seems correct/i);
+  assert.doesNotMatch(skill, /code judo/i);
+
+  assert.match(testing, /concrete incorrect implementation would still pass/);
+  assert.match(testing, /falsely claims coverage/);
+  assert.match(testing, /finer assertions.*suggestion/);
+  assert.match(maintainability, /non-atomic state/);
+  assert.match(maintainability, /without a demonstrated wrong result are suggestions/);
+  assert.match(maintainability, /never automatic blockers or majors/);
+  assert.doesNotMatch(maintainability, /1000 lines/);
 });

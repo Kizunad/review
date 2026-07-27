@@ -5,16 +5,24 @@ export function safeRelativePath(candidate) {
   if (typeof candidate !== 'string' || candidate.length === 0 || candidate.includes('\0')) {
     throw new TypeError('path must be a non-empty string without NUL');
   }
-  if (path.isAbsolute(candidate) || candidate.split(/[\\/]+/).includes('..')) {
+  const normalizedSeparators = candidate.replaceAll('\\', '/');
+  const components = normalizedSeparators.split('/');
+  if (path.posix.isAbsolute(normalizedSeparators) || components.includes('..')) {
     throw new Error(`unsafe relative path: ${candidate}`);
   }
-  return candidate;
+  const normalized = components
+    .filter((component) => component !== '' && component !== '.')
+    .join('/');
+  if (normalized.length === 0) {
+    throw new Error(`unsafe relative path: ${candidate}`);
+  }
+  return normalized;
 }
 
 export async function resolveInsideRoot(root, candidate) {
-  safeRelativePath(candidate);
+  const canonicalPath = safeRelativePath(candidate);
   const resolvedRoot = await realpath(root);
-  const resolvedTarget = await realpath(path.join(resolvedRoot, candidate));
+  const resolvedTarget = await realpath(path.join(resolvedRoot, canonicalPath));
   const relative = path.relative(resolvedRoot, resolvedTarget);
   if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
     throw new Error(`path escapes root: ${candidate}`);
@@ -43,8 +51,8 @@ export function shardDiff(diffText, { maxChars = 12_000 } = {}) {
   };
 
   for (const section of sections) {
-    const pathName = headerPath(section.split('\n', 1)[0]);
-    if (pathName) safeRelativePath(pathName);
+    const rawPathName = headerPath(section.split('\n', 1)[0]);
+    const pathName = rawPathName ? safeRelativePath(rawPathName) : null;
     if (current && current.length + section.length > maxChars) flush();
     if (section.length <= maxChars) {
       current += section;

@@ -8,7 +8,7 @@ const schemasDirectory = path.resolve('schemas');
 
 test('all review schemas are strict JSON Schema containers', async () => {
   const files = (await readdir(schemasDirectory)).sort();
-  assert.equal(files.length, 9);
+  assert.equal(files.length, 10);
   for (const file of files) {
     const schema = JSON.parse(await readFile(path.join(schemasDirectory, file), 'utf8'));
     assert.equal(schema.$schema, 'https://json-schema.org/draft/2020-12/schema');
@@ -58,11 +58,45 @@ test('artifact manifest schema matches the implementation contract', async () =>
   }
 });
 
-test('validator and adjudication schemas constrain their decisions', async () => {
+test('v2 schemas separate validated defects from bounded suggestions', async () => {
+  const candidates = JSON.parse(await readFile(path.join(schemasDirectory, 'finding-candidates.schema.json'), 'utf8'));
+  const consolidation = JSON.parse(await readFile(path.join(schemasDirectory, 'consolidation.schema.json'), 'utf8'));
+  const review = JSON.parse(await readFile(path.join(schemasDirectory, 'final-review.schema.json'), 'utf8'));
+
+  assert.equal(candidates.items.properties.version.const, 'v2');
+  assert.equal('severity' in candidates.items.properties, false);
+  assert.deepEqual(candidates.items.properties.level.enum, ['blocker', 'major', 'minor', 'suggestion']);
+  assert.equal(consolidation.properties.version.const, 'v2');
+  assert.equal(consolidation.properties.clusters.maxItems, 128);
+  assert.equal(consolidation.properties.clusters.items.properties.memberFingerprints.uniqueItems, true);
+  assert.deepEqual(review.required, [
+    'version',
+    'decision',
+    'findings',
+    'suggestions',
+    'omittedSuggestions',
+    'failures',
+  ]);
+  assert.equal(review.properties.version.const, 'v2');
+  assert.deepEqual(review.properties.findings.items.properties.level.enum, ['blocker', 'major', 'minor']);
+  assert.equal(review.properties.suggestions.maxItems, 16);
+  assert.equal(review.properties.suggestions.items.properties.level.const, 'suggestion');
+  assert.equal(review.properties.omittedSuggestions.minimum, 0);
+});
+
+test('validator and adjudication schemas constrain their decisions and levels', async () => {
   const vote = JSON.parse(await readFile(path.join(schemasDirectory, 'validator-vote.schema.json'), 'utf8'));
   const adjudication = JSON.parse(await readFile(path.join(schemasDirectory, 'adjudication.schema.json'), 'utf8'));
-  assert.deepEqual(vote.properties.verdict.enum, ['confirm', 'reject']);
+  assert.equal(vote.properties.version.const, 'v2');
+  assert.deepEqual(vote.properties.verdict.enum, ['confirm', 'reject', 'split']);
+  assert.deepEqual(vote.properties.level.enum, ['blocker', 'major', 'minor', 'suggestion']);
+  assert.ok(vote.required.includes('level'));
   assert.equal(vote.allOf[0].if.properties.verdict.const, 'confirm');
   assert.equal(vote.allOf[0].then.properties.reachable.const, true);
+  assert.equal(vote.allOf[0].else.properties.reachable.const, false);
+  assert.equal(vote.allOf[0].else.properties.level.const, 'suggestion');
+  assert.equal(adjudication.properties.version.const, 'v2');
   assert.deepEqual(adjudication.properties.decision.enum, ['accept', 'reject']);
+  assert.deepEqual(adjudication.properties.level.enum, ['blocker', 'major', 'minor', 'suggestion']);
+  assert.deepEqual(adjudication.allOf[0].then.required, ['level']);
 });

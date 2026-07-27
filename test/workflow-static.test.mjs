@@ -145,6 +145,21 @@ test('workflow keeps a caller-owned fail-open circuit around automatic infrastru
   assert.doesNotMatch(finalize, /CIRCUIT_MANUAL_RETRY|circuit_manual_retry/);
 });
 
+test('finalizer accepts only the layered v2 review envelope', async () => {
+  const yaml = await workflow();
+  assert.match(yaml, /keys \| sort == \["decision","failures","findings","omittedSuggestions","suggestions","version"\]/);
+  assert.match(yaml, /\.version == "v2"/);
+  assert.match(yaml, /\.findings \| type == "array" and length <= 128/);
+  assert.match(yaml, /keys \| sort == \["evidence","fingerprint","level","line","path","rootCause","taxonomy","title"\]/);
+  assert.match(yaml, /\.level == "blocker" or \.level == "major" or \.level == "minor"/);
+  assert.match(yaml, /\.suggestions \| type == "array" and length <= 16/);
+  assert.match(yaml, /\.level == "suggestion"/);
+  assert.match(yaml, /\.omittedSuggestions \| type == "number" and \. >= 0 and floor == \./);
+  assert.match(yaml, /keys \| sort == \["diagnostic","error","stage","status"\]/);
+  assert.match(yaml, /if \.decision == "infrastructure_failure"[\s\S]*?then \(\.findings \| length == 0\)[\s\S]*?else \(\.failures \| length == 0\)/);
+  assert.doesNotMatch(yaml, /\.version == "v1"/);
+});
+
 test('every referenced action is pinned to a full commit SHA', async () => {
   const yaml = await workflow();
   const uses = [...yaml.matchAll(/^\s*uses:\s*[^@\s]+@([^\s#]+)\s*$/gm)];
