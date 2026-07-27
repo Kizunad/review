@@ -38,7 +38,7 @@ The caller must not use `@main`, a tag, a short SHA, `secrets: inherit`, or a ca
 | `review_base_url` | string | yes | HTTPS Claude-compatible gateway base URL. The value is injected as `ANTHROPIC_BASE_URL`; it is never placed in prompts or artifacts. |
 | `shadow` | boolean | no | Marks the result as non-gating during migration. Shadow comments and artifacts remain bound to the reviewed OIDs. |
 | `max_diff_chars` | number | no | Upper bound for each immutable diff batch given to a Terra finder. Diffs larger than this budget are deterministically split before finders run; raising it expands per-process cost and prompt-injection surface and should be reviewed. |
-| `max_shard_chars` | number | no | Upper bound for each immutable diff assignment given to a Luna summarizer. It must not exceed `max_diff_chars`. The platform separately rejects raw diffs above its fixed 262,144-byte safety limit and emits a bound infrastructure-failure artifact instead of attempting review. |
+| `max_shard_chars` | number | no | Upper bound, in JavaScript UTF-16 code units, for each immutable diff assignment given to a Luna summarizer. It must not exceed `max_diff_chars`, which uses the same unit for each Terra finder batch. The platform separately measures the raw diff as UTF-8 bytes and rejects files above its fixed 1,048,576-byte (1 MiB) safety limit, emitting a bound infrastructure-failure artifact instead of attempting review. |
 | `worker_timeout_ms` | number | no | Per-process timeout enforced outside Claude Code. |
 | `circuit_manual_retry` | boolean | no | Defaults to `false`. When `true`, only a trusted `workflow_dispatch` run bypasses an open infrastructure circuit; other trigger types and comment commands remain circuit-protected. |
 
