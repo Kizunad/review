@@ -113,72 +113,24 @@ test('v2 schemas separate validated defects from bounded suggestions', async () 
 
 test('final review schema locks decision and content semantics', async () => {
   const schema = JSON.parse(await readFile(path.join(schemasDirectory, 'final-review.schema.json'), 'utf8'));
-  const obeysProperties = (review, properties) => Object.entries(properties ?? {})
-    .every(([property, rule]) => {
-      const value = review[property];
-      if ('const' in rule && value !== rule.const) return false;
-      if ('minItems' in rule && value.length < rule.minItems) return false;
-      if ('maxItems' in rule && value.length > rule.maxItems) return false;
-      const requiredLevel = rule.items?.properties?.level?.const;
-      return requiredLevel === undefined || value.every((item) => item.level === requiredLevel);
-    });
-  const obeysConditional = (review, conditional) => {
-    const matches = Object.entries(conditional.if.properties)
-      .every(([property, rule]) => review[property] === rule.const);
-    const branch = matches ? conditional.then : conditional.else;
-    if (!branch) return true;
-    if (!obeysProperties(review, branch.properties)) return false;
-    if (!branch.if) return true;
-    const nestedMatches = Object.entries(branch.if.properties)
-      .every(([property, rule]) => review[property] === rule.const);
-    const nestedBranch = nestedMatches ? branch.then : branch.else;
-    return !nestedBranch || obeysProperties(review, nestedBranch.properties);
-  };
-  const acceptsDecisionContract = (review) => schema.allOf
-    .every((conditional) => obeysConditional(review, conditional));
-  const base = {
-    version: 'v2',
-    decision: 'approve',
-    findings: [],
-    suggestions: [],
-    omittedSuggestions: 0,
-    failures: [],
-  };
-  const major = { level: 'major' };
-  const minor = { level: 'minor' };
-  const suggestion = { level: 'suggestion' };
-  const failure = { status: 'infra_error' };
+  const [failureContract, normalContract] = schema.allOf;
 
-  assert.equal(acceptsDecisionContract(base), true);
-  assert.equal(acceptsDecisionContract({ ...base, findings: [minor] }), true);
-  assert.equal(acceptsDecisionContract({ ...base, findings: [major] }), false);
-  assert.equal(acceptsDecisionContract({ ...base, decision: 'request_changes', findings: [major] }), true);
-  assert.equal(acceptsDecisionContract({ ...base, decision: 'request_changes' }), false);
-  assert.equal(acceptsDecisionContract({ ...base, decision: 'request_changes', failures: [failure] }), false);
-  assert.equal(acceptsDecisionContract({
-    ...base,
-    decision: 'infrastructure_failure',
-    failures: [failure],
-  }), true);
-  assert.equal(acceptsDecisionContract({ ...base, decision: 'infrastructure_failure' }), false);
-  assert.equal(acceptsDecisionContract({
-    ...base,
-    decision: 'infrastructure_failure',
-    findings: [minor],
-    failures: [failure],
-  }), false);
-  assert.equal(acceptsDecisionContract({
-    ...base,
-    decision: 'infrastructure_failure',
-    suggestions: [suggestion],
-    failures: [failure],
-  }), false);
-  assert.equal(acceptsDecisionContract({
-    ...base,
-    decision: 'infrastructure_failure',
-    omittedSuggestions: 1,
-    failures: [failure],
-  }), false);
+  assert.equal(failureContract.if.properties.decision.const, 'infrastructure_failure');
+  assert.equal(failureContract.then.properties.findings.maxItems, 0);
+  assert.equal(failureContract.then.properties.suggestions.maxItems, 0);
+  assert.equal(failureContract.then.properties.omittedSuggestions.const, 0);
+  assert.equal(failureContract.then.properties.failures.minItems, 1);
+  assert.equal(failureContract.else.properties.failures.maxItems, 0);
+
+  assert.equal(normalContract.if.properties.decision.const, 'approve');
+  assert.equal(normalContract.then.properties.findings.items.properties.level.const, 'minor');
+  assert.equal(normalContract.else.if.properties.decision.const, 'request_changes');
+  assert.equal(normalContract.else.then.properties.findings.minItems, 1);
+  assert.equal(
+    normalContract.else.then.properties.findings.contains,
+    undefined,
+    'all-minor request_changes must remain valid when caller policy gates minor findings',
+  );
 });
 
 test('validator and adjudication schemas constrain their decisions and levels', async () => {

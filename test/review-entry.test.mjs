@@ -525,6 +525,10 @@ test('fails closed on contradictory final review decisions', () => {
     suggestions: [], omittedSuggestions: 0, failures: [],
   }).decision, 'approve');
   assert.equal(compactFinalReview({
+    version: 'v2', decision: 'request_changes', findings: [{ ...finding, level: 'minor' }],
+    suggestions: [], omittedSuggestions: 0, failures: [],
+  }).decision, 'request_changes');
+  assert.equal(compactFinalReview({
     version: 'v2', decision: 'request_changes', findings: [finding],
     suggestions: [], omittedSuggestions: 0, failures: [],
   }).decision, 'request_changes');
