@@ -140,7 +140,10 @@ function extractStructuredOutput(envelope) {
   }
   if (envelope.type !== 'result' || envelope.is_error === true || envelope.error != null
     || (typeof envelope.subtype === 'string' && envelope.subtype.startsWith('error'))) {
-    throw new TypeError('Claude returned an error envelope');
+    const subtype = typeof envelope.subtype === 'string' && envelope.subtype.length > 0
+      ? `: ${envelope.subtype}`
+      : '';
+    throw new TypeError(`Claude returned an error envelope${subtype}`);
   }
   if (envelope.structured_output !== undefined) return envelope.structured_output;
   if (typeof envelope.result === 'string') return JSON.parse(envelope.result);
@@ -353,8 +356,7 @@ export async function runFreshClaude({
         finish({
           status: 'infra_error',
           error: diagnostic(error.message, sourceEnvironment),
-          stdout: diagnostic(stdout, sourceEnvironment),
-          stderr: diagnostic(stderr, sourceEnvironment),
+          diagnostic: streamDiagnostic(stdout, stderr, sourceEnvironment),
         });
         return;
       }

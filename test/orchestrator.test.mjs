@@ -88,11 +88,11 @@ test('fails closed with a candidate-specific taxonomy error before validation', 
   });
 
   assert.deepEqual(result.findings, []);
-  assert.deepEqual(result.failures, [{
-    stage: 'find:security:batch-0:candidate-1',
+  assert.deepEqual(result.failures.map(({ stage, status }) => ({ stage, status })), [{
+    stage: 'find:security',
     status: 'schema_error',
-    error: 'finding is missing taxonomy',
   }]);
+  assert.match(result.failures[0].error, /batch-0: candidate-1: finding is missing taxonomy/);
   assert.equal(requests.some((request) => request.stage === 'validate' || request.stage === 'adjudicate'), false);
   assert.equal(result.failures.some((failure) => failure.stage === 'orchestrator'), false);
 });
@@ -112,11 +112,11 @@ test('rejects a finder candidate assigned to another taxonomy dimension', async 
   });
 
   assert.deepEqual(result.findings, []);
-  assert.deepEqual(result.failures, [{
-    stage: 'find:security:batch-0:candidate-0',
+  assert.deepEqual(result.failures.map(({ stage, status }) => ({ stage, status })), [{
+    stage: 'find:security',
     status: 'schema_error',
-    error: 'candidate taxonomy must exactly equal assigned dimension "security"',
   }]);
+  assert.match(result.failures[0].error, /candidate taxonomy must exactly equal assigned dimension "security"/);
   assert.equal(requests.some((request) => request.stage === 'validate' || request.stage === 'adjudicate'), false);
 });
 
@@ -166,21 +166,74 @@ test('collects deterministic finder contract failures after all queued work comp
     assert.ok(scoped.every((call) => call.paths[0] === 'large.js'));
   }
   assert.deepEqual(result.findings, []);
-  assert.deepEqual(result.failures, [
-    {
-      stage: 'find:slow:batch-1:candidate-0',
-      status: 'schema_error',
-      error: 'finding is missing taxonomy',
-    },
-    {
-      stage: 'find:queued:batch-0:candidate-0',
-      status: 'schema_error',
-      error: 'finding is missing taxonomy',
-    },
+  assert.deepEqual(result.failures.map(({ stage, status }) => ({ stage, status })), [
+    { stage: 'find:slow', status: 'schema_error' },
+    { stage: 'find:queued', status: 'schema_error' },
   ]);
+  assert.match(result.failures[0].error, /batch-1: candidate-0: finding is missing taxonomy/);
+  assert.match(result.failures[1].error, /batch-0: candidate-0: finding is missing taxonomy/);
   assert.equal(requests.some((request) => request.stage === 'validate' || request.stage === 'adjudicate'), false);
 });
 
+
+test('rejects finder batches above the candidate array contract', async () => {
+  const tooMany = Array.from({ length: 129 }, (_, index) => ({
+    ...finding,
+    line: index + 1,
+    title: `candidate-${index}`,
+    rootCause: `cause-${index}`,
+  }));
+  const result = await runReview({
+    diff: 'diff',
+    taxonomy: ['security'],
+    runner: runnerFor((request) => {
+      if (request.stage === 'plan') return plan();
+      if (request.stage === 'summary') return { status: 'ok', data: { summary: 'bounded', files: request.assignment.paths } };
+      if (request.stage === 'find') return { status: 'ok', data: tooMany };
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+
+  assert.deepEqual(result.findings, []);
+  assert.equal(result.failures.length, 1);
+  assert.equal(result.failures[0].stage, 'find:security');
+  assert.equal(result.failures[0].status, 'schema_error');
+  assert.match(result.failures[0].error, /at most 128 candidates/);
+});
+test('aggregates unbounded malformed finder candidates by taxonomy and status', async () => {
+  const dimensions = Array.from({ length: 8 }, (_, index) => `dimension-${index}`);
+  const malformed = { ...finding };
+  delete malformed.rootCause;
+  let finderCalls = 0;
+  const result = await runReview({
+    diff: `diff --git a/large.js b/large.js\n${'x'.repeat(41)}`,
+    taxonomy: dimensions,
+    maxShardChars: 10,
+    maxFinderChars: 15,
+    runner: runnerFor((request) => {
+      if (request.stage === 'plan') return plan([{ id: 'first', shardIndexes: [0] }]);
+      if (request.stage === 'summary') return { status: 'ok', data: { summary: 'bounded', files: request.assignment.paths } };
+      if (request.stage === 'find') {
+        finderCalls += 1;
+        return request.taxonomy === 'dimension-0' && finderCalls === 1
+          ? { status: 'infra_error', error: 'provider unavailable', diagnostic: 'error_max_structured_output_retries' }
+          : { status: 'ok', data: Array.from({ length: 128 }, () => ({ ...malformed, taxonomy: request.taxonomy })) };
+      }
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+
+  assert.ok(finderCalls > dimensions.length);
+  assert.deepEqual(result.findings, []);
+  assert.ok(result.failures.length <= dimensions.length * 2);
+  assert.deepEqual(result.failures.slice(0, 2).map(({ stage, status }) => ({ stage, status })), [
+    { stage: 'find:dimension-0', status: 'infra_error' },
+    { stage: 'find:dimension-0', status: 'schema_error' },
+  ]);
+  assert.match(result.failures[0].diagnostic, /error_max_structured_output_retries/);
+  assert.ok(result.failures.filter((failure) => failure.status === 'schema_error').every((failure) => /occurrence\(s\)/.test(failure.error)));
+  assert.ok(result.failures.filter((failure) => failure.status === 'schema_error').every((failure) => /omitted/.test(failure.error)));
+});
 
 test('starts one independent Terra finder for every taxonomy dimension', async () => {
   const dimensions = ['correctness', 'security', 'performance'];
@@ -242,11 +295,11 @@ test('bounds Terra finder concurrency at two without dropping queued taxonomy wo
   assert.equal(peak, 2);
   assert.deepEqual(started, dimensions);
   assert.deepEqual(result.findings, []);
-  assert.deepEqual(result.failures, [{
-    stage: 'find:dimension-0:batch-0',
+  assert.deepEqual(result.failures.map(({ stage, status }) => ({ stage, status })), [{
+    stage: 'find:dimension-0',
     status: 'infra_error',
-    error: 'provider unavailable',
   }]);
+  assert.match(result.failures[0].error, /batch-0: provider unavailable/);
 });
 
 test('preserves taxonomy and batch order when bounded finder lanes finish out of order', async () => {
@@ -292,11 +345,9 @@ test('preserves taxonomy and batch order when bounded finder lanes finish out of
   }
   assert.deepEqual(
     result.failures.map((failure) => failure.stage),
-    [
-      ...calls.filter((call) => call.taxonomy === 'slow').map((_, index) => `find:slow:batch-${index}`),
-      ...calls.filter((call) => call.taxonomy === 'queued').map((_, index) => `find:queued:batch-${index}`),
-    ],
+    ['find:slow', 'find:queued'],
   );
+  assert.ok(result.failures.every((failure) => /occurrence\(s\)/.test(failure.error)));
 });
 
 test('runs every Luna assignment and fills uncovered shards deterministically', async () => {

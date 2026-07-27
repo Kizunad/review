@@ -437,6 +437,19 @@ test('passes only the minimal controlled child environment', () => {
 
 test('accepts only successful result envelopes and rejects error or unknown envelopes', async () => {
   assert.equal((await runFreshClaude(baseRun({ spawn: fakeSpawn({ stdout: resultEvent(undefined, { result: '{"verdict":"PASS"}', structured_output: undefined }) }) }))).status, 'ok');
+  const structuredRetries = await runFreshClaude(baseRun({
+    spawn: fakeSpawn({
+      stdout: `${JSON.stringify({
+        type: 'result',
+        subtype: 'error_max_structured_output_retries',
+        is_error: true,
+      })}\n`,
+    }),
+  }));
+  assert.equal(structuredRetries.status, 'infra_error');
+  assert.match(structuredRetries.error, /error_max_structured_output_retries/);
+  assert.match(structuredRetries.diagnostic, /error_max_structured_output_retries/);
+
   for (const envelope of [
     { type: 'error', structured_output: { verdict: 'PASS' } },
     { type: 'result', is_error: true, structured_output: { verdict: 'PASS' } },
@@ -583,7 +596,7 @@ test('redacts inherited credentials and provider endpoints from every returned d
   }));
   assert.equal(JSON.stringify(malformed).includes(secret), false);
   assert.equal(JSON.stringify(malformed).includes(baseUrl), false);
-  assert.match(malformed.stdout, /REDACTED/);
+  assert.match(malformed.diagnostic, /non_json_output/);
 });
 
 test('real Bubblewrap namespace exposes only the separately pinned ripgrep executable', async (context) => {

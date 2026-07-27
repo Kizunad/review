@@ -1,8 +1,51 @@
-import { canonicalizeFinderCandidate, dedupeFindings } from './findings.mjs';
+import { canonicalizeFinderCandidates, dedupeFindings } from './findings.mjs';
 import { decideRound, isCountableVote } from './vote-gate.mjs';
 import { groupShards, shardDiff } from './diff-sharder.mjs';
 
 const MAX_FINDER_CONCURRENCY = 2;
+const MAX_FAILURE_SAMPLES = 4;
+const MAX_FAILURE_TEXT = 4_000;
+const FAILURE_STATUSES = ['infra_error', 'schema_error'];
+
+function boundedFailureText(value, limit = MAX_FAILURE_TEXT) {
+  const text = String(value ?? 'runner returned no result');
+  const symbols = [...text];
+  return symbols.length <= limit ? text : `${symbols.slice(0, Math.max(0, limit - 1)).join('')}…`;
+}
+
+function aggregateFinderFailures(taxonomy, finderBatches, records) {
+  const aggregates = [];
+  for (const dimension of taxonomy) {
+    const dimensionId = typeof dimension === 'string' ? dimension : dimension?.id ?? 'unknown';
+    const scoped = records.filter((record) => record.dimensionId === dimensionId);
+    for (const status of FAILURE_STATUSES) {
+      const failures = scoped.filter((record) => record.status === status);
+      if (failures.length === 0) continue;
+      const samples = failures.slice(0, MAX_FAILURE_SAMPLES).map((failure) => {
+        const candidate = failure.candidateIndex === undefined ? '' : `:candidate-${failure.candidateIndex}`;
+        return `batch-${failure.batchIndex}${candidate}: ${boundedFailureText(failure.error, 512)}`;
+      });
+      const omitted = failures.length - samples.length;
+      const failedBatches = new Set(failures.map((failure) => failure.batchIndex)).size;
+      const suffix = omitted > 0 ? `; omitted ${omitted} occurrence(s)` : '';
+      const diagnosticSamples = failures
+        .map((failure) => failure.diagnostic)
+        .filter((diagnostic) => typeof diagnostic === 'string' && diagnostic.length > 0)
+        .slice(0, MAX_FAILURE_SAMPLES);
+      aggregates.push({
+        stage: `find:${dimensionId}`,
+        status,
+        error: boundedFailureText(
+          `${failures.length} occurrence(s) in ${failedBatches}/${finderBatches.length} failed batch(es); samples: ${samples.join(' | ')}${suffix}`,
+        ),
+        ...(diagnosticSamples.length > 0
+          ? { diagnostic: boundedFailureText(diagnosticSamples.join('\n')) }
+          : {}),
+      });
+    }
+  }
+  return aggregates;
+}
 
 async function mapBounded(items, limit, mapper) {
   const results = new Array(items.length);
@@ -178,38 +221,43 @@ export async function runReview({
     },
   )).flat();
   const candidates = [];
-  let finderFailed = false;
+  const finderFailureRecords = [];
   for (const { dimension, batch, finder } of finderResults) {
     const dimensionId = typeof dimension === 'string' ? dimension : dimension?.id ?? 'unknown';
-    const stage = `find:${dimensionId}:batch-${batch.index}`;
     if (!stageOk(finder)) {
-      failures.push(stageFailure(stage, finder));
-      finderFailed = true;
+      finderFailureRecords.push({
+        dimensionId,
+        batchIndex: batch.index,
+        status: FAILURE_STATUSES.includes(finder?.status) ? finder.status : 'infra_error',
+        error: finder?.error ?? 'runner returned no result',
+        diagnostic: finder?.diagnostic,
+      });
       continue;
     }
     if (!Array.isArray(finder.data)) {
-      failures.push({ stage, status: 'schema_error', error: 'finder data must be an array' });
-      finderFailed = true;
+      finderFailureRecords.push({
+        dimensionId,
+        batchIndex: batch.index,
+        status: 'schema_error',
+        error: 'finder data must be an array',
+      });
       continue;
     }
-    const batchCandidates = [];
-    let batchFailed = false;
-    for (const [candidateIndex, candidate] of finder.data.entries()) {
-      try {
-        batchCandidates.push(canonicalizeFinderCandidate(candidate, dimension));
-      } catch (error) {
-        failures.push({
-          stage: `${stage}:candidate-${candidateIndex}`,
-          status: 'schema_error',
-          error: error.message,
-        });
-        batchFailed = true;
-        finderFailed = true;
-      }
+    try {
+      candidates.push(...canonicalizeFinderCandidates(finder.data, dimension));
+    } catch (error) {
+      finderFailureRecords.push({
+        dimensionId,
+        batchIndex: batch.index,
+        status: 'schema_error',
+        error: error.message,
+      });
     }
-    if (!batchFailed) candidates.push(...batchCandidates);
   }
-  if (finderFailed) return { findings: [], failures };
+  if (finderFailureRecords.length > 0) {
+    failures.push(...aggregateFinderFailures(taxonomy, finderBatches, finderFailureRecords));
+    return { findings: [], failures };
+  }
 
   const accepted = [];
   for (const candidate of dedupeFindings(candidates)) {
