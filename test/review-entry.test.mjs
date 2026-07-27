@@ -6,7 +6,7 @@ import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { verifyManifest } from '../src/artifact-manifest.mjs';
-import { ABSOLUTE_DIFF_BYTES, executeReview, renderReviewMarkdown } from '../src/review-entry.mjs';
+import { ABSOLUTE_DIFF_BYTES, MAX_REVIEW_JSON_BYTES, MAX_REVIEW_MARKDOWN_BYTES, compactFinalReview, compactReviewFailures, executeReview, renderReviewMarkdown } from '../src/review-entry.mjs';
 
 const policy = {
   version: 'project-review-policy.v1',
@@ -202,4 +202,83 @@ test('renders infrastructure failures with collision-free code spans and no code
   assert.ok(markdown.includes('`` validate:`x` ``'));
   assert.ok(markdown.includes('``` five ``votes`` unavailable ```'));
   assert.ok(markdown.includes('```` {"events":[{"detail":"```api_retry```","errorStatus":524}]} ````'));
+});
+
+test('bounds public failure artifacts without changing the fail-closed decision', () => {
+  const failures = Array.from({ length: 700 }, (_, index) => ({
+    stage: index === 0 ? '   ' : `find:dimension-${index}:batch-0`,
+    status: index % 2 === 0 ? 'schema_error' : 'infra_error',
+    error: index === 0 ? '' : `failure-${index}-${'界'.repeat(2_000)}`,
+    diagnostic: `diagnostic-${index}-${'诊'.repeat(2_000)}`,
+  }));
+  const publicFailures = compactReviewFailures(failures);
+  const review = compactFinalReview({
+    version: 'v1', decision: 'infrastructure_failure', findings: [], failures: publicFailures,
+  });
+  assert.ok(review.failures.length <= 512);
+  assert.equal(review.failures[0].stage, 'unknown-stage');
+  assert.equal(review.failures[0].error, 'runner returned no result');
+  assert.equal(review.failures.at(-1).stage, 'failure-report');
+  assert.match(review.failures.at(-1).error, /of 700 omitted/);
+  assert.match(review.failures.at(-1).error, /infra_error=/);
+  assert.match(review.failures.at(-1).error, /schema_error=/);
+  assert.match(review.failures.at(-1).error, /decision remains infrastructure_failure/);
+  assert.ok(Buffer.byteLength(`${JSON.stringify(review, null, 2)}\n`) <= MAX_REVIEW_JSON_BYTES);
+
+  const compactedMarkdown = renderReviewMarkdown(review, {
+    headOid: 'b'.repeat(40), policyVersion: 'project-review-policy.v1', policySha256,
+  });
+  assert.ok(Buffer.byteLength(compactedMarkdown) <= MAX_REVIEW_MARKDOWN_BYTES);
+  assert.match(compactedMarkdown, /omitted to stay within the publication budget/);
+  assert.match(compactedMarkdown, /decision remains infrastructure_failure/);
+});
+
+test('falls back safely when validated findings exceed artifact publication budgets', () => {
+  const findings = Array.from({ length: 128 }, (_, index) => ({
+    taxonomy: 'correctness',
+    path: `src/${'界'.repeat(490)}-${index}.mjs`,
+    line: index + 1,
+    title: `title-${index}-${'题'.repeat(160)}`,
+    evidence: `evidence-${index}-${'证'.repeat(5_900)}`,
+    rootCause: `root-${index}-${'因'.repeat(1_900)}`,
+    severity: 'major',
+    fingerprint: index.toString(16).padStart(64, '0'),
+  }));
+  const review = compactFinalReview({
+    version: 'v1', decision: 'request_changes', findings, failures: [],
+  });
+  assert.equal(review.decision, 'infrastructure_failure');
+  assert.deepEqual(review.findings, []);
+  assert.equal(review.failures[0].stage, 'artifact-budget');
+  assert.ok(Buffer.byteLength(`${JSON.stringify(review, null, 2)}\n`) <= MAX_REVIEW_JSON_BYTES);
+
+  const markdown = renderReviewMarkdown(review, {
+    headOid: 'h'.repeat(200_000),
+    policyVersion: 'p'.repeat(200_000),
+    policySha256: 's'.repeat(200_000),
+  });
+  assert.ok(Buffer.byteLength(markdown) <= MAX_REVIEW_MARKDOWN_BYTES);
+  assert.match(markdown, /infrastructure_failure/);
+  assert.match(markdown, /No approval or code finding was inferred/);
+});
+
+test('fails closed when final-review item cardinality exceeds the schema contract', () => {
+  const finding = {
+    taxonomy: 'correctness', path: 'src/a.mjs', line: 1, title: 'Title', evidence: 'Evidence',
+    rootCause: 'Cause', severity: 'minor', fingerprint: 'a'.repeat(64),
+  };
+  const tooManyFindings = compactFinalReview({
+    version: 'v1', decision: 'approve', findings: Array.from({ length: 129 }, () => finding), failures: [],
+  });
+  assert.equal(tooManyFindings.decision, 'infrastructure_failure');
+  assert.equal(tooManyFindings.failures[0].stage, 'artifact-budget');
+
+  const failure = { stage: 'find:test', status: 'schema_error', error: 'invalid candidate' };
+  const tooManyFailures = compactFinalReview({
+    version: 'v1', decision: 'infrastructure_failure', findings: [],
+    failures: Array.from({ length: 513 }, () => failure),
+  });
+  assert.equal(tooManyFailures.decision, 'infrastructure_failure');
+  assert.ok(tooManyFailures.failures.length <= 512);
+  assert.equal(tooManyFailures.failures.at(-1).stage, 'failure-report');
 });

@@ -5,6 +5,10 @@ import { createClaudeRunner } from './claude-runner.mjs';
 import { createSanitizedCallerSnapshot } from './caller-snapshot.mjs';
 
 const SEVERITIES = new Set(['blocker', 'major', 'minor']);
+const MAX_PUBLIC_FAILURES = 512;
+const MAX_PUBLIC_FINDINGS = 128;
+export const MAX_REVIEW_JSON_BYTES = 1_048_576;
+export const MAX_REVIEW_MARKDOWN_BYTES = 65_536;
 export const ABSOLUTE_DIFF_BYTES = 262_144;
 
 function markdownCodeSpan(value) {
@@ -65,43 +69,244 @@ function publicFinding(finding) {
   };
 }
 
-export function renderReviewMarkdown(review, { headOid, policyVersion, policySha256, shadow = false }) {
+function nonEmptyBoundedText(value, maxLength, fallback) {
+  const normalized = String(value ?? '').trim();
+  const text = normalized.length > 0 ? normalized : fallback;
+  let codePoints = 0;
+  let end = 0;
+  for (const symbol of text) {
+    if (codePoints >= maxLength) break;
+    codePoints += 1;
+    end += symbol.length;
+  }
+  if (end === text.length) return text;
+  let truncatedEnd = 0;
+  let retained = 0;
+  for (const symbol of text) {
+    if (retained >= Math.max(0, maxLength - 1)) break;
+    retained += 1;
+    truncatedEnd += symbol.length;
+  }
+  return `${text.slice(0, truncatedEnd)}…`;
+}
+
+function publicFailure(failure) {
+  return {
+    stage: nonEmptyBoundedText(failure?.stage, 300, 'unknown-stage'),
+    status: failureStatus(failure?.status),
+    error: nonEmptyBoundedText(failure?.error, 4_000, 'runner returned no result'),
+    ...(typeof failure?.diagnostic === 'string' && failure.diagnostic.trim().length > 0
+      ? { diagnostic: nonEmptyBoundedText(failure.diagnostic, 4_000, 'diagnostic unavailable') }
+      : {}),
+  };
+}
+
+function reviewJsonBytes(review) {
+  return Buffer.byteLength(`${JSON.stringify(review, null, 2)}\n`);
+}
+
+function failureStatus(value) {
+  return value === 'schema_error' ? 'schema_error' : 'infra_error';
+}
+
+function failureReport(total, retained, counts) {
+  const omitted = total - retained;
+  const detail = ['infra_error', 'schema_error']
+    .filter((status) => counts[status] > 0)
+    .map((status) => `${status}=${counts[status]}`)
+    .join(', ');
+  return {
+    stage: 'failure-report',
+    status: 'infra_error',
+    error: `Failure report truncated: ${omitted} of ${total} omitted (${detail}); decision remains infrastructure_failure`,
+  };
+}
+
+function publicFailureCounts(failures) {
+  const counts = { infra_error: 0, schema_error: 0 };
+  for (const failure of failures) counts[failureStatus(failure?.status)] += 1;
+  return counts;
+}
+
+export function compactReviewFailures(failures, {
+  findings = [],
+  maxBytes = MAX_REVIEW_JSON_BYTES,
+} = {}) {
+  if (!Array.isArray(failures)) throw new TypeError('failures must be an array');
+  if (!Array.isArray(findings)) throw new TypeError('findings must be an array');
+  const total = failures.length;
+  const omittedCounts = publicFailureCounts(failures);
+  const retained = [];
+  const limit = Math.min(total, MAX_PUBLIC_FAILURES);
+  for (let index = 0; index < limit; index += 1) {
+    const candidate = publicFailure(failures[index]);
+    const candidateStatus = failureStatus(failures[index]?.status);
+    omittedCounts[candidateStatus] -= 1;
+    const omitted = total - retained.length - 1;
+    const compacted = omitted > 0
+      ? [...retained, candidate, failureReport(total, retained.length + 1, omittedCounts)]
+      : [...retained, candidate];
+    if (compacted.length > MAX_PUBLIC_FAILURES || reviewJsonBytes({
+      version: 'v1', decision: 'infrastructure_failure', findings, failures: compacted,
+    }) > maxBytes) {
+      omittedCounts[candidateStatus] += 1;
+      break;
+    }
+    retained.push(candidate);
+  }
+  if (retained.length === total) return retained;
+  const report = failureReport(total, retained.length, omittedCounts);
+  const compacted = [...retained.slice(0, MAX_PUBLIC_FAILURES - 1), report];
+  if (reviewJsonBytes({
+    version: 'v1', decision: 'infrastructure_failure', findings, failures: compacted,
+  }) <= maxBytes) return compacted;
+  const allCounts = publicFailureCounts(failures);
+  const fallback = [failureReport(total, 0, allCounts)];
+  if (reviewJsonBytes({
+    version: 'v1', decision: 'infrastructure_failure', findings: [], failures: fallback,
+  }) <= maxBytes) return fallback;
+  throw new Error('infrastructure failure report exceeds review.json publication budget');
+}
+
+export function compactFinalReview(review, maxBytes = MAX_REVIEW_JSON_BYTES) {
+  if (!review || typeof review !== 'object' || Array.isArray(review)) throw new TypeError('review must be an object');
+  if (!Array.isArray(review.findings) || !Array.isArray(review.failures)) {
+    throw new TypeError('review findings and failures must be arrays');
+  }
+  if (review.decision === 'infrastructure_failure') {
+    if (review.findings.length === 0
+      && review.failures.length <= MAX_PUBLIC_FAILURES
+      && reviewJsonBytes(review) <= maxBytes) return review;
+    const failures = compactReviewFailures(review.failures, { findings: [], maxBytes });
+    return { ...review, findings: [], failures };
+  }
+  if (review.findings.length <= MAX_PUBLIC_FINDINGS
+    && review.failures.length === 0
+    && reviewJsonBytes(review) <= maxBytes) return review;
+  const fallback = {
+    version: 'v1',
+    decision: 'infrastructure_failure',
+    findings: [],
+    failures: [{
+      stage: 'artifact-budget',
+      status: 'infra_error',
+      error: 'Validated review output exceeded the final review publication contract; no code verdict was published.',
+    }],
+  };
+  if (reviewJsonBytes(fallback) > maxBytes) throw new Error('review.json publication fallback exceeds size limit');
+  return fallback;
+}
+
+function markdownBytes(lines) {
+  return Buffer.byteLength(`${lines.join('\n')}\n`);
+}
+
+function appendMarkdown(lines, entry, footer = []) {
+  return markdownBytes([...lines, ...entry, ...footer]) <= MAX_REVIEW_MARKDOWN_BYTES;
+}
+
+function minimalInfrastructureMarkdown({ shadow } = {}) {
+  const values = [
+    shadow ? '## Central review (shadow)' : '## Central review',
+    '',
+    '**Decision:** `infrastructure_failure`',
+    '',
+    'The review could not complete safely within the publication budget. No approval or code finding was inferred.',
+  ];
+  const rendered = `${values.join('\n')}\n`;
+  if (Buffer.byteLength(rendered) > MAX_REVIEW_MARKDOWN_BYTES) {
+    throw new Error('minimal review.md exceeds publication size limit');
+  }
+  return rendered;
+}
+
+export function renderReviewMarkdown(review, metadata) {
+  const {
+    headOid, policyVersion, policySha256, shadow = false,
+  } = metadata;
   const lines = [
     shadow ? '## Central review (shadow)' : '## Central review',
     '',
-    `**Decision:** \`${review.decision}\``,
-    `**Reviewed head:** \`${headOid}\``,
-    `**Policy:** \`${policyVersion}\``,
-    `**Policy SHA-256:** \`${policySha256}\``,
+    `**Decision:** ${markdownCodeSpan(review.decision)}`,
+    `**Reviewed head:** ${markdownCodeSpan(headOid)}`,
+    `**Policy:** ${markdownCodeSpan(policyVersion)}`,
+    `**Policy SHA-256:** ${markdownCodeSpan(policySha256)}`,
   ];
+  if (markdownBytes(lines) > MAX_REVIEW_MARKDOWN_BYTES) {
+    return minimalInfrastructureMarkdown(metadata);
+  }
   if (review.decision === 'infrastructure_failure') {
-    lines.push('', 'The review could not complete safely. No approval or code finding was inferred from the failed stages.', '');
-    for (const failure of review.failures) {
-      lines.push(
+    const introduction = [
+      '',
+      'The review could not complete safely. No approval or code finding was inferred from the failed stages.',
+      '',
+    ];
+    if (!appendMarkdown(lines, introduction)) return minimalInfrastructureMarkdown(metadata);
+    lines.push(...introduction);
+    let omitted = 0;
+    for (const [index, failure] of review.failures.entries()) {
+      const entry = [
         `- ${markdownCodeSpan(failure.stage)} — ${markdownCodeSpan(failure.status)}: ${markdownCodeSpan(failure.error)}`,
-      );
-      if (failure.diagnostic) lines.push(`  - diagnostic: ${markdownCodeSpan(failure.diagnostic)}`);
+        ...(failure.diagnostic ? [`  - diagnostic: ${markdownCodeSpan(failure.diagnostic)}`] : []),
+      ];
+      const remaining = review.failures.length - index - 1;
+      const footer = remaining > 0
+        ? ['', `${remaining} failure report(s) omitted to stay within the publication budget; decision remains infrastructure_failure.`]
+        : [];
+      if (!appendMarkdown(lines, entry, footer)) {
+        omitted = review.failures.length - index;
+        break;
+      }
+      lines.push(...entry);
     }
-    return `${lines.join('\n')}\n`;
+    if (omitted > 0) {
+      const footer = ['', `${omitted} failure report(s) omitted to stay within the publication budget; decision remains infrastructure_failure.`];
+      if (!appendMarkdown(lines, footer)) return minimalInfrastructureMarkdown(metadata);
+      lines.push(...footer);
+    }
+    const rendered = `${lines.join('\n')}\n`;
+    return Buffer.byteLength(rendered) <= MAX_REVIEW_MARKDOWN_BYTES
+      ? rendered
+      : minimalInfrastructureMarkdown(metadata);
   }
   if (review.findings.length === 0) {
-    lines.push('', 'No validated findings survived the five-vote gate.');
-    return `${lines.join('\n')}\n`;
+    const empty = ['', 'No validated findings survived the five-vote gate.'];
+    if (!appendMarkdown(lines, empty)) return minimalInfrastructureMarkdown(metadata);
+    return `${[...lines, ...empty].join('\n')}\n`;
   }
+  if (!appendMarkdown(lines, [''])) return minimalInfrastructureMarkdown(metadata);
   lines.push('');
-  for (const finding of review.findings) {
-    lines.push(
+  let omitted = 0;
+  for (const [index, finding] of review.findings.entries()) {
+    const entry = [
       `### [${finding.severity}] ${finding.title}`,
       '',
-      `\`${finding.path}:${finding.line}\` · \`${finding.taxonomy}\``,
+      `${markdownCodeSpan(`${finding.path}:${finding.line}`)} · ${markdownCodeSpan(finding.taxonomy)}`,
       '',
       finding.evidence,
       '',
       `**Root cause:** ${finding.rootCause}`,
       '',
-    );
+    ];
+    const remaining = review.findings.length - index - 1;
+    const footer = remaining > 0
+      ? [`${remaining} validated finding(s) omitted to stay within the publication budget.`, '']
+      : [];
+    if (!appendMarkdown(lines, entry, footer)) {
+      omitted = review.findings.length - index;
+      break;
+    }
+    lines.push(...entry);
   }
-  return `${lines.join('\n').trimEnd()}\n`;
+  if (omitted > 0) {
+    const footer = [`${omitted} validated finding(s) omitted to stay within the publication budget.`];
+    if (!appendMarkdown(lines, footer)) return minimalInfrastructureMarkdown(metadata);
+    lines.push(...footer);
+  }
+  const rendered = `${lines.join('\n').trimEnd()}\n`;
+  return Buffer.byteLength(rendered) <= MAX_REVIEW_MARKDOWN_BYTES
+    ? rendered
+    : minimalInfrastructureMarkdown(metadata);
 }
 
 export async function executeReview({
@@ -163,12 +368,17 @@ export async function executeReview({
   } finally {
     await snapshot?.cleanup();
   }
-  const review = {
+  const rawFailures = Array.isArray(result.failures) ? result.failures : [];
+  const publicFindings = result.findings.map(publicFinding);
+  const decision = finalDecision({ ...result, failures: rawFailures }, trustedPolicy);
+  const review = compactFinalReview({
     version: 'v1',
-    decision: finalDecision(result, trustedPolicy),
-    findings: result.findings.map(publicFinding),
-    failures: result.failures,
-  };
+    decision,
+    findings: decision === 'infrastructure_failure' ? [] : publicFindings,
+    failures: decision === 'infrastructure_failure'
+      ? compactReviewFailures(rawFailures, { findings: [] })
+      : [],
+  });
   return {
     review,
     markdown: renderReviewMarkdown(review, {

@@ -4,9 +4,25 @@ import { safeRelativePath } from './diff-sharder.mjs';
 const REQUIRED = ['taxonomy', 'path', 'line', 'title', 'evidence', 'rootCause', 'severity'];
 const FINDER_FIELDS = ['version', ...REQUIRED].sort();
 const SEVERITIES = new Set(['blocker', 'major', 'minor']);
+const TAXONOMY_ID = /^[a-z][a-z0-9-]{0,63}$/;
+const MAX_FINDER_CANDIDATES = 128;
+const MAX_TEXT_LENGTH = Object.freeze({
+  taxonomy: 64,
+  path: 500,
+  title: 180,
+  evidence: 6_000,
+  rootCause: 2_000,
+});
+
+function textLength(value) {
+  return [...value].length;
+}
 
 function normalizedText(value, name) {
   if (typeof value !== 'string' || value.trim() === '') throw new TypeError(`${name} must be a non-empty string`);
+  if (MAX_TEXT_LENGTH[name] !== undefined && textLength(value) > MAX_TEXT_LENGTH[name]) {
+    throw new TypeError(`${name} must be at most ${MAX_TEXT_LENGTH[name]} characters`);
+  }
   return value.trim().replace(/\s+/g, ' ');
 }
 
@@ -45,11 +61,27 @@ export function canonicalizeFinderCandidate(candidate, assignedTaxonomy) {
   }
   if (candidate.version !== 'v1') throw new TypeError('finding version must be "v1"');
   const dimensionId = typeof assignedTaxonomy === 'string' ? assignedTaxonomy : assignedTaxonomy?.id;
-  if (typeof dimensionId !== 'string' || dimensionId.length === 0) throw new TypeError('assigned taxonomy id is required');
+  if (typeof dimensionId !== 'string' || !TAXONOMY_ID.test(dimensionId)) throw new TypeError('assigned taxonomy id is required');
   if (candidate.taxonomy !== dimensionId) {
     throw new TypeError(`candidate taxonomy must exactly equal assigned dimension "${dimensionId}"`);
   }
+  if (!TAXONOMY_ID.test(candidate.taxonomy)) throw new TypeError('taxonomy must be a canonical dimension id');
+  if (!SEVERITIES.has(candidate.severity)) throw new TypeError('severity must be blocker, major, or minor');
   return canonicalizeFinding(candidate);
+}
+
+export function canonicalizeFinderCandidates(candidates, assignedTaxonomy) {
+  if (!Array.isArray(candidates)) throw new TypeError('finder data must be an array');
+  if (candidates.length > MAX_FINDER_CANDIDATES) {
+    throw new TypeError(`finder data must contain at most ${MAX_FINDER_CANDIDATES} candidates`);
+  }
+  return candidates.map((candidate, index) => {
+    try {
+      return canonicalizeFinderCandidate(candidate, assignedTaxonomy);
+    } catch (error) {
+      throw new TypeError(`candidate-${index}: ${error.message}`);
+    }
+  });
 }
 
 export function fingerprintFinding(finding) {
