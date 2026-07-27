@@ -14,6 +14,14 @@ function plan(assignments = [{ id: 'a', shardIndexes: [0] }]) {
   return { status: 'ok', data: { assignments }, transcript: 'never pass this' };
 }
 
+async function waitFor(predicate, message) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(message);
+}
+
 test('preserves bounded runner diagnostics on stage infrastructure failure', async () => {
   const result = await runReview({
     diff: 'd',
@@ -82,6 +90,102 @@ test('starts one independent Terra finder for every taxonomy dimension', async (
   assert.deepEqual(finders.map((request) => request.taxonomy).sort(), dimensions.sort());
   assert.ok(finders.every((request) => request.model === 'terra'));
   assert.ok(finders.every((request) => !('plan' in request) && !('transcript' in request)));
+});
+
+test('bounds Terra finder concurrency at two without dropping queued taxonomy work', async () => {
+  const dimensions = Array.from({ length: 8 }, (_, index) => `dimension-${index}`);
+  const started = [];
+  const releases = [];
+  let active = 0;
+  let peak = 0;
+  const review = runReview({
+    diff: 'diff --git a/a.mjs b/a.mjs\n', taxonomy: dimensions,
+    runner: runnerFor(async (request) => {
+      if (request.stage === 'plan') return plan();
+      if (request.stage === 'summary') return { status: 'ok', data: { summary: 'one file', files: ['a.mjs'] } };
+      if (request.stage === 'find') {
+        started.push(request.taxonomy);
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => releases.push(resolve));
+        active -= 1;
+        return request.taxonomy === 'dimension-0'
+          ? { status: 'infra_error', error: 'provider unavailable' }
+          : { status: 'ok', data: [] };
+      }
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+
+  for (let released = 0; released < dimensions.length; released += 2) {
+    const expectedStarted = Math.min(released + 2, dimensions.length);
+    await waitFor(
+      () => started.length === expectedStarted,
+      `expected ${expectedStarted} queued finders to start`,
+    );
+    assert.ok(active <= 2);
+    releases.splice(0).forEach((resolve) => resolve());
+  }
+
+  const result = await review;
+  assert.equal(peak, 2);
+  assert.deepEqual(started, dimensions);
+  assert.deepEqual(result.findings, []);
+  assert.deepEqual(result.failures, [{
+    stage: 'find:dimension-0:batch-0',
+    status: 'infra_error',
+    error: 'provider unavailable',
+  }]);
+});
+
+test('preserves taxonomy and batch order when bounded finder lanes finish out of order', async () => {
+  const dimensions = ['slow', 'fast', 'queued'];
+  const diff = `diff --git a/large.js b/large.js\n${'x'.repeat(41)}`;
+  const calls = [];
+  let releaseSlow;
+  const slowGate = new Promise((resolve) => { releaseSlow = resolve; });
+  const review = runReview({
+    diff,
+    taxonomy: dimensions,
+    maxShardChars: 10,
+    maxFinderChars: 15,
+    runner: runnerFor(async (request) => {
+      if (request.stage === 'plan') return plan([{ id: 'first', shardIndexes: [0] }]);
+      if (request.stage === 'summary') return { status: 'ok', data: { summary: 'bounded', files: request.assignment.paths } };
+      if (request.stage === 'find') {
+        calls.push({ taxonomy: request.taxonomy, diff: request.diff, paths: request.paths });
+        if (request.taxonomy === 'slow' && calls.filter((call) => call.taxonomy === 'slow').length === 1) {
+          await slowGate;
+        }
+        if (request.taxonomy === 'slow' || request.taxonomy === 'queued') {
+          return { status: 'infra_error', error: `${request.taxonomy} failure` };
+        }
+        return { status: 'ok', data: [] };
+      }
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+
+  await waitFor(
+    () => calls.some((call) => call.taxonomy === 'queued'),
+    'fast lane should finish and admit queued taxonomy while slow lane is blocked',
+  );
+  releaseSlow();
+  const result = await review;
+
+  for (const dimension of dimensions) {
+    const scoped = calls.filter((call) => call.taxonomy === dimension);
+    assert.ok(scoped.length > 1);
+    assert.equal(scoped.map((call) => call.diff).join(''), diff);
+    assert.ok(scoped.every((call) => call.paths[0] === 'large.js'));
+  }
+  assert.deepEqual(
+    result.failures.map((failure) => failure.stage),
+    [
+      ...calls.filter((call) => call.taxonomy === 'slow').map((_, index) => `find:slow:batch-${index}`),
+      ...calls.filter((call) => call.taxonomy === 'queued').map((_, index) => `find:queued:batch-${index}`),
+    ],
+  );
 });
 
 test('runs every Luna assignment and fills uncovered shards deterministically', async () => {

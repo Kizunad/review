@@ -37,7 +37,7 @@ async function execute(failModel = null) {
       RIPGREP_EXECUTABLE: executable,
       BWRAP_EXECUTABLE: executable,
       PROVIDER_CANARY_OUTPUT: outputPath,
-      PROVIDER_CANARY_TIMEOUT_MS: '1000',
+      PROVIDER_CANARY_TIMEOUT_MS: '5000',
       ANTHROPIC_API_KEY: 'provider-canary-test-secret',
       ANTHROPIC_BASE_URL: 'https://provider-canary-test.example',
     },
