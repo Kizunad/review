@@ -9,7 +9,7 @@ const MAX_PUBLIC_FAILURES = 512;
 const MAX_PUBLIC_FINDINGS = 128;
 export const MAX_REVIEW_JSON_BYTES = 1_048_576;
 export const MAX_REVIEW_MARKDOWN_BYTES = 65_536;
-export const ABSOLUTE_DIFF_BYTES = 262_144;
+export const ABSOLUTE_DIFF_BYTES = 1_048_576;
 
 function markdownCodeSpan(value) {
   const text = String(value);

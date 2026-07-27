@@ -117,7 +117,50 @@ test('shards diffs above the finder budget and bounds absolute input before spaw
   assert.deepEqual(oversized.review.findings, []);
   assert.match(oversized.review.failures[0].error, new RegExp(`absolute ${ABSOLUTE_DIFF_BYTES} byte safety limit`));
 });
+test('rejects multibyte diffs above the byte limit before spawning Claude', async () => {
+  const { callerRoot } = await fixture();
+  const overLimitUnicode = '界'.repeat(349_526);
+  assert.ok(overLimitUnicode.length < ABSOLUTE_DIFF_BYTES);
+  assert.ok(Buffer.byteLength(overLimitUnicode) > ABSOLUTE_DIFF_BYTES);
 
+  const result = await executeReview({
+    centralRoot: path.resolve('.'),
+    callerRoot,
+    repository: 'org/repo',
+    diff: overLimitUnicode,
+    policy,
+    policySha256,
+    executable: '/must-not-spawn/claude',
+    ripgrepExecutable: '/must-not-spawn/rg',
+    sandboxExecutable: '/must-not-spawn/bwrap',
+    environment: { PATH: process.env.PATH },
+  });
+
+  assert.equal(result.review.decision, 'infrastructure_failure');
+  assert.match(result.review.failures[0].error, new RegExp(`absolute ${ABSOLUTE_DIFF_BYTES} byte safety limit`));
+});
+
+test('rejects a reported diff byte length below the supplied UTF-8 bytes before spawning Claude', async () => {
+  const { callerRoot } = await fixture();
+  const diff = '界x';
+
+  const result = await executeReview({
+    centralRoot: path.resolve('.'),
+    callerRoot,
+    repository: 'org/repo',
+    diff,
+    diffByteLength: Buffer.byteLength(diff) - 1,
+    policy,
+    policySha256,
+    executable: '/must-not-spawn/claude',
+    ripgrepExecutable: '/must-not-spawn/rg',
+    sandboxExecutable: '/must-not-spawn/bwrap',
+    environment: { PATH: process.env.PATH },
+  });
+
+  assert.equal(result.review.decision, 'infrastructure_failure');
+  assert.match(result.review.failures[0].error, /no smaller than the supplied diff bytes/);
+});
 
 test('run-review emits a verifiable infrastructure artifact without reading an absolute-limit diff', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'run-review-limit-'));

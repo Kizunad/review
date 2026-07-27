@@ -38,7 +38,7 @@ bwrap --unshare-all --share-net --as-pid-1 ... \
 - GitHub credentials are removed from every Claude child process.
 - Review artifacts are schema-checked and cryptographically bound to the exact repository, PR, run ID, run attempt, workflow revision, policy SHA-256, base OID, and head OID.
 - Provider, CLI, timeout, schema, stale-head, and artifact failures fail closed as infrastructure failures rather than fabricated code findings.
-- Raw diffs are read with a fixed 262,144-byte safety bound. The lower caller budget controls each Terra finder batch rather than rejecting the complete diff before deterministic sharding; absolute-limit failures still produce bound infrastructure artifacts.
+- Raw diffs are read with a fixed 1,048,576-byte (1 MiB) UTF-8 safety bound. The lower caller budgets count JavaScript UTF-16 code units and control each Luna shard and Terra finder batch rather than rejecting the complete diff before deterministic sharding; absolute-limit failures still produce bound infrastructure artifacts.
 
 ## Repository layout
 

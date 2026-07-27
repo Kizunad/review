@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { ABSOLUTE_DIFF_BYTES, executeReview } from './review-entry.mjs';
+import { readBoundedUtf8File } from './diff-input.mjs';
 import { createManifest } from './artifact-manifest.mjs';
 import { sha256 } from './pr-context.mjs';
 
@@ -21,11 +22,10 @@ const context = JSON.parse(await readFile(process.env.CONTEXT_PATH, 'utf8'));
 const policyBytes = await readFile(process.env.POLICY_FILE, 'utf8');
 const policy = JSON.parse(policyBytes);
 const policySha256 = sha256(policyBytes);
-const diffStats = await stat(process.env.DIFF_PATH);
-if (!diffStats.isFile()) throw new Error('DIFF_PATH must be a regular file');
-const diff = diffStats.size <= ABSOLUTE_DIFF_BYTES
-  ? await readFile(process.env.DIFF_PATH, 'utf8')
-  : '';
+const { text: diff, byteLength: diffByteLength } = await readBoundedUtf8File(
+  process.env.DIFF_PATH,
+  ABSOLUTE_DIFF_BYTES,
+);
 const executable = path.resolve(process.env.CLAUDE_EXECUTABLE);
 const ripgrepExecutable = path.resolve(process.env.RIPGREP_EXECUTABLE);
 const sandboxExecutable = path.resolve(process.env.BWRAP_EXECUTABLE);
@@ -34,7 +34,7 @@ const { review, markdown } = await executeReview({
   callerRoot,
   repository: process.env.REPOSITORY,
   diff,
-  diffByteLength: diffStats.size,
+  diffByteLength,
   policy,
   policySha256,
   environment: process.env,
