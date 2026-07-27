@@ -1,4 +1,4 @@
-import { dedupeFindings } from './findings.mjs';
+import { canonicalizeFinderCandidate, dedupeFindings } from './findings.mjs';
 import { decideRound, isCountableVote } from './vote-gate.mjs';
 import { groupShards, shardDiff } from './diff-sharder.mjs';
 
@@ -178,19 +178,38 @@ export async function runReview({
     },
   )).flat();
   const candidates = [];
+  let finderFailed = false;
   for (const { dimension, batch, finder } of finderResults) {
     const dimensionId = typeof dimension === 'string' ? dimension : dimension?.id ?? 'unknown';
     const stage = `find:${dimensionId}:batch-${batch.index}`;
     if (!stageOk(finder)) {
       failures.push(stageFailure(stage, finder));
+      finderFailed = true;
       continue;
     }
     if (!Array.isArray(finder.data)) {
       failures.push({ stage, status: 'schema_error', error: 'finder data must be an array' });
+      finderFailed = true;
       continue;
     }
-    candidates.push(...finder.data);
+    const batchCandidates = [];
+    let batchFailed = false;
+    for (const [candidateIndex, candidate] of finder.data.entries()) {
+      try {
+        batchCandidates.push(canonicalizeFinderCandidate(candidate, dimension));
+      } catch (error) {
+        failures.push({
+          stage: `${stage}:candidate-${candidateIndex}`,
+          status: 'schema_error',
+          error: error.message,
+        });
+        batchFailed = true;
+        finderFailed = true;
+      }
+    }
+    if (!batchFailed) candidates.push(...batchCandidates);
   }
+  if (finderFailed) return { findings: [], failures };
 
   const accepted = [];
   for (const candidate of dedupeFindings(candidates)) {

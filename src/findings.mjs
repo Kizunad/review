@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { safeRelativePath } from './diff-sharder.mjs';
 
 const REQUIRED = ['taxonomy', 'path', 'line', 'title', 'evidence', 'rootCause', 'severity'];
+const FINDER_FIELDS = ['version', ...REQUIRED].sort();
 const SEVERITIES = new Set(['blocker', 'major', 'minor']);
 
 function normalizedText(value, name) {
@@ -29,6 +30,26 @@ export function canonicalizeFinding(finding) {
     severity,
   };
   return canonical;
+}
+
+export function canonicalizeFinderCandidate(candidate, assignedTaxonomy) {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    throw new TypeError('finding must be an object');
+  }
+  const fields = Object.keys(candidate).sort();
+  if (fields.length !== FINDER_FIELDS.length || fields.some((field, index) => field !== FINDER_FIELDS[index])) {
+    const missing = FINDER_FIELDS.find((field) => !fields.includes(field));
+    if (missing === 'taxonomy') throw new TypeError('finding is missing taxonomy');
+    if (missing) throw new TypeError(`finding is missing ${missing}`);
+    throw new TypeError('finder candidate fields do not match the v1 contract');
+  }
+  if (candidate.version !== 'v1') throw new TypeError('finding version must be "v1"');
+  const dimensionId = typeof assignedTaxonomy === 'string' ? assignedTaxonomy : assignedTaxonomy?.id;
+  if (typeof dimensionId !== 'string' || dimensionId.length === 0) throw new TypeError('assigned taxonomy id is required');
+  if (candidate.taxonomy !== dimensionId) {
+    throw new TypeError(`candidate taxonomy must exactly equal assigned dimension "${dimensionId}"`);
+  }
+  return canonicalizeFinding(candidate);
 }
 
 export function fingerprintFinding(finding) {

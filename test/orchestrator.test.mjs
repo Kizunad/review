@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { runReview } from '../src/orchestrator.mjs';
 
 const finding = {
-  taxonomy: 'security', path: 'src/a.mjs', line: 4, title: 'Missing guard', evidence: 'route is public', rootCause: 'no authorization', severity: 'major',
+  version: 'v1', taxonomy: 'security', path: 'src/a.mjs', line: 4, title: 'Missing guard', evidence: 'route is public', rootCause: 'no authorization', severity: 'major',
 };
 
 function runnerFor(handler) {
@@ -68,6 +68,117 @@ test('keeps all Sol output out of Terra input and accepts four confirmations', a
   assert.deepEqual(finder.summaries, [{ assignment: 'a', data: { summary: 'one file', files: ['a.mjs'] } }]);
   assert.equal(requests.filter((request) => request.stage === 'validate').length, 5);
   assert.ok(requests.filter((request) => request.stage === 'validate').every((request) => request.relatedDiff.includes('diff --git a/a.mjs b/a.mjs')));
+});
+
+
+test('fails closed with a candidate-specific taxonomy error before validation', async () => {
+  const requests = [];
+  const missingTaxonomy = { ...finding };
+  delete missingTaxonomy.taxonomy;
+  const result = await runReview({
+    diff: 'diff --git a/a.mjs b/a.mjs\n',
+    taxonomy: ['security'],
+    runner: runnerFor((request) => {
+      requests.push(request);
+      if (request.stage === 'plan') return plan();
+      if (request.stage === 'summary') return { status: 'ok', data: { summary: 'one file', files: ['a.mjs'] } };
+      if (request.stage === 'find') return { status: 'ok', data: [finding, missingTaxonomy] };
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+
+  assert.deepEqual(result.findings, []);
+  assert.deepEqual(result.failures, [{
+    stage: 'find:security:batch-0:candidate-1',
+    status: 'schema_error',
+    error: 'finding is missing taxonomy',
+  }]);
+  assert.equal(requests.some((request) => request.stage === 'validate' || request.stage === 'adjudicate'), false);
+  assert.equal(result.failures.some((failure) => failure.stage === 'orchestrator'), false);
+});
+
+test('rejects a finder candidate assigned to another taxonomy dimension', async () => {
+  const requests = [];
+  const result = await runReview({
+    diff: 'diff --git a/a.mjs b/a.mjs\n',
+    taxonomy: ['security'],
+    runner: runnerFor((request) => {
+      requests.push(request);
+      if (request.stage === 'plan') return plan();
+      if (request.stage === 'summary') return { status: 'ok', data: { summary: 'one file', files: ['a.mjs'] } };
+      if (request.stage === 'find') return { status: 'ok', data: [{ ...finding, taxonomy: 'correctness' }] };
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+
+  assert.deepEqual(result.findings, []);
+  assert.deepEqual(result.failures, [{
+    stage: 'find:security:batch-0:candidate-0',
+    status: 'schema_error',
+    error: 'candidate taxonomy must exactly equal assigned dimension "security"',
+  }]);
+  assert.equal(requests.some((request) => request.stage === 'validate' || request.stage === 'adjudicate'), false);
+});
+
+test('collects deterministic finder contract failures after all queued work completes', async () => {
+  const dimensions = ['slow', 'fast', 'queued'];
+  const diff = `diff --git a/large.js b/large.js\n${'x'.repeat(41)}`;
+  const calls = [];
+  const requests = [];
+  let releaseSlow;
+  const slowGate = new Promise((resolve) => { releaseSlow = resolve; });
+  const review = runReview({
+    diff,
+    taxonomy: dimensions,
+    maxShardChars: 10,
+    maxFinderChars: 15,
+    runner: runnerFor(async (request) => {
+      requests.push(request);
+      if (request.stage === 'plan') return plan([{ id: 'first', shardIndexes: [0] }]);
+      if (request.stage === 'summary') return { status: 'ok', data: { summary: 'bounded', files: request.assignment.paths } };
+      if (request.stage === 'find') {
+        const batchIndex = calls.filter((call) => call.taxonomy === request.taxonomy).length;
+        calls.push({ taxonomy: request.taxonomy, diff: request.diff, paths: request.paths, batchIndex });
+        if (request.taxonomy === 'slow' && batchIndex === 0) await slowGate;
+        if ((request.taxonomy === 'slow' && batchIndex === 1)
+          || (request.taxonomy === 'queued' && batchIndex === 0)) {
+          const missingTaxonomy = { ...finding };
+          delete missingTaxonomy.taxonomy;
+          return { status: 'ok', data: [{ ...missingTaxonomy, version: 'v1' }] };
+        }
+        return { status: 'ok', data: [] };
+      }
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+
+  await waitFor(
+    () => calls.some((call) => call.taxonomy === 'queued'),
+    'fast lane should finish and admit queued taxonomy while slow lane is blocked',
+  );
+  releaseSlow();
+  const result = await review;
+
+  for (const dimension of dimensions) {
+    const scoped = calls.filter((call) => call.taxonomy === dimension);
+    assert.ok(scoped.length > 1);
+    assert.equal(scoped.map((call) => call.diff).join(''), diff);
+    assert.ok(scoped.every((call) => call.paths[0] === 'large.js'));
+  }
+  assert.deepEqual(result.findings, []);
+  assert.deepEqual(result.failures, [
+    {
+      stage: 'find:slow:batch-1:candidate-0',
+      status: 'schema_error',
+      error: 'finding is missing taxonomy',
+    },
+    {
+      stage: 'find:queued:batch-0:candidate-0',
+      status: 'schema_error',
+      error: 'finding is missing taxonomy',
+    },
+  ]);
+  assert.equal(requests.some((request) => request.stage === 'validate' || request.stage === 'adjudicate'), false);
 });
 
 
