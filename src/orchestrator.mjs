@@ -2,6 +2,25 @@ import { dedupeFindings } from './findings.mjs';
 import { decideRound, isCountableVote } from './vote-gate.mjs';
 import { groupShards, shardDiff } from './diff-sharder.mjs';
 
+const MAX_FINDER_CONCURRENCY = 2;
+
+async function mapBounded(items, limit, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    async () => {
+      while (nextIndex < items.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        results[index] = await mapper(items[index], index);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
+}
+
 function stageFailure(stage, result) {
   return {
     stage,
@@ -141,19 +160,23 @@ export async function runReview({
   const finderBatches = shards.length > 0
     ? groupShards(shards, { maxChars: maxFinderChars })
     : [{ index: 0, shardIndexes: [], text: '', paths: [] }];
-  const finderResults = (await Promise.all(taxonomy.map(async (dimension) => {
-    const results = [];
-    for (const batch of finderBatches) {
-      results.push({
-        dimension,
-        batch,
-        finder: await runner.run({
-          stage: 'find', model: 'terra', taxonomy: dimension, paths: batch.paths, diff: batch.text, summaries,
-        }),
-      });
-    }
-    return results;
-  }))).flat();
+  const finderResults = (await mapBounded(
+    taxonomy,
+    MAX_FINDER_CONCURRENCY,
+    async (dimension) => {
+      const results = [];
+      for (const batch of finderBatches) {
+        results.push({
+          dimension,
+          batch,
+          finder: await runner.run({
+            stage: 'find', model: 'terra', taxonomy: dimension, paths: batch.paths, diff: batch.text, summaries,
+          }),
+        });
+      }
+      return results;
+    },
+  )).flat();
   const candidates = [];
   for (const { dimension, batch, finder } of finderResults) {
     const dimensionId = typeof dimension === 'string' ? dimension : dimension?.id ?? 'unknown';
