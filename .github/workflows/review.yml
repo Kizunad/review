@@ -380,11 +380,45 @@ jobs:
           decision="$(jq -er '
             if (
               type == "object" and
-              (keys | sort == ["decision","failures","findings","version"]) and
-              .version == "v1" and
+              (keys | sort == ["decision","failures","findings","omittedSuggestions","suggestions","version"]) and
+              .version == "v2" and
               (.decision == "approve" or .decision == "request_changes" or .decision == "infrastructure_failure") and
-              (.findings | type == "array") and
-              (.failures | type == "array")
+              (.findings | type == "array" and length <= 128 and all(.[];
+                type == "object" and
+                (keys | sort == ["evidence","fingerprint","level","line","path","rootCause","taxonomy","title"]) and
+                (.taxonomy | type == "string" and test("^[a-z][a-z0-9-]{0,63}$")) and
+                (.path | type == "string" and length >= 1 and length <= 500 and contains("\u0000") == false and startswith("/") == false and test("(^|/)\\.\\.(/|$)") == false) and
+                (.line | type == "number" and . >= 1 and floor == .) and
+                (.title | type == "string" and length >= 1 and length <= 180) and
+                (.evidence | type == "string" and length >= 1 and length <= 6000) and
+                (.rootCause | type == "string" and length >= 1 and length <= 2000) and
+                (.level == "blocker" or .level == "major" or .level == "minor") and
+                (.fingerprint | type == "string" and test("^[a-f0-9]{64}$")))) and
+              (.suggestions | type == "array" and length <= 16 and all(.[];
+                type == "object" and
+                (keys | sort == ["evidence","fingerprint","level","line","path","rootCause","taxonomy","title"]) and
+                (.taxonomy | type == "string" and test("^[a-z][a-z0-9-]{0,63}$")) and
+                (.path | type == "string" and length >= 1 and length <= 500 and contains("\u0000") == false and startswith("/") == false and test("(^|/)\\.\\.(/|$)") == false) and
+                (.line | type == "number" and . >= 1 and floor == .) and
+                (.title | type == "string" and length >= 1 and length <= 180) and
+                (.evidence | type == "string" and length >= 1 and length <= 6000) and
+                (.rootCause | type == "string" and length >= 1 and length <= 2000) and
+                .level == "suggestion" and
+                (.fingerprint | type == "string" and test("^[a-f0-9]{64}$")))) and
+              (.omittedSuggestions | type == "number" and . >= 0 and floor == .) and
+              (.failures | type == "array" and length <= 512 and all(.[];
+                type == "object" and
+                ((keys | sort == ["error","stage","status"]) or (keys | sort == ["diagnostic","error","stage","status"])) and
+                (.stage | type == "string" and length >= 1 and length <= 300) and
+                (.status == "infra_error" or .status == "schema_error") and
+                (.error | type == "string" and length >= 1 and length <= 4000) and
+                (has("diagnostic") == false or (.diagnostic | type == "string" and length >= 1 and length <= 4000)))) and
+              (if .decision == "infrastructure_failure"
+               then (.findings | length == 0) and (.suggestions | length == 0) and .omittedSuggestions == 0 and (.failures | length >= 1)
+               elif .decision == "approve"
+               then (.failures | length == 0) and all(.findings[]; .level == "minor")
+               else (.failures | length == 0) and (.findings | length >= 1)
+               end)
             ) then .decision else error("invalid final review schema") end
           ' _review/review.json)"
           printf 'decision=%s\n' "$decision" >> "$GITHUB_OUTPUT"

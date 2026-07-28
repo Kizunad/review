@@ -3,12 +3,13 @@
   "$id": "validator-vote.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "candidateFingerprint", "verdict", "reachable", "evidence", "reason"],
+  "required": ["version", "candidateFingerprint", "verdict", "reachable", "level", "evidence", "reason"],
   "properties": {
-    "version": { "type": "string", "const": "v1" },
+    "version": { "type": "string", "const": "v2" },
     "candidateFingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-    "verdict": { "type": "string", "enum": ["confirm", "reject"] },
+    "verdict": { "type": "string", "enum": ["confirm", "reject", "split"] },
     "reachable": { "type": "boolean" },
+    "level": { "type": "string", "enum": ["blocker", "major", "minor", "suggestion"] },
     "evidence": { "type": "string", "minLength": 1, "maxLength": 4000 },
     "reason": { "type": "string", "minLength": 1, "maxLength": 4000 }
   },
@@ -25,6 +26,13 @@
           "reachable": { "const": true }
         },
         "required": ["reachable"]
+      },
+      "else": {
+        "properties": {
+          "reachable": { "const": false },
+          "level": { "const": "suggestion" }
+        },
+        "required": ["reachable", "level"]
       }
     }
   ]

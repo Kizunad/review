@@ -3,9 +3,9 @@
   "$id": "final-review.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "decision", "findings", "failures"],
+  "required": ["version", "decision", "findings", "suggestions", "omittedSuggestions", "failures"],
   "properties": {
-    "version": { "type": "string", "const": "v1" },
+    "version": { "type": "string", "const": "v2" },
     "decision": { "type": "string", "enum": ["approve", "request_changes", "infrastructure_failure"] },
     "findings": {
       "type": "array",
@@ -13,19 +13,39 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["taxonomy", "path", "line", "title", "evidence", "rootCause", "severity", "fingerprint"],
+        "required": ["taxonomy", "path", "line", "title", "evidence", "rootCause", "level", "fingerprint"],
         "properties": {
           "taxonomy": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
-          "path": { "type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]{1,500}$" },
+          "path": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]{1,500}$" },
           "line": { "type": "integer", "minimum": 1 },
           "title": { "type": "string", "minLength": 1, "maxLength": 180 },
           "evidence": { "type": "string", "minLength": 1, "maxLength": 6000 },
           "rootCause": { "type": "string", "minLength": 1, "maxLength": 2000 },
-          "severity": { "type": "string", "enum": ["blocker", "major", "minor"] },
+          "level": { "type": "string", "enum": ["blocker", "major", "minor"] },
           "fingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
         }
       }
     },
+    "suggestions": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["taxonomy", "path", "line", "title", "evidence", "rootCause", "level", "fingerprint"],
+        "properties": {
+          "taxonomy": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+          "path": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]{1,500}$" },
+          "line": { "type": "integer", "minimum": 1 },
+          "title": { "type": "string", "minLength": 1, "maxLength": 180 },
+          "evidence": { "type": "string", "minLength": 1, "maxLength": 6000 },
+          "rootCause": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "level": { "type": "string", "const": "suggestion" },
+          "fingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        }
+      }
+    },
+    "omittedSuggestions": { "type": "integer", "minimum": 0 },
     "failures": {
       "type": "array",
       "maxItems": 512,
@@ -41,5 +61,54 @@
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "decision": { "const": "infrastructure_failure" } },
+        "required": ["decision"]
+      },
+      "then": {
+        "properties": {
+          "findings": { "maxItems": 0 },
+          "suggestions": { "maxItems": 0 },
+          "omittedSuggestions": { "const": 0 },
+          "failures": { "minItems": 1 }
+        }
+      },
+      "else": {
+        "properties": {
+          "failures": { "maxItems": 0 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "decision": { "const": "approve" } },
+        "required": ["decision"]
+      },
+      "then": {
+        "properties": {
+          "findings": {
+            "items": {
+              "properties": {
+                "level": { "const": "minor" }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "if": {
+          "properties": { "decision": { "const": "request_changes" } },
+          "required": ["decision"]
+        },
+        "then": {
+          "properties": {
+            "findings": { "minItems": 1 }
+          }
+        }
+      }
+    }
+  ]
 }

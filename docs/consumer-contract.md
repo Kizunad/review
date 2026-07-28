@@ -20,7 +20,7 @@ jobs:
     uses: Kizunad/review/.github/workflows/review.yml@<40-character-reviewed-commit>
     with:
       pr_number: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
-      policy_path: .github/review-policy/project.v1.json
+      policy_path: .github/review-policy/project.v2.json
       review_base_url: ${{ vars.REVIEW_CLAUDE_BASE_URL }}
       shadow: false
     secrets:
@@ -54,26 +54,31 @@ The central repository never owns the caller's provider credential. Rotating the
 
 ## Policy file
 
-The policy is read from the exact caller base OID before the PR head is checked out. It contains domain rules that do not belong in the central taxonomy, for example architecture boundaries, canonical helpers, generated-contract requirements, product invariants, or severity policy.
+The policy is read from the exact caller base OID before the PR head is checked out. It contains domain rules that do not belong in the central taxonomy, for example architecture boundaries, canonical helpers, generated-contract requirements, product invariants, or proposed impact levels.
 
 A policy must be a bounded UTF-8 JSON object with:
 
 ```json
 {
-  "version": "project-review-policy.v1",
+  "version": "project-review-policy.v2",
   "project": "owner/repository",
   "rules": [
     {
       "id": "canonical-invariant",
-      "severity": "major",
+      "level": "major",
       "text": "Describe a concrete, reviewable invariant."
+    },
+    {
+      "id": "optional-cleanup",
+      "level": "suggestion",
+      "text": "Describe a non-gating improvement with no claimed wrong result."
     }
   ],
-  "minorFindingsRequestChanges": true
+  "minorFindingsRequestChanges": false
 }
 ```
 
-Rules must be declarative review data. A policy cannot configure tools, commands, runners, action refs, shell, model names, arbitrary paths, hooks, MCP servers, or executable code. Its SHA-256 is recorded in the result manifest and comment.
+Rule levels are proposals, not final verdicts. Fresh validators independently assign `blocker`, `major`, `minor`, or `suggestion` to confirmations; reject and structural split votes use `suggestion` because they establish no defect level. At least four confirming seats must support a level or higher for a normal accepted vote round to publish that final level. `blocker` and `major` request changes, `minor` follows `minorFindingsRequestChanges`, and `suggestion` never changes the decision. Rules must be declarative review data. A policy cannot configure tools, commands, runners, action refs, shell, model names, arbitrary paths, hooks, MCP servers, or executable code. Its SHA-256 is recorded in the result manifest and comment.
 
 ## Identity and checkout
 
@@ -92,7 +97,7 @@ The review job uploads exactly the platform-defined outcome, Markdown, and manif
 - content whose SHA-256 differs from the signed manifest fields;
 - results produced for a stale PR head.
 
-Infrastructure failures are explicit outcomes and fail the stable review check; they are not converted into approval or findings. Validator confirmations are countable only when the same vote marks the defect reachable; semantically contradictory confirmation votes are discarded and their seats are retried. The platform also maintains a caller-owned GitHub issue as a trusted failure log: three distinct run-attempt infrastructure failures within one hour open a one-hour automatic circuit. Circuit state reads fail open, and an exact trusted `/review` issue comment bypasses the circuit for a manual retry. A caller may also set `circuit_manual_retry: true` for a trusted `workflow_dispatch` canary; that opt-in has no effect for any other event or comment command. An automatic run skipped by an open circuit remains a failing non-verdict check, so required review protection cannot turn green without a review. Gate failures never enter the circuit count.
+Infrastructure failures are explicit outcomes and fail the stable review check; they are not converted into approval or findings. Exact duplicates are first deduplicated across taxonomy dimensions by canonical repository path, line, and root cause; equivalent `.` segments, repeated separators, and slash styles cannot create path aliases. A fresh Sol consolidator may group same-path wording or nearby-line variants, but every input fingerprint must appear exactly once, the representative must be a member, and cross-path groups fail closed. Every validator receives every member and all provenance in its cluster. `confirm` means every member corroborates one reachable defect; `reject` means the cluster is structurally coherent but the claimed defect is unproven or false; `split` means two or more members require independent gates. Four split seats deterministically deconsolidate the cluster and enqueue each exact candidate for its own five-seat gate. Structural votes that lack a four-seat quorum after three rounds fail closed and never enter the binary adjudicator; singleton split votes are invalid and their seats are retried. Validator confirmations are countable only when the same vote marks the complete cluster reachable, carries the exact cluster fingerprint, and supplies an independent valid level; malformed or contradictory votes are discarded and their seats are retried. Accepted `blocker`, `major`, and `minor` defects are published in `findings`. Accepted `suggestion` results are non-gating and published separately after semantic deduplication; at most 16 appear in `suggestions`, with the non-negative `omittedSuggestions` count reporting additional advisory results. The platform also maintains a caller-owned GitHub issue as a trusted failure log: three distinct run-attempt infrastructure failures within one hour open a one-hour automatic circuit. Circuit state reads fail open, and an exact trusted `/review` issue comment bypasses the circuit for a manual retry. A caller may also set `circuit_manual_retry: true` for a trusted `workflow_dispatch` canary; that opt-in has no effect for any other event or comment command. An automatic run skipped by an open circuit remains a failing non-verdict check, so required review protection cannot turn green without a review. Gate failures never enter the circuit count.
 
 ## Upgrade and rollback
 

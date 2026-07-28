@@ -5,9 +5,26 @@
   "additionalProperties": false,
   "required": ["version", "candidateFingerprint", "decision", "reason"],
   "properties": {
-    "version": { "type": "string", "const": "v1" },
+    "version": { "type": "string", "const": "v2" },
     "candidateFingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "decision": { "type": "string", "enum": ["accept", "reject"] },
-    "reason": { "type": "string", "minLength": 1 }
-  }
+    "level": { "type": "string", "enum": ["blocker", "major", "minor", "suggestion"] },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 4000 }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "decision": { "const": "accept" }
+        },
+        "required": ["decision"]
+      },
+      "then": {
+        "required": ["level"]
+      },
+      "else": {
+        "not": { "required": ["level"] }
+      }
+    }
+  ]
 }

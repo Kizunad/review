@@ -1,18 +1,30 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { runFreshClaude } from './claude-cli.mjs';
-import { canonicalizeFinderCandidates } from './findings.mjs';
+import { canonicalizeFinderCandidates, consolidateFindings } from './findings.mjs';
+import { isCountableVote, validAdjudication } from './review-contract.mjs';
 
 const STAGE_SCHEMA = Object.freeze({
   plan: 'review-plan.schema.json',
   summary: 'luna-summary.schema.json',
   find: 'finding-candidates.schema.json',
+  consolidate: 'consolidation.schema.json',
   validate: 'validator-vote.schema.json',
   adjudicate: 'adjudication.schema.json',
 });
 
 function json(value) {
   return JSON.stringify(value, null, 2);
+}
+
+function levelInstructions() {
+  return [
+    'Classify impact independently as blocker, major, minor, or suggestion:',
+    '- blocker/major: a concrete reachable correctness, security, permission, conservation, user-visible behavior, cross-system contract, or factual documentation defect introduced or exposed by this change;',
+    '- minor: a reproducible defect with limited impact;',
+    '- suggestion: no demonstrable wrong result, only maintainability, naming, comment, optional defense, helper extraction, or finer assertions around already-correct coverage.',
+    'A proposed level is not authoritative. Never upgrade an improvement into a defect without a concrete wrong outcome.',
+  ].join('\n');
 }
 
 function stagePrompt(request, { policy, repository, skillPath, skill }) {
@@ -34,7 +46,7 @@ function stagePrompt(request, { policy, repository, skillPath, skill }) {
       return [
         ...common,
         'You are a fresh Luna summarizer. Summarize only the supplied diff shard: changed behavior, contracts, affected files, and boundaries later reviewers should inspect.',
-        'Do not produce findings, severities, votes, recommendations, or a verdict.',
+        'Do not produce findings, levels, votes, recommendations, or a verdict.',
         `Assignment:\n${json(request.assignment)}`,
         `Assigned diff:\n${request.diff}`,
       ].join('\n\n');
@@ -43,7 +55,8 @@ function stagePrompt(request, { policy, repository, skillPath, skill }) {
         ...common,
         `Explicitly apply the strict /code-review skill. Its trusted central contents are included below from ${skillPath}:\n${skill}`,
         'You are a fresh Terra finder. Sol output and transcripts are intentionally absent. Independently inspect the read-only repository to prove concrete, reachable defects.',
-        'Only report high-conviction issues introduced or exposed by the diff. Every finding requires version v1, a repository-relative path, positive line, evidence, root cause, and blocker/major/minor severity.',
+        'Only report high-conviction issues introduced or exposed by the diff. Every finding requires version v2, a repository-relative path, positive line, evidence, root cause, and a proposed level.',
+        levelInstructions(),
         'Never emit a partial candidate. Omit any candidate whose required fields are not all concretely supported; return [] when no complete candidate qualifies.',
         'Every returned candidate must include taxonomy exactly equal to the assigned taxonomy dimension id, not its title or another dimension.',
         `Assigned taxonomy dimension:\n${json(request.taxonomy)}`,
@@ -52,19 +65,33 @@ function stagePrompt(request, { policy, repository, skillPath, skill }) {
         `Diff batch paths:\n${json(request.paths)}`,
         `Immutable pull-request diff batch:\n${request.diff}`,
       ].join('\n\n');
+    case 'consolidate':
+      return [
+        ...common,
+        'You are a fresh Sol consolidator. Cluster only candidates that describe the same underlying root cause in the same repository path.',
+        'Every supplied fingerprint must appear exactly once. Every representativeFingerprint must be one of that cluster\'s memberFingerprints.',
+        'Do not merge different paths. Similar locations or topics are not enough when the root causes differ.',
+        'Do not add, omit, rewrite, relabel, or split candidates. Return only group membership and an existing representative fingerprint.',
+        `Exact-deduplicated candidates with provenance:\n${json(request.candidates)}`,
+      ].join('\n\n');
     case 'validate':
       return [
         ...common,
-        'You are a fresh Terra validator. Default to reject when evidence is insufficient. Independently try to refute the candidate by checking reachability and surrounding code.',
-        'You do not know other candidates, validators, vote totals, or earlier transcripts. Your candidateFingerprint must exactly match the supplied fingerprint.',
+        'You are a fresh Terra validator. Default to reject when evidence is insufficient. Independently try to refute every root cause represented in this consolidated cluster by checking reachability and surrounding code.',
+        'The complete member and provenance context is available. Confirm only when every member is corroborating evidence for one reachable underlying defect. Use split only when two or more members describe independent defects that require separate five-seat gates. Reject only when the cluster is structurally coherent but the claimed defect is unproven or false.',
+        'Independently assign the impact level for the complete cluster. Do not defer to the finder-proposed level. Reject and split votes must use level suggestion because neither establishes a defect level.',
+        levelInstructions(),
+        'You do not know other candidates, validators, vote totals, or earlier transcripts. Your candidateFingerprint must exactly match the supplied cluster fingerprint.',
         `Trusted caller policy:\n${json(policy)}`,
-        `Candidate:\n${json(request.candidate)}`,
+        `Consolidated cluster with every member and complete provenance:\n${json(request.candidate)}`,
         `Related immutable diff:\n${request.relatedDiff}`,
       ].join('\n\n');
     case 'adjudicate':
       return [
         ...common,
-        'You are a fresh Sol adjudicator used only after three complete split rounds. Decide accept or reject from the candidate and structured votes. Default to reject if the defect is not concretely proven.',
+        'You are a fresh Sol adjudicator used only after three complete existence-split rounds with no structural split votes. Decide accept or reject from the candidate and structured votes. Default to reject if the defect is not concretely proven.',
+        'For accept, independently return the final impact level; do not copy the finder-proposed level. Reject does not require a level.',
+        levelInstructions(),
         'Do not invent a new finding or use any prior transcript. Your candidateFingerprint must exactly match the supplied fingerprint.',
         `Trusted caller policy:\n${json(policy)}`,
         `Candidate:\n${json(request.candidate)}`,
@@ -73,16 +100,6 @@ function stagePrompt(request, { policy, repository, skillPath, skill }) {
     default:
       throw new TypeError(`unknown review stage: ${request.stage}`);
   }
-}
-
-function validVote(data, fingerprint) {
-  return data?.version === 'v1'
-    && data.candidateFingerprint === fingerprint
-    && (data.verdict === 'confirm' || data.verdict === 'reject')
-    && typeof data.reachable === 'boolean'
-    && (data.verdict !== 'confirm' || data.reachable === true)
-    && typeof data.evidence === 'string' && data.evidence.length > 0
-    && typeof data.reason === 'string' && data.reason.length > 0;
 }
 
 function validateStage(stage, data, request) {
@@ -94,13 +111,13 @@ function validateStage(stage, data, request) {
     case 'find':
       canonicalizeFinderCandidates(data, request.taxonomy);
       return true;
+    case 'consolidate':
+      consolidateFindings(request.candidates, data);
+      return true;
     case 'validate':
-      return validVote(data, request.candidate.fingerprint);
+      return isCountableVote(data, request.candidate.fingerprint);
     case 'adjudicate':
-      return data?.version === 'v1'
-        && data.candidateFingerprint === request.candidate.fingerprint
-        && (data.decision === 'accept' || data.decision === 'reject')
-        && typeof data.reason === 'string' && data.reason.length > 0;
+      return validAdjudication(data, request.candidate.fingerprint);
     default:
       return false;
   }

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "consolidation.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "clusters"],
+  "properties": {
+    "version": { "type": "string", "const": "v2" },
+    "clusters": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["representativeFingerprint", "memberFingerprints"],
+        "properties": {
+          "representativeFingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "memberFingerprints": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 128,
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+          }
+        }
+      }
+    }
+  }
+}
