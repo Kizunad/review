@@ -16,7 +16,15 @@ if (model === ${JSON.stringify(failModel)}) {
     type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 10,
     error_status: 524, error: 'gateway timeout',
   }) + '\\n');
-  process.exit(2);
+  process.stdout.write(JSON.stringify({
+    type: 'result', subtype: 'success', is_error: true,
+    api_error_status: 400, terminal_reason: 'api_error',
+    result: 'API Error: 400 model not found: ' + model
+      + '; key=provider-canary-test-secret'
+      + '; endpoint=https://provider-canary-test.example'
+      + '; Bearer leaked-bearer; token=leaked-token',
+  }) + '\\n');
+  process.exit(1);
 }
 process.stdout.write(JSON.stringify({
   type: 'result', subtype: 'success', structured_output: { ok: true },
@@ -79,8 +87,14 @@ test('records a redacted model-specific provider failure and still probes every 
   ]);
   assert.match(report.probes[1].diagnostic, /api_retry/);
   assert.match(report.probes[1].diagnostic, /524/);
+  assert.match(report.probes[1].diagnostic, /"apiErrorStatus":400/);
+  assert.match(report.probes[1].diagnostic, /"terminalReason":"api_error"/);
+  assert.match(report.probes[1].diagnostic, /model not found: luna/);
+  assert.match(report.probes[1].diagnostic, /REDACTED/);
   assert.equal(JSON.stringify(report).includes('provider-canary-test-secret'), false);
   assert.equal(JSON.stringify(report).includes('provider-canary-test.example'), false);
+  assert.equal(JSON.stringify(report).includes('leaked-bearer'), false);
+  assert.equal(JSON.stringify(report).includes('leaked-token'), false);
 });
 
 function validEnvironment(overrides = {}) {

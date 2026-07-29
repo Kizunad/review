@@ -57,6 +57,7 @@ export async function runProviderCanary({
         environment,
         timeoutMs,
         includeSuccessDiagnostic: true,
+        includeErrorResultDiagnostic: true,
         validate: (value) => value?.ok === true,
       });
       probes.push({

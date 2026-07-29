@@ -164,5 +164,6 @@ test('prompts lock clean v2, independent level voting, and no partial candidates
   assert.match(source, /Use split only when two or more members describe independent defects/);
   assert.match(source, /Reject only when the cluster is structurally coherent/);
   assert.match(source, /used only after three complete existence-split rounds with no structural split votes/);
+  assert.doesNotMatch(source, /includeErrorResultDiagnostic/);
   assert.match(source, /suggestion: no demonstrable wrong result/);
 });

@@ -20,6 +20,8 @@ const ALLOWED_ENV = new Set([
 ]);
 const EMPTY_MCP_CONFIG = '{"mcpServers":{}}';
 const SECRET_ENV = /(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|BASE_URL)/i;
+const ERROR_RESULT_DIAGNOSTIC_BYTES = 512;
+const TERMINAL_REASON = /^[a-z][a-z0-9_]{0,63}$/;
 
 export function sanitizedEnv(environment = process.env) {
   const safe = {};
@@ -160,10 +162,17 @@ function parseStreamJson(output) {
   return extractStructuredOutput(results[0]);
 }
 
-function streamDiagnostic(stdout, stderr, environment) {
+function streamDiagnostic(stdout, stderr, environment, { includeErrorResultDiagnostic = false } = {}) {
+  const lines = String(stdout ?? '').split('\n').filter((line) => line.trim().length > 0);
+  const resultEventCount = lines.reduce((count, line) => {
+    try {
+      return count + (JSON.parse(line)?.type === 'result' ? 1 : 0);
+    } catch {
+      return count;
+    }
+  }, 0);
   const events = [];
-  for (const line of String(stdout ?? '').split('\n')) {
-    if (line.trim().length === 0) continue;
+  for (const line of lines) {
     try {
       const event = JSON.parse(line);
       if (event?.type === 'system' && event.subtype === 'init') {
@@ -184,11 +193,25 @@ function streamDiagnostic(stdout, stderr, environment) {
           error: event.error,
         });
       } else if (event?.type === 'result') {
-        events.push({
+        const result = {
           type: 'result',
           subtype: event.subtype,
           isError: event.is_error === true,
-        });
+        };
+        if (includeErrorResultDiagnostic && resultEventCount === 1 && result.isError) {
+          if (Number.isInteger(event.api_error_status)
+            && event.api_error_status >= 100
+            && event.api_error_status <= 599) {
+            result.apiErrorStatus = event.api_error_status;
+          }
+          if (typeof event.terminal_reason === 'string' && TERMINAL_REASON.test(event.terminal_reason)) {
+            result.terminalReason = event.terminal_reason;
+          }
+          if (typeof event.result === 'string' && event.result.length > 0) {
+            result.resultExcerpt = diagnostic(event.result, environment, ERROR_RESULT_DIAGNOSTIC_BYTES);
+          }
+        }
+        events.push(result);
       }
     } catch {
       events.push({ type: 'non_json_output' });
@@ -233,6 +256,7 @@ export async function runFreshClaude({
   maxStdoutBytes = 1_000_000,
   maxStderrBytes = 64_000,
   includeSuccessDiagnostic = false,
+  includeErrorResultDiagnostic = false,
   spawn = nodeSpawn,
   validate = () => true,
 }) {
@@ -289,6 +313,7 @@ export async function runFreshClaude({
       Buffer.concat(stdoutChunks).toString('utf8'),
       Buffer.concat(stderrChunks).toString('utf8'),
       sourceEnvironment,
+      { includeErrorResultDiagnostic },
     );
     const finish = (result) => {
       if (settled) return;
@@ -345,7 +370,7 @@ export async function runFreshClaude({
         finish({
           status: 'infra_error',
           error: stderrDiagnostic ? `claude exited ${code ?? signal}: ${stderrDiagnostic}` : `claude exited ${code ?? signal}`,
-          diagnostic: streamDiagnostic(stdout, stderr, sourceEnvironment),
+          diagnostic: outputDiagnostic(),
         });
         return;
       }
@@ -356,7 +381,7 @@ export async function runFreshClaude({
         finish({
           status: 'infra_error',
           error: diagnostic(error.message, sourceEnvironment),
-          diagnostic: streamDiagnostic(stdout, stderr, sourceEnvironment),
+          diagnostic: outputDiagnostic(),
         });
         return;
       }
@@ -374,7 +399,7 @@ export async function runFreshClaude({
         data,
         stderr: diagnostic(stderr, sourceEnvironment),
         ...(includeSuccessDiagnostic
-          ? { diagnostic: streamDiagnostic(stdout, stderr, sourceEnvironment) }
+          ? { diagnostic: outputDiagnostic() }
           : {}),
       });
     });
