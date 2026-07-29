@@ -544,6 +544,7 @@ test('redacts quoted credential forms while keeping diagnostics valid JSON', asy
   const markers = [
     'JSON_TOKEN_LEAK_9f34c',
     'JSON_API_KEY_LEAK_9f34c',
+    'PERSISTED_LITERAL_ESCAPED_TOKEN_9f34c',
     'ESCAPED_JSON_TOKEN_LEAK_9f34c',
     'DOUBLE_BEARER_LEAK_9f34c',
     'SINGLE_BEARER_LEAK_9f34c',
@@ -558,6 +559,7 @@ test('redacts quoted credential forms while keeping diagnostics valid JSON', asy
         is_error: true,
         result: [
           '{"token":"JSON_TOKEN_LEAK_9f34c","api_key":"JSON_API_KEY_LEAK_9f34c"}',
+          String.raw`\{\"token\":\"PERSISTED_LITERAL_ESCAPED_TOKEN_9f34c\"\}`,
           '{"token":"prefix\\\"ESCAPED_JSON_TOKEN_LEAK_9f34c"}',
           'Authorization: Bearer "DOUBLE_BEARER_LEAK_9f34c"',
           "Authorization: Bearer 'SINGLE_BEARER_LEAK_9f34c'",

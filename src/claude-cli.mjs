@@ -40,12 +40,8 @@ function redactDiagnostic(value, environment) {
   for (const secret of secrets) output = output.split(secret).join('[REDACTED]');
   return output
     .replace(/\bsk-ant-[A-Za-z0-9_-]+\b/g, '[REDACTED]')
-    .replace(/\bBearer\s+"(?:\\.|[^"\\\r\n])*"/gi, 'Bearer "[REDACTED]"')
-    .replace(/\bBearer\s+'(?:\\.|[^'\\\r\n])*'/gi, "Bearer '[REDACTED]'")
-    .replace(/\bBearer\s+[^\s,"'}\]]+/gi, 'Bearer [REDACTED]')
-    .replace(/\b(api[_-]?key|token|secret|password)(["']?)\s*([:=])\s*"(?:\\.|[^"\\\r\n])*"/gi, '$1$2$3"[REDACTED]"')
-    .replace(/\b(api[_-]?key|token|secret|password)(["']?)\s*([:=])\s*'(?:\\.|[^'\\\r\n])*'/gi, "$1$2$3'[REDACTED]'")
-    .replace(/\b(api[_-]?key|token|secret|password)(["']?)\s*([:=])\s*[^\s,"'}\]]+/gi, '$1$2$3[REDACTED]');
+    .replace(/\bBearer\s+[^,;\r\n}\]]+/gi, 'Bearer [REDACTED]')
+    .replace(/\b(api[_-]?key|token|secret|password)(?:(?:\\+)?["'])?\s*[:=]\s*[^,;\r\n}\]]+/gi, '$1=[REDACTED]');
 }
 
 function truncateDiagnostic(value, maxBytes = 4_000) {
