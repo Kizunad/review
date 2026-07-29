@@ -491,6 +491,162 @@ test('caps stdout and stderr by bytes and terminates overflowing children', asyn
   }
 });
 
+test('keeps result text private by default and exposes only an opted-in bounded redacted error excerpt', async () => {
+  const secret = 'provider-secret-value';
+  const baseUrl = 'https://private-provider.example/tenant';
+  const sensitiveResult = [
+    'API Error: 400 model not found: luna',
+    `key=${secret}`,
+    `endpoint=${baseUrl}`,
+    'Bearer bearer-secret',
+    'token=token-secret',
+    'PROMPT_MARKER',
+    'PR_DIFF_MARKER',
+  ].join(' ');
+  const stdout = resultEvent(undefined, {
+    is_error: true,
+    api_error_status: 400,
+    terminal_reason: 'api_error',
+    result: sensitiveResult,
+    structured_output: undefined,
+  });
+  const environment = {
+    ANTHROPIC_API_KEY: secret,
+    ANTHROPIC_BASE_URL: baseUrl,
+  };
+
+  const privateResult = await runFreshClaude(baseRun({
+    environment,
+    spawn: fakeSpawn({ code: 1, stdout }),
+  }));
+  assert.equal(privateResult.status, 'infra_error');
+  assert.doesNotMatch(privateResult.diagnostic, /resultExcerpt|apiErrorStatus|terminalReason/);
+  assert.equal(privateResult.diagnostic.includes('PROMPT_MARKER'), false);
+  assert.equal(privateResult.diagnostic.includes('PR_DIFF_MARKER'), false);
+
+  const canaryResult = await runFreshClaude(baseRun({
+    environment,
+    includeErrorResultDiagnostic: true,
+    spawn: fakeSpawn({ code: 1, stdout }),
+  }));
+  assert.equal(canaryResult.status, 'infra_error');
+  assert.match(canaryResult.diagnostic, /"apiErrorStatus":400/);
+  assert.match(canaryResult.diagnostic, /"terminalReason":"api_error"/);
+  assert.match(canaryResult.diagnostic, /model not found: luna/);
+  assert.match(canaryResult.diagnostic, /REDACTED/);
+  assert.equal(JSON.stringify(canaryResult).includes(secret), false);
+  assert.equal(JSON.stringify(canaryResult).includes(baseUrl), false);
+  assert.equal(JSON.stringify(canaryResult).includes('bearer-secret'), false);
+  assert.equal(JSON.stringify(canaryResult).includes('token-secret'), false);
+});
+
+test('redacts quoted credential forms while keeping diagnostics valid JSON', async () => {
+  const markers = [
+    'JSON_TOKEN_LEAK_9f34c',
+    'JSON_API_KEY_LEAK_9f34c',
+    'PERSISTED_LITERAL_ESCAPED_TOKEN_9f34c',
+    'ESCAPED_JSON_TOKEN_LEAK_9f34c',
+    'DOUBLE_BEARER_LEAK_9f34c',
+    'SINGLE_BEARER_LEAK_9f34c',
+    'DOUBLE_TOKEN_LEAK_9f34c',
+    'SINGLE_TOKEN_LEAK_9f34c',
+  ];
+  const result = await runFreshClaude(baseRun({
+    includeErrorResultDiagnostic: true,
+    spawn: fakeSpawn({
+      code: 1,
+      stdout: resultEvent(undefined, {
+        is_error: true,
+        result: [
+          '{"token":"JSON_TOKEN_LEAK_9f34c","api_key":"JSON_API_KEY_LEAK_9f34c"}',
+          String.raw`\{\"token\":\"PERSISTED_LITERAL_ESCAPED_TOKEN_9f34c\"\}`,
+          '{"token":"prefix\\\"ESCAPED_JSON_TOKEN_LEAK_9f34c"}',
+          'Authorization: Bearer "DOUBLE_BEARER_LEAK_9f34c"',
+          "Authorization: Bearer 'SINGLE_BEARER_LEAK_9f34c'",
+          'token="DOUBLE_TOKEN_LEAK_9f34c"',
+          "token='SINGLE_TOKEN_LEAK_9f34c'",
+        ].join(' '),
+        structured_output: undefined,
+      }),
+    }),
+  }));
+
+  assert.equal(result.status, 'infra_error');
+  const parsed = JSON.parse(result.diagnostic);
+  assert.match(parsed.events[0].resultExcerpt, /REDACTED/);
+  for (const marker of markers) {
+    assert.equal(result.diagnostic.includes(marker), false, `${marker} must be redacted`);
+  }
+});
+
+test('bounds opted-in error excerpts by UTF-8 bytes', async () => {
+  const run = (result) => runFreshClaude(baseRun({
+    includeErrorResultDiagnostic: true,
+    spawn: fakeSpawn({
+      code: 1,
+      stdout: resultEvent(undefined, {
+        is_error: true,
+        result,
+        structured_output: undefined,
+      }),
+    }),
+  }));
+
+  const exact = await run('a'.repeat(512));
+  const exactDiagnostic = JSON.parse(exact.diagnostic);
+  assert.equal(exactDiagnostic.events[0].resultExcerpt, 'a'.repeat(512));
+  assert.equal(Buffer.byteLength(exactDiagnostic.events[0].resultExcerpt), 512);
+
+  const over = await run('界'.repeat(171));
+  const overDiagnostic = JSON.parse(over.diagnostic);
+  assert.ok(Buffer.byteLength(overDiagnostic.events[0].resultExcerpt) <= 512);
+  assert.match(overDiagnostic.events[0].resultExcerpt, /…$/u);
+  assert.doesNotMatch(overDiagnostic.events[0].resultExcerpt, /�/u);
+});
+
+test('allows only bounded typed error metadata and exactly one result event', async () => {
+  const probe = async (overrides, extraResult = '') => runFreshClaude(baseRun({
+    includeErrorResultDiagnostic: true,
+    spawn: fakeSpawn({
+      code: 1,
+      stdout: `${resultEvent(undefined, {
+        is_error: true,
+        result: 'bounded reason',
+        structured_output: undefined,
+        ...overrides,
+      })}${extraResult}`,
+    }),
+  }));
+
+  for (const status of [100, 599]) {
+    assert.match((await probe({ api_error_status: status })).diagnostic, new RegExp(`"apiErrorStatus":${status}`));
+  }
+  for (const api_error_status of [99, 600, 400.5, '400']) {
+    assert.doesNotMatch((await probe({ api_error_status })).diagnostic, /apiErrorStatus/);
+  }
+  for (const terminal_reason of ['api_error', 'a'.repeat(64)]) {
+    assert.match((await probe({ terminal_reason })).diagnostic, /terminalReason/);
+  }
+  for (const terminal_reason of ['', 'API error', 'api-error', 'a'.repeat(65), { unsafe: true }]) {
+    assert.doesNotMatch((await probe({ terminal_reason })).diagnostic, /terminalReason/);
+  }
+  for (const result of ['', { unsafe: true }, ['unsafe']]) {
+    assert.doesNotMatch((await probe({ result })).diagnostic, /resultExcerpt/);
+  }
+
+  const success = await runFreshClaude(baseRun({
+    includeErrorResultDiagnostic: true,
+    includeSuccessDiagnostic: true,
+    spawn: fakeSpawn({ stdout: resultEvent({ verdict: 'PASS' }, { result: 'must remain private' }) }),
+  }));
+  assert.equal(success.status, 'ok');
+  assert.doesNotMatch(success.diagnostic, /must remain private|resultExcerpt/);
+
+  const duplicate = await probe({}, resultEvent({ verdict: 'PASS' }));
+  assert.equal(duplicate.status, 'infra_error');
+  assert.doesNotMatch(duplicate.diagnostic, /bounded reason|resultExcerpt/);
+});
+
 test('can include bounded lifecycle diagnostics on successful canary probes', async () => {
   const result = await runFreshClaude(baseRun({
     includeSuccessDiagnostic: true,

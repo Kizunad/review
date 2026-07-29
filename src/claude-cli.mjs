@@ -20,6 +20,8 @@ const ALLOWED_ENV = new Set([
 ]);
 const EMPTY_MCP_CONFIG = '{"mcpServers":{}}';
 const SECRET_ENV = /(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|BASE_URL)/i;
+const ERROR_RESULT_DIAGNOSTIC_BYTES = 512;
+const TERMINAL_REASON = /^[a-z][a-z0-9_]{0,63}$/;
 
 export function sanitizedEnv(environment = process.env) {
   const safe = {};
@@ -29,20 +31,38 @@ export function sanitizedEnv(environment = process.env) {
   return safe;
 }
 
-function diagnostic(value, environment, maxBytes = 4_000) {
+function redactDiagnostic(value, environment) {
   let output = String(value ?? '');
   const secrets = Object.entries(environment ?? {})
     .filter(([key, secret]) => SECRET_ENV.test(key) && typeof secret === 'string' && secret.length >= 4)
     .map(([, secret]) => secret)
     .sort((left, right) => right.length - left.length);
   for (const secret of secrets) output = output.split(secret).join('[REDACTED]');
-  output = output
+  return output
     .replace(/\bsk-ant-[A-Za-z0-9_-]+\b/g, '[REDACTED]')
-    .replace(/\bBearer\s+[^\s"']+/gi, 'Bearer [REDACTED]')
-    .replace(/\b(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,"']+/gi, '$1=[REDACTED]');
+    .replace(/\bBearer\s+[^,;\r\n}\]]+/gi, 'Bearer [REDACTED]')
+    .replace(/\b(api[_-]?key|token|secret|password)(?:(?:\\+)?["'])?\s*[:=]\s*[^,;\r\n}\]]+/gi, '$1=[REDACTED]');
+}
+
+function truncateDiagnostic(value, maxBytes = 4_000) {
+  const output = String(value ?? '');
   const bytes = Buffer.from(output);
   if (bytes.length <= maxBytes) return output;
   return `${bytes.subarray(0, Math.max(0, maxBytes - 3)).toString('utf8').replace(/�$/u, '')}…`;
+}
+
+function diagnostic(value, environment, maxBytes = 4_000) {
+  return truncateDiagnostic(redactDiagnostic(value, environment), maxBytes);
+}
+
+function sanitizeDiagnosticValue(value, environment) {
+  if (typeof value === 'string') return redactDiagnostic(value, environment);
+  if (Array.isArray(value)) return value.map((item) => sanitizeDiagnosticValue(item, environment));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value)
+      .map(([key, item]) => [key, sanitizeDiagnosticValue(item, environment)]));
+  }
+  return value;
 }
 
 function schemaJson(jsonSchema) {
@@ -160,10 +180,17 @@ function parseStreamJson(output) {
   return extractStructuredOutput(results[0]);
 }
 
-function streamDiagnostic(stdout, stderr, environment) {
+function streamDiagnostic(stdout, stderr, environment, { includeErrorResultDiagnostic = false } = {}) {
+  const lines = String(stdout ?? '').split('\n').filter((line) => line.trim().length > 0);
+  const resultEventCount = lines.reduce((count, line) => {
+    try {
+      return count + (JSON.parse(line)?.type === 'result' ? 1 : 0);
+    } catch {
+      return count;
+    }
+  }, 0);
   const events = [];
-  for (const line of String(stdout ?? '').split('\n')) {
-    if (line.trim().length === 0) continue;
+  for (const line of lines) {
     try {
       const event = JSON.parse(line);
       if (event?.type === 'system' && event.subtype === 'init') {
@@ -184,22 +211,36 @@ function streamDiagnostic(stdout, stderr, environment) {
           error: event.error,
         });
       } else if (event?.type === 'result') {
-        events.push({
+        const result = {
           type: 'result',
           subtype: event.subtype,
           isError: event.is_error === true,
-        });
+        };
+        if (includeErrorResultDiagnostic && resultEventCount === 1 && result.isError) {
+          if (Number.isInteger(event.api_error_status)
+            && event.api_error_status >= 100
+            && event.api_error_status <= 599) {
+            result.apiErrorStatus = event.api_error_status;
+          }
+          if (typeof event.terminal_reason === 'string' && TERMINAL_REASON.test(event.terminal_reason)) {
+            result.terminalReason = event.terminal_reason;
+          }
+          if (typeof event.result === 'string' && event.result.length > 0) {
+            result.resultExcerpt = diagnostic(event.result, environment, ERROR_RESULT_DIAGNOSTIC_BYTES);
+          }
+        }
+        events.push(result);
       }
     } catch {
       events.push({ type: 'non_json_output' });
     }
     if (events.length >= 32) break;
   }
-  const value = {
+  const value = sanitizeDiagnosticValue({
     events,
     stderr: diagnostic(stderr, environment, 2_000),
-  };
-  return diagnostic(JSON.stringify(value), environment);
+  }, environment);
+  return truncateDiagnostic(JSON.stringify(value));
 }
 
 function signalChild(child, signal) {
@@ -233,6 +274,7 @@ export async function runFreshClaude({
   maxStdoutBytes = 1_000_000,
   maxStderrBytes = 64_000,
   includeSuccessDiagnostic = false,
+  includeErrorResultDiagnostic = false,
   spawn = nodeSpawn,
   validate = () => true,
 }) {
@@ -289,6 +331,7 @@ export async function runFreshClaude({
       Buffer.concat(stdoutChunks).toString('utf8'),
       Buffer.concat(stderrChunks).toString('utf8'),
       sourceEnvironment,
+      { includeErrorResultDiagnostic },
     );
     const finish = (result) => {
       if (settled) return;
@@ -345,7 +388,7 @@ export async function runFreshClaude({
         finish({
           status: 'infra_error',
           error: stderrDiagnostic ? `claude exited ${code ?? signal}: ${stderrDiagnostic}` : `claude exited ${code ?? signal}`,
-          diagnostic: streamDiagnostic(stdout, stderr, sourceEnvironment),
+          diagnostic: outputDiagnostic(),
         });
         return;
       }
@@ -356,7 +399,7 @@ export async function runFreshClaude({
         finish({
           status: 'infra_error',
           error: diagnostic(error.message, sourceEnvironment),
-          diagnostic: streamDiagnostic(stdout, stderr, sourceEnvironment),
+          diagnostic: outputDiagnostic(),
         });
         return;
       }
@@ -374,7 +417,7 @@ export async function runFreshClaude({
         data,
         stderr: diagnostic(stderr, sourceEnvironment),
         ...(includeSuccessDiagnostic
-          ? { diagnostic: streamDiagnostic(stdout, stderr, sourceEnvironment) }
+          ? { diagnostic: outputDiagnostic() }
           : {}),
       });
     });
