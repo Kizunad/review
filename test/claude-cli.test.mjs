@@ -540,6 +540,43 @@ test('keeps result text private by default and exposes only an opted-in bounded 
   assert.equal(JSON.stringify(canaryResult).includes('token-secret'), false);
 });
 
+test('redacts quoted credential forms while keeping diagnostics valid JSON', async () => {
+  const markers = [
+    'JSON_TOKEN_LEAK_9f34c',
+    'JSON_API_KEY_LEAK_9f34c',
+    'ESCAPED_JSON_TOKEN_LEAK_9f34c',
+    'DOUBLE_BEARER_LEAK_9f34c',
+    'SINGLE_BEARER_LEAK_9f34c',
+    'DOUBLE_TOKEN_LEAK_9f34c',
+    'SINGLE_TOKEN_LEAK_9f34c',
+  ];
+  const result = await runFreshClaude(baseRun({
+    includeErrorResultDiagnostic: true,
+    spawn: fakeSpawn({
+      code: 1,
+      stdout: resultEvent(undefined, {
+        is_error: true,
+        result: [
+          '{"token":"JSON_TOKEN_LEAK_9f34c","api_key":"JSON_API_KEY_LEAK_9f34c"}',
+          '{"token":"prefix\\\"ESCAPED_JSON_TOKEN_LEAK_9f34c"}',
+          'Authorization: Bearer "DOUBLE_BEARER_LEAK_9f34c"',
+          "Authorization: Bearer 'SINGLE_BEARER_LEAK_9f34c'",
+          'token="DOUBLE_TOKEN_LEAK_9f34c"',
+          "token='SINGLE_TOKEN_LEAK_9f34c'",
+        ].join(' '),
+        structured_output: undefined,
+      }),
+    }),
+  }));
+
+  assert.equal(result.status, 'infra_error');
+  const parsed = JSON.parse(result.diagnostic);
+  assert.match(parsed.events[0].resultExcerpt, /REDACTED/);
+  for (const marker of markers) {
+    assert.equal(result.diagnostic.includes(marker), false, `${marker} must be redacted`);
+  }
+});
+
 test('bounds opted-in error excerpts by UTF-8 bytes', async () => {
   const run = (result) => runFreshClaude(baseRun({
     includeErrorResultDiagnostic: true,

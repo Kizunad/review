@@ -31,20 +31,42 @@ export function sanitizedEnv(environment = process.env) {
   return safe;
 }
 
-function diagnostic(value, environment, maxBytes = 4_000) {
+function redactDiagnostic(value, environment) {
   let output = String(value ?? '');
   const secrets = Object.entries(environment ?? {})
     .filter(([key, secret]) => SECRET_ENV.test(key) && typeof secret === 'string' && secret.length >= 4)
     .map(([, secret]) => secret)
     .sort((left, right) => right.length - left.length);
   for (const secret of secrets) output = output.split(secret).join('[REDACTED]');
-  output = output
+  return output
     .replace(/\bsk-ant-[A-Za-z0-9_-]+\b/g, '[REDACTED]')
-    .replace(/\bBearer\s+[^\s"']+/gi, 'Bearer [REDACTED]')
-    .replace(/\b(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,"']+/gi, '$1=[REDACTED]');
+    .replace(/\bBearer\s+"(?:\\.|[^"\\\r\n])*"/gi, 'Bearer "[REDACTED]"')
+    .replace(/\bBearer\s+'(?:\\.|[^'\\\r\n])*'/gi, "Bearer '[REDACTED]'")
+    .replace(/\bBearer\s+[^\s,"'}\]]+/gi, 'Bearer [REDACTED]')
+    .replace(/\b(api[_-]?key|token|secret|password)(["']?)\s*([:=])\s*"(?:\\.|[^"\\\r\n])*"/gi, '$1$2$3"[REDACTED]"')
+    .replace(/\b(api[_-]?key|token|secret|password)(["']?)\s*([:=])\s*'(?:\\.|[^'\\\r\n])*'/gi, "$1$2$3'[REDACTED]'")
+    .replace(/\b(api[_-]?key|token|secret|password)(["']?)\s*([:=])\s*[^\s,"'}\]]+/gi, '$1$2$3[REDACTED]');
+}
+
+function truncateDiagnostic(value, maxBytes = 4_000) {
+  const output = String(value ?? '');
   const bytes = Buffer.from(output);
   if (bytes.length <= maxBytes) return output;
   return `${bytes.subarray(0, Math.max(0, maxBytes - 3)).toString('utf8').replace(/�$/u, '')}…`;
+}
+
+function diagnostic(value, environment, maxBytes = 4_000) {
+  return truncateDiagnostic(redactDiagnostic(value, environment), maxBytes);
+}
+
+function sanitizeDiagnosticValue(value, environment) {
+  if (typeof value === 'string') return redactDiagnostic(value, environment);
+  if (Array.isArray(value)) return value.map((item) => sanitizeDiagnosticValue(item, environment));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value)
+      .map(([key, item]) => [key, sanitizeDiagnosticValue(item, environment)]));
+  }
+  return value;
 }
 
 function schemaJson(jsonSchema) {
@@ -218,11 +240,11 @@ function streamDiagnostic(stdout, stderr, environment, { includeErrorResultDiagn
     }
     if (events.length >= 32) break;
   }
-  const value = {
+  const value = sanitizeDiagnosticValue({
     events,
     stderr: diagnostic(stderr, environment, 2_000),
-  };
-  return diagnostic(JSON.stringify(value), environment);
+  }, environment);
+  return truncateDiagnostic(JSON.stringify(value));
 }
 
 function signalChild(child, signal) {

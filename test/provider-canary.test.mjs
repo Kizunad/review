@@ -24,11 +24,12 @@ if (model === ${JSON.stringify(failModel)}) {
       + '; endpoint=https://provider-canary-test.example'
       + '; Bearer leaked-bearer; token=leaked-token',
   }) + '\\n');
-  process.exit(1);
+  process.exitCode = 1;
+} else {
+  process.stdout.write(JSON.stringify({
+    type: 'result', subtype: 'success', structured_output: { ok: true },
+  }) + '\\n');
 }
-process.stdout.write(JSON.stringify({
-  type: 'result', subtype: 'success', structured_output: { ok: true },
-}) + '\\n');
 `);
   await chmod(executable, 0o755);
   return executable;
