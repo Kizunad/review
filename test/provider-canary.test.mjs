@@ -4,14 +4,14 @@ import assert from 'node:assert/strict';
 import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { runFreshClaude } from '../src/claude-cli.mjs';
+import { PROVIDER_MODEL_IDS, runFreshClaude } from '../src/claude-cli.mjs';
 import { runProviderCanary } from '../src/run-provider-canary.mjs';
 
 async function fakeClaude(root, failModel) {
   const executable = path.join(root, 'fake-claude.mjs');
   await writeFile(executable, `#!/usr/bin/env node
 const model = process.argv[process.argv.indexOf('--model') + 1];
-if (model === ${JSON.stringify(failModel)}) {
+if (model === ${JSON.stringify(failModel ? PROVIDER_MODEL_IDS[failModel] : null)}) {
   process.stdout.write(JSON.stringify({
     type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 10,
     error_status: 524, error: 'gateway timeout',
@@ -90,7 +90,7 @@ test('records a redacted model-specific provider failure and still probes every 
   assert.match(report.probes[1].diagnostic, /524/);
   assert.match(report.probes[1].diagnostic, /"apiErrorStatus":400/);
   assert.match(report.probes[1].diagnostic, /"terminalReason":"api_error"/);
-  assert.match(report.probes[1].diagnostic, /model not found: luna/);
+  assert.match(report.probes[1].diagnostic, /model not found: gpt-5\.6-luna/);
   assert.match(report.probes[1].diagnostic, /REDACTED/);
   assert.equal(JSON.stringify(report).includes('provider-canary-test-secret'), false);
   assert.equal(JSON.stringify(report).includes('provider-canary-test.example'), false);

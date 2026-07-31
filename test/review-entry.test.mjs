@@ -64,9 +64,9 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 case "$model" in
-  sol) output='{"version":"v1","assignments":[{"id":"all","shardIndexes":[0]}]}' ;;
-  luna) output='{"version":"v1","summary":"one changed file","files":["src/a.mjs"]}' ;;
-  terra) output='[]' ;;
+  gpt-5.6-sol) output='{"version":"v1","assignments":[{"id":"all","shardIndexes":[0]}]}' ;;
+  gpt-5.6-luna) output='{"version":"v1","summary":"one changed file","files":["src/a.mjs"]}' ;;
+  gpt-5.6-terra) output='[]' ;;
   *) exit 9 ;;
 esac
 printf '{"type":"result","structured_output":%s}\n' "$output"

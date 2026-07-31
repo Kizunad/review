@@ -171,7 +171,7 @@ test('builds the fixed fresh read-only Claude command with inline schema JSON', 
   assert.deepEqual(args, [
     '--safe-mode', '--disable-slash-commands', '--no-chrome',
     '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-    '-p', 'review', '--no-session-persistence', '--model', 'terra', '--effort', 'max',
+    '-p', 'review', '--no-session-persistence', '--model', 'gpt-5.6-terra', '--effort', 'max',
     '--tools', 'Read,Glob,Grep', '--allowedTools', 'Read(//workspace/**),Glob(//workspace/**),Grep(//workspace/**)', '--permission-mode', 'dontAsk',
     '--output-format', 'stream-json', '--verbose', '--json-schema', JSON.stringify(schema),
   ]);

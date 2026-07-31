@@ -9,6 +9,14 @@ const SANDBOX_EXECUTABLE = '/sandbox/claude';
 const SANDBOX_RIPGREP = '/sandbox/rg';
 const SANDBOX_PATH = '/sandbox:/usr/local/bin:/usr/bin:/bin';
 const MODELS = new Set(['sol', 'terra', 'luna']);
+// The engine names capability tiers; the provider exposes concrete model ids.
+// Keep the tier vocabulary internal and translate exactly once, at the CLI
+// boundary, so swapping providers is a change to this table and nothing else.
+export const PROVIDER_MODEL_IDS = Object.freeze({
+  sol: 'gpt-5.6-sol',
+  terra: 'gpt-5.6-terra',
+  luna: 'gpt-5.6-luna',
+});
 const ALLOWED_ENV = new Set([
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_BASE_URL',
@@ -85,7 +93,7 @@ export function buildClaudeArgs({ model, prompt, jsonSchema }) {
   return [
     '--safe-mode', '--disable-slash-commands', '--no-chrome',
     '--strict-mcp-config', '--mcp-config', EMPTY_MCP_CONFIG,
-    '-p', prompt, '--no-session-persistence', '--model', model,
+    '-p', prompt, '--no-session-persistence', '--model', PROVIDER_MODEL_IDS[model],
     '--effort', 'max', '--tools', READ_ONLY_TOOLS, '--allowedTools', READ_ONLY_PERMISSIONS,
     '--permission-mode', 'dontAsk', '--output-format', 'stream-json', '--verbose',
     '--json-schema', schemaJson(jsonSchema),
