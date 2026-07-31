@@ -14,6 +14,16 @@ const MAX_FAILURE_SAMPLES = 4;
 const MAX_FAILURE_TEXT = 4_000;
 const FAILURE_STATUSES = ['infra_error', 'schema_error'];
 
+// Tier used for the find and validate stages.
+//
+// terra is the intended reviewer tier, but the upstream behind the configured
+// provider is currently returning 502/524 for it: measured 2026-07-31, terra
+// completed 13 of 71 requests (18%) while luna completed 13 of 13 (100%) on the
+// same channel in the same window. Every finder dimension therefore died and the
+// review returned infrastructure_failure. Route these stages to luna until terra
+// recovers upstream, then set this back to 'terra'.
+export const REVIEWER_MODEL = 'luna';
+
 function boundedFailureText(value, limit = MAX_FAILURE_TEXT) {
   const text = String(value ?? 'runner returned no result');
   const symbols = [...text];
@@ -150,7 +160,7 @@ async function collectFiveVotes({ runner, candidate, diff, round, validatorCount
       const requestAttempt = attempt;
       attempt += 1;
       return runner.run({
-        stage: 'validate', model: 'terra', candidate,
+        stage: 'validate', model: REVIEWER_MODEL, candidate,
         relatedDiff: relatedDiff(candidate, diff), round, validator: seat, attempt: requestAttempt,
       }).then((validation) => ({ seat, requestAttempt, validation }));
     });
@@ -236,7 +246,7 @@ export async function runReview({
           dimension,
           batch,
           finder: await runner.run({
-            stage: 'find', model: 'terra', taxonomy: dimension, paths: batch.paths, diff: batch.text, summaries,
+            stage: 'find', model: REVIEWER_MODEL, taxonomy: dimension, paths: batch.paths, diff: batch.text, summaries,
           }),
         });
       }

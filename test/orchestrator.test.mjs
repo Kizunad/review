@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runReview } from '../src/orchestrator.mjs';
+import { REVIEWER_MODEL, runReview } from '../src/orchestrator.mjs';
 import { finalDecision, partitionValidatedFindings } from '../src/review-entry.mjs';
 
 const finding = {
@@ -95,6 +95,8 @@ test('keeps all Sol output out of Terra input and accepts four confirmations', a
   assert.equal('transcript' in finder, false);
   assert.deepEqual(finder.summaries, [{ assignment: 'a', data: { summary: 'one file', files: ['a.mjs'] } }]);
   assert.equal(requests.filter((request) => request.stage === 'validate').length, 5);
+  assert.ok(requests.filter((request) => request.stage === 'validate')
+    .every((request) => request.model === REVIEWER_MODEL));
   assert.ok(requests.filter((request) => request.stage === 'validate').every((request) => request.relatedDiff.includes('diff --git a/a.mjs b/a.mjs')));
 });
 
@@ -280,7 +282,8 @@ test('starts one independent Terra finder for every taxonomy dimension', async (
   });
   assert.deepEqual(result.findings, []);
   assert.deepEqual(finders.map((request) => request.taxonomy).sort(), dimensions.sort());
-  assert.ok(finders.every((request) => request.model === 'terra'));
+  assert.equal(REVIEWER_MODEL, 'luna');
+  assert.ok(finders.every((request) => request.model === REVIEWER_MODEL));
   assert.ok(finders.every((request) => !('plan' in request) && !('transcript' in request)));
 });
 
