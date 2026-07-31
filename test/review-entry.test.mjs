@@ -58,15 +58,21 @@ set -eu
 [ ! -e .mcp.json ]
 [ ! -e CLAUDE.md ]
 [ ! -e ${JSON.stringify(path.join(callerRoot, 'CLAUDE.md'))} ]
+all="$*"
 model=''
 while [ "$#" -gt 0 ]; do
   if [ "$1" = '--model' ]; then model="$2"; break; fi
   shift
 done
+# The reviewer tier is shared by the summary and find stages, so branch on the
+# stage-specific prompt rather than on the model alone.
 case "$model" in
   sol) output='{"version":"v1","assignments":[{"id":"all","shardIndexes":[0]}]}' ;;
-  luna) output='{"version":"v1","summary":"one changed file","files":["src/a.mjs"]}' ;;
-  terra) output='[]' ;;
+  luna|terra)
+    case "$all" in
+      *summarizer*) output='{"version":"v1","summary":"one changed file","files":["src/a.mjs"]}' ;;
+      *) output='[]' ;;
+    esac ;;
   *) exit 9 ;;
 esac
 printf '{"type":"result","structured_output":%s}\n' "$output"

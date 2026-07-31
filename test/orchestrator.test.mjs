@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runReview } from '../src/orchestrator.mjs';
+import { REVIEWER_MODEL, runReview } from '../src/orchestrator.mjs';
 import { finalDecision, partitionValidatedFindings } from '../src/review-entry.mjs';
 
 const finding = {
@@ -280,7 +280,7 @@ test('starts one independent Terra finder for every taxonomy dimension', async (
   });
   assert.deepEqual(result.findings, []);
   assert.deepEqual(finders.map((request) => request.taxonomy).sort(), dimensions.sort());
-  assert.ok(finders.every((request) => request.model === 'terra'));
+  assert.ok(finders.every((request) => request.model === REVIEWER_MODEL));
   assert.ok(finders.every((request) => !('plan' in request) && !('transcript' in request)));
 });
 
