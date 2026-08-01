@@ -64,11 +64,13 @@ async function execute(failModel = null) {
   };
 }
 
-test('probes sol, luna, and terra with one minimal structured request each', async () => {
+test('probes both placeholders plus the raw tiers with one minimal structured request each', async () => {
   const { report, persisted } = await execute();
   assert.equal(report.version, 'v1');
   assert.equal(report.success, true);
   assert.deepEqual(report.probes.map(({ model, status, ok }) => ({ model, status, ok })), [
+    { model: 'cc-review', status: 'ok', ok: true },
+    { model: 'cc-review-lite', status: 'ok', ok: true },
     { model: 'sol', status: 'ok', ok: true },
     { model: 'luna', status: 'ok', ok: true },
     { model: 'terra', status: 'ok', ok: true },
@@ -82,16 +84,19 @@ test('records a redacted model-specific provider failure and still probes every 
   const { report } = await execute('luna');
   assert.equal(report.success, false);
   assert.deepEqual(report.probes.map(({ model, status }) => ({ model, status })), [
+    { model: 'cc-review', status: 'ok' },
+    { model: 'cc-review-lite', status: 'ok' },
     { model: 'sol', status: 'ok' },
     { model: 'luna', status: 'infra_error' },
     { model: 'terra', status: 'ok' },
   ]);
-  assert.match(report.probes[1].diagnostic, /api_retry/);
-  assert.match(report.probes[1].diagnostic, /524/);
-  assert.match(report.probes[1].diagnostic, /"apiErrorStatus":400/);
-  assert.match(report.probes[1].diagnostic, /"terminalReason":"api_error"/);
-  assert.match(report.probes[1].diagnostic, /model not found: luna/);
-  assert.match(report.probes[1].diagnostic, /REDACTED/);
+  const lunaProbe = report.probes.find(({ model }) => model === 'luna');
+  assert.match(lunaProbe.diagnostic, /api_retry/);
+  assert.match(lunaProbe.diagnostic, /524/);
+  assert.match(lunaProbe.diagnostic, /"apiErrorStatus":400/);
+  assert.match(lunaProbe.diagnostic, /"terminalReason":"api_error"/);
+  assert.match(lunaProbe.diagnostic, /model not found: luna/);
+  assert.match(lunaProbe.diagnostic, /REDACTED/);
   assert.equal(JSON.stringify(report).includes('provider-canary-test-secret'), false);
   assert.equal(JSON.stringify(report).includes('provider-canary-test.example'), false);
   assert.equal(JSON.stringify(report).includes('leaked-bearer'), false);

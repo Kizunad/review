@@ -8,7 +8,10 @@ const SANDBOX_HOME = '/home/claude';
 const SANDBOX_EXECUTABLE = '/sandbox/claude';
 const SANDBOX_RIPGREP = '/sandbox/rg';
 const SANDBOX_PATH = '/sandbox:/usr/local/bin:/usr/bin:/bin';
-const MODELS = new Set(['sol', 'terra', 'luna']);
+// Shape check, not membership: model names are routing placeholders resolved by
+// the relay, so this side cannot know the valid set. The leading alphanumeric
+// keeps a name from ever parsing as a CLI flag.
+const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const ALLOWED_ENV = new Set([
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_BASE_URL',
@@ -80,7 +83,7 @@ export async function loadJsonSchema(jsonSchemaPath) {
 }
 
 export function buildClaudeArgs({ model, prompt, jsonSchema }) {
-  if (!MODELS.has(model)) throw new TypeError('model must be sol, terra, or luna');
+  if (typeof model !== 'string' || !MODEL_NAME.test(model)) throw new TypeError('model must be a well-formed model name');
   if (typeof prompt !== 'string' || prompt.length === 0) throw new TypeError('prompt must be non-empty');
   return [
     '--safe-mode', '--disable-slash-commands', '--no-chrome',
