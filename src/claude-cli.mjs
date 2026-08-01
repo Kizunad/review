@@ -74,7 +74,26 @@ function schemaJson(jsonSchema) {
     throw new TypeError('jsonSchema must be a JSON Schema object or JSON object string');
   }
   const { $schema: _draft, $id: _identifier, ...cliSchema } = parsed;
+  // The structured-output endpoint behind the relay accepts only object-rooted
+  // schemas: a root 'type: "array"' is rejected with 400
+  // invalid_function_parameters ("schema must be a JSON Schema of 'type:
+  // "object"'"). An array root therefore travels wrapped in a single-key
+  // envelope, and the response side unwraps it symmetrically - the engine
+  // contract stays an array end to end. See wrapsArraySchema.
+  if (cliSchema.type === 'array') {
+    return JSON.stringify({
+      type: 'object',
+      properties: { items: cliSchema },
+      required: ['items'],
+      additionalProperties: false,
+    });
+  }
   return JSON.stringify(cliSchema);
+}
+
+export function wrapsArraySchema(jsonSchema) {
+  const parsed = typeof jsonSchema === 'string' ? JSON.parse(jsonSchema) : jsonSchema;
+  return Boolean(parsed) && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.type === 'array';
 }
 
 export async function loadJsonSchema(jsonSchemaPath) {
@@ -409,6 +428,13 @@ export async function runFreshClaude({
       let data;
       try {
         data = parseStreamJson(stdout);
+        // Symmetric unwrap of the object envelope schemaJson adds around
+        // array-rooted schemas. A raw array is accepted too, so a provider
+        // that honours the original array root still validates.
+        if (wrapsArraySchema(schema) && data && typeof data === 'object'
+          && !Array.isArray(data) && Array.isArray(data.items)) {
+          data = data.items;
+        }
       } catch (error) {
         finish({
           status: 'infra_error',

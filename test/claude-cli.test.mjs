@@ -931,3 +931,32 @@ process.stdout.write(JSON.stringify({ type: 'result', structured_output: results
     procEnvironmentReadable: [],
   });
 });
+
+test('array-rooted schemas travel wrapped in an object envelope for the structured-output endpoint', () => {
+  // The endpoint behind the relay 400s any root 'type: "array"'
+  // (invalid_function_parameters), which is why the find stage could never run.
+  const args = buildClaudeArgs({ model: 'sol', prompt: 'find', jsonSchema: { type: 'array', items: { type: 'string' } } });
+  const cliSchema = JSON.parse(args[args.indexOf('--json-schema') + 1]);
+  assert.equal(cliSchema.type, 'object');
+  assert.deepEqual(cliSchema.required, ['items']);
+  assert.equal(cliSchema.additionalProperties, false);
+  assert.deepEqual(cliSchema.properties.items, { type: 'array', items: { type: 'string' } });
+  // Object-rooted schemas are untouched - no envelope, no items key.
+  const plain = JSON.parse(buildClaudeArgs({ model: 'sol', prompt: 'plan', jsonSchema: schema }).at(-1));
+  assert.deepEqual(plain, schema);
+});
+
+test('unwraps the array envelope symmetrically and still accepts a raw array reply', async () => {
+  const arraySchema = { type: 'array', items: { type: 'string' } };
+  for (const reply of [{ items: ['a', 'b'] }, ['a', 'b']]) {
+    const result = await runFreshClaude({
+      ...baseRun(),
+      model: 'sol',
+      jsonSchema: arraySchema,
+      spawn: fakeSpawn({ stdout: resultEvent(reply) }),
+      validate: (data) => Array.isArray(data),
+    });
+    assert.equal(result.status, 'ok', `reply shape ${JSON.stringify(reply)} must reach the validator as an array`);
+    assert.deepEqual(result.data, ['a', 'b']);
+  }
+});

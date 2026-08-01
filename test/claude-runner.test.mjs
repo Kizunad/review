@@ -287,3 +287,12 @@ test('resume memo: without a state dir nothing is written anywhere', async () =>
   assert.equal(result.status, 'ok');
   assert.equal(calls.length, 1);
 });
+
+test('finder results arrive unwrapped whether the model returns the envelope or the raw array', async () => {
+  const wrapped = await runFinder({ items: [completeCandidate] });
+  assert.equal(wrapped.status, 'ok', `envelope reply must validate: ${wrapped.error}`);
+  assert.deepEqual(wrapped.data, [completeCandidate]);
+  const raw = await runFinder([completeCandidate]);
+  assert.equal(raw.status, 'ok');
+  assert.deepEqual(raw.data, [completeCandidate]);
+});
