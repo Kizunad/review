@@ -58,7 +58,7 @@ set -eu
 [ ! -e .mcp.json ]
 [ ! -e CLAUDE.md ]
 [ ! -e ${JSON.stringify(path.join(callerRoot, 'CLAUDE.md'))} ]
-all="$*"
+prompt="$(cat)"
 model=''
 while [ "$#" -gt 0 ]; do
   if [ "$1" = '--model' ]; then model="$2"; break; fi
@@ -70,7 +70,7 @@ done
 case "$model" in
   ''|-*) exit 9 ;;
   *)
-    case "$all" in
+    case "$prompt" in
       *planner*) output='{"version":"v1","assignments":[{"id":"all","shardIndexes":[0]}]}' ;;
       *summarizer*) output='{"version":"v1","summary":"one changed file","files":["src/a.mjs"]}' ;;
       *) output='[]' ;;
@@ -95,9 +95,10 @@ async function fixtureWithFinding(level) {
     level: 'major',
   };
   await writeFile(value.executable, `#!/usr/bin/env node
-const args = process.argv.slice(2);
-const value = (flag) => args[args.indexOf(flag) + 1] ?? '';
-const prompt = value('-p');
+const chunks = [];
+process.stdin.on('data', (chunk) => chunks.push(chunk));
+process.stdin.on('end', () => {
+const prompt = Buffer.concat(chunks).toString('utf8');
 let output;
 if (prompt.includes('fresh Sol planner')) {
   output = { version: 'v1', assignments: [{ id: 'all', shardIndexes: [0] }] };
@@ -123,9 +124,11 @@ if (prompt.includes('fresh Sol planner')) {
     reason: 'The candidate survives independent refutation.',
   };
 } else {
-  process.exit(9);
+  process.exitCode = 9;
+  return;
 }
 process.stdout.write(JSON.stringify({ type: 'result', structured_output: output }) + '\\n');
+});
 `);
   await chmod(value.executable, 0o755);
   return value;

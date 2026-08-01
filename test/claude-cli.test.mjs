@@ -1,5 +1,7 @@
+import { spawn as nodeSpawn } from 'node:child_process';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { createServer } from 'node:http';
 import { chmod, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
@@ -21,11 +23,18 @@ function resultEvent(structuredOutput = { verdict: 'PASS' }, overrides = {}) {
   return `${JSON.stringify({ type: 'result', subtype: 'success', structured_output: structuredOutput, ...overrides })}\n`;
 }
 
-function fakeSpawn({ stdout = '{}', stderr = '', code = 0, error, neverClose = false, ignoreTerm = false, capture } = {}) {
+function fakeSpawn({ stdout = '{}', stderr = '', code = 0, error, stdinError, neverClose = false, ignoreTerm = false, capture } = {}) {
   return (_executable, args, options) => {
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
+    child.stdin = new EventEmitter();
+    child.stdin.writes = [];
+    child.stdin.end = (chunk) => {
+      if (chunk !== undefined) child.stdin.writes.push(Buffer.from(chunk));
+      if (stdinError) queueMicrotask(() => child.stdin.emit('error', stdinError));
+      else child.stdin.emit('finish');
+    };
     child.pid = undefined;
     child.signals = [];
     child.kill = (signal = 'SIGTERM') => {
@@ -171,10 +180,11 @@ test('builds the fixed fresh read-only Claude command with inline schema JSON', 
   assert.deepEqual(args, [
     '--safe-mode', '--disable-slash-commands', '--no-chrome',
     '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-    '-p', 'review', '--no-session-persistence', '--model', 'terra', '--effort', 'max',
+    '-p', '--no-session-persistence', '--model', 'terra', '--effort', 'max',
     '--tools', 'Read,Glob,Grep', '--allowedTools', 'Read(//workspace/**),Glob(//workspace/**),Grep(//workspace/**)', '--permission-mode', 'dontAsk',
     '--output-format', 'stream-json', '--verbose', '--json-schema', JSON.stringify(schema),
   ]);
+  assert.equal(args.includes('review'), false);
   assert.equal(args.some((arg) => /resume|Bash|Edit|Write|--bare/.test(arg)), false);
   assert.ok(args.includes('--safe-mode'));
   assert.ok(args.includes('--disable-slash-commands'));
@@ -186,6 +196,61 @@ test('builds the fixed fresh read-only Claude command with inline schema JSON', 
   for (const bad of ['', ' sol', 'a b', '--model-injection', undefined]) {
     assert.throws(() => buildClaudeArgs({ model: bad, prompt: 'x', jsonSchema: schema }), /model/);
   }
+});
+
+test('streams a large prompt through stdin without placing it in argv', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'claude-large-prompt-'));
+  const worker = path.join(root, 'stdin-worker.mjs');
+  await writeFile(worker, `#!/usr/bin/env node
+import { createHash } from 'node:crypto';
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const prompt = Buffer.concat(chunks);
+process.stdout.write(JSON.stringify({
+  type: 'result',
+  structured_output: {
+    bytes: prompt.length,
+    sha256: createHash('sha256').update(prompt).digest('hex'),
+    argvHasPrompt: process.argv.includes(${JSON.stringify('x'.repeat(230_000))}),
+  },
+}) + '\\n');
+`);
+  const prompt = `${'界'.repeat(75_000)}\nend`;
+  const result = await runFreshClaude({
+    ...baseRun(),
+    prompt,
+    executable: worker,
+    ripgrepExecutable: worker,
+    sandboxExecutable: process.execPath,
+    spawn: (_sandbox, args, options) => {
+      const separator = args.indexOf('--');
+      assert.equal(args.includes(prompt), false);
+      assert.equal(args[separator + 1], '/sandbox/claude');
+      return nodeSpawn(process.execPath, [worker, ...args.slice(separator + 2)], options);
+    },
+    jsonSchema: {
+      type: 'object',
+      properties: { bytes: { type: 'integer' }, sha256: { type: 'string' }, argvHasPrompt: { type: 'boolean' } },
+      required: ['bytes', 'sha256', 'argvHasPrompt'],
+      additionalProperties: false,
+    },
+    validate: (value) => value.bytes === Buffer.byteLength(prompt)
+      && value.sha256 === createHash('sha256').update(prompt).digest('hex')
+      && value.argvHasPrompt === false,
+  });
+  assert.equal(result.status, 'ok', result.error);
+  assert.equal(result.data.bytes, Buffer.byteLength(prompt));
+  assert.equal(result.data.sha256, createHash('sha256').update(prompt).digest('hex'));
+  assert.equal(result.data.argvHasPrompt, false);
+});
+
+test('reports prompt stdin write failures as infrastructure errors', async () => {
+  const result = await runFreshClaude(baseRun({
+    killGraceMs: 1,
+    spawn: fakeSpawn({ neverClose: true, stdinError: new Error('broken pipe') }),
+  }));
+  assert.equal(result.status, 'infra_error');
+  assert.match(result.error, /prompt stdin: broken pipe/);
 });
 
 test('strips schema metadata unsupported by the Claude CLI validator', () => {
@@ -424,6 +489,8 @@ test('loads schema files before spawning and validates structured_output, not th
   assert.deepEqual(result.data, { verdict: 'PASS' });
   assert.equal(captured.executable, process.env.BWRAP_EXECUTABLE ?? 'bwrap');
   assert.equal(captured.options.cwd, undefined);
+  assert.deepEqual(captured.options.stdio, ['pipe', 'pipe', 'pipe']);
+  assert.equal(Buffer.concat(captured.child.stdin.writes).toString('utf8'), 'x');
   assert.equal(captured.options.detached, process.platform !== 'win32');
   const separator = captured.args.indexOf('--');
   assert.equal(captured.args[separator + 1], '/sandbox/claude');
