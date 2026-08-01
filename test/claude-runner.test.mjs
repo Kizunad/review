@@ -168,7 +168,7 @@ test('prompts lock clean v2, independent level voting, and no partial candidates
   assert.match(source, /suggestion: no demonstrable wrong result/);
 });
 
-async function runStubbedVote({ responses, stageAttempts = 3 }) {
+async function runStubbedVote({ responses, stageAttempts = 3, stateDir, stateSalt = '' }) {
   const root = await mkdtemp(path.join(tmpdir(), 'claude-runner-retry-'));
   const callerRoot = path.join(root, 'repository');
   await mkdir(callerRoot);
@@ -183,6 +183,8 @@ async function runStubbedVote({ responses, stageAttempts = 3 }) {
     ripgrepExecutable: '/trusted/rg',
     stageAttempts,
     stageBackoffMs: [1, 1],
+    stateDir,
+    stateSalt,
     transport: async (request) => {
       calls.push(request.model);
       return responses[Math.min(calls.length - 1, responses.length - 1)];
@@ -228,4 +230,60 @@ test('transport retry: a stage whose model answered is not retried', async () =>
   assert.equal(result.status, 'schema_error');
   assert.equal(result.error, 'vote is not countable', 'a non-retried failure must stay unannotated');
   assert.equal(calls.length, 1, 'schema_error must not consume retry attempts');
+});
+
+test('resume memo: a completed stage replays from the state dir without a model call', async () => {
+  const stateDir = await mkdtemp(path.join(tmpdir(), 'claude-runner-state-'));
+  const first = await runStubbedVote({
+    responses: [{ status: 'ok', data: { verdict: 'confirm' } }],
+    stateDir,
+  });
+  assert.equal(first.result.status, 'ok');
+  assert.equal(first.calls.length, 1);
+  const second = await runStubbedVote({
+    responses: [{ status: 'infra_error', error: 'transport must not be reached' }],
+    stateDir,
+  });
+  assert.equal(second.result.status, 'ok', 'the stored result must be replayed');
+  assert.deepEqual(second.result.data, { verdict: 'confirm' });
+  assert.equal(second.calls.length, 0, 'a resume hit must not spend a model call');
+});
+
+test('resume memo: failures are never stored - a re-run repeats the failed stage', async () => {
+  const stateDir = await mkdtemp(path.join(tmpdir(), 'claude-runner-state-'));
+  const first = await runStubbedVote({
+    responses: [{ status: 'schema_error', error: 'vote is not countable' }],
+    stateDir,
+  });
+  assert.equal(first.result.status, 'schema_error');
+  const second = await runStubbedVote({
+    responses: [{ status: 'ok', data: { verdict: 'confirm' } }],
+    stateDir,
+  });
+  assert.equal(second.result.status, 'ok');
+  assert.equal(second.calls.length, 1, 'the failed stage must actually re-run on resume');
+});
+
+test('resume memo: an engine-version salt change invalidates every prior entry', async () => {
+  const stateDir = await mkdtemp(path.join(tmpdir(), 'claude-runner-state-'));
+  await runStubbedVote({
+    responses: [{ status: 'ok', data: { verdict: 'confirm' } }],
+    stateDir,
+    stateSalt: 'engine-a',
+  });
+  const upgraded = await runStubbedVote({
+    responses: [{ status: 'ok', data: { verdict: 'reject' } }],
+    stateDir,
+    stateSalt: 'engine-b',
+  });
+  assert.equal(upgraded.calls.length, 1, 'a different engine version must not replay old entries');
+  assert.deepEqual(upgraded.result.data, { verdict: 'reject' });
+});
+
+test('resume memo: without a state dir nothing is written anywhere', async () => {
+  const { result, calls } = await runStubbedVote({
+    responses: [{ status: 'ok', data: { verdict: 'confirm' } }],
+  });
+  assert.equal(result.status, 'ok');
+  assert.equal(calls.length, 1);
 });

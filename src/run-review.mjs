@@ -45,6 +45,8 @@ const { review, markdown } = await executeReview({
   maxShardChars: process.env.MAX_SHARD_CHARS,
   workerTimeoutMs: process.env.WORKER_TIMEOUT_MS,
   shadow: process.env.SHADOW === 'true',
+  stateDir: process.env.REVIEW_STATE_DIR || undefined,
+  stateSalt: process.env.REVIEW_STATE_SALT || '',
 });
 const artifacts = {
   'review.json': `${JSON.stringify(review, null, 2)}\n`,

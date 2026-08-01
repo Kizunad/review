@@ -436,6 +436,8 @@ export async function executeReview({
   maxShardChars = 12_000,
   workerTimeoutMs = 120_000,
   shadow = false,
+  stateDir,
+  stateSalt = '',
 }) {
   if (typeof diff !== 'string') throw new TypeError('diff must be a string');
   const finderLimit = positiveInteger(maxDiffChars, 'maxDiffChars', 40_000);
@@ -466,6 +468,8 @@ export async function executeReview({
       ripgrepExecutable,
       sandboxExecutable,
       timeoutMs: positiveInteger(workerTimeoutMs, 'workerTimeoutMs', 120_000),
+      stateDir,
+      stateSalt,
     });
     result = await runReview({
       diff,
