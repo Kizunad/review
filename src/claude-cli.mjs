@@ -68,12 +68,32 @@ function sanitizeDiagnosticValue(value, environment) {
   return value;
 }
 
+// Structured-output providers compile schema regexes with RE2, which has no
+// lookaround and no backreferences - a schema carrying one is rejected outright
+// with 400 invalid_json_schema ("regex lookaround is not supported"). Those
+// patterns are generation guidance only; the engine-side stage validation is
+// the real enforcer, so the CLI copy drops any RE2-incompatible pattern rather
+// than losing the whole stage.
+const RE2_INCOMPATIBLE = /\(\?=|\(\?!|\(\?<|\\[1-9]/;
+
+function stripRe2IncompatiblePatterns(node) {
+  if (Array.isArray(node)) return node.map(stripRe2IncompatiblePatterns);
+  if (!node || typeof node !== 'object') return node;
+  const result = {};
+  for (const [key, value] of Object.entries(node)) {
+    if (key === 'pattern' && typeof value === 'string' && RE2_INCOMPATIBLE.test(value)) continue;
+    result[key] = stripRe2IncompatiblePatterns(value);
+  }
+  return result;
+}
+
 function schemaJson(jsonSchema) {
   const parsed = typeof jsonSchema === 'string' ? JSON.parse(jsonSchema) : jsonSchema;
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new TypeError('jsonSchema must be a JSON Schema object or JSON object string');
   }
-  const { $schema: _draft, $id: _identifier, ...cliSchema } = parsed;
+  const { $schema: _draft, $id: _identifier, ...pruned } = parsed;
+  const cliSchema = stripRe2IncompatiblePatterns(pruned);
   // The structured-output endpoint behind the relay accepts only object-rooted
   // schemas: a root 'type: "array"' is rejected with 400
   // invalid_function_parameters ("schema must be a JSON Schema of 'type:
