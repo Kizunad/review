@@ -123,6 +123,16 @@ function validateStage(stage, data, request) {
   }
 }
 
+// Transport-level stage retry. The relay's upstream fails in short bursts
+// (observed: twelve 524s in 42 seconds with healthy traffic on both sides), and
+// the CLI treats 524 as terminal, so a single burst used to kill a whole stage
+// and with it the entire run. Only infra_error retries: schema_error means the
+// model answered (retrying is a new conversation, not a recovery), and the
+// pre-transport failures below are deterministic. The backoff is sized to span
+// an observed burst, so attempt two lands after the flap has passed.
+const STAGE_ATTEMPTS = 3;
+const STAGE_BACKOFF_MS = [20_000, 40_000];
+
 export function createClaudeRunner({
   centralRoot,
   callerRoot,
@@ -133,6 +143,12 @@ export function createClaudeRunner({
   ripgrepExecutable = process.env.RIPGREP_EXECUTABLE,
   sandboxExecutable = process.env.BWRAP_EXECUTABLE ?? 'bwrap',
   timeoutMs = 120_000,
+  stageAttempts = STAGE_ATTEMPTS,
+  stageBackoffMs = STAGE_BACKOFF_MS,
+  // Injectable for retry-orchestration tests only: the sandbox gives a stage
+  // process no cross-invocation state, so attempt counting cannot be observed
+  // through a real subprocess.
+  transport = runFreshClaude,
 }) {
   if (typeof centralRoot !== 'string' || centralRoot.length === 0) throw new TypeError('centralRoot is required');
   if (typeof callerRoot !== 'string' || callerRoot.length === 0) throw new TypeError('callerRoot is required');
@@ -158,22 +174,33 @@ export function createClaudeRunner({
       } catch (error) {
         return { status: 'infra_error', error: `prompt build: ${error.message}` };
       }
-      return runFreshClaude({
-        model: request.model,
-        prompt,
-        jsonSchema: schema,
-        executable,
-        ripgrepExecutable,
-        sandboxExecutable,
-        cwd: callerRoot,
-        environment,
-        timeoutMs,
-        // Structural only. Without this a stage failure reports nothing but
-        // subtype/isError, which is why every historical infrastructure_failure was
-        // undiagnosable. The free-text excerpt stays off here - see streamDiagnostic.
-        includeErrorResultStatus: true,
-        validate: (data) => validateStage(request.stage, data, request),
-      });
+      let result;
+      for (let attempt = 1; attempt <= stageAttempts; attempt += 1) {
+        result = await transport({
+          model: request.model,
+          prompt,
+          jsonSchema: schema,
+          executable,
+          ripgrepExecutable,
+          sandboxExecutable,
+          cwd: callerRoot,
+          environment,
+          timeoutMs,
+          // Structural only. Without this a stage failure reports nothing but
+          // subtype/isError, which is why every historical infrastructure_failure was
+          // undiagnosable. The free-text excerpt stays off here - see streamDiagnostic.
+          includeErrorResultStatus: true,
+          validate: (data) => validateStage(request.stage, data, request),
+        });
+        if (result.status !== 'infra_error') return result;
+        if (attempt < stageAttempts) {
+          const backoff = stageBackoffMs[Math.min(attempt - 1, stageBackoffMs.length - 1)] ?? 0;
+          await new Promise((resolve) => { setTimeout(resolve, backoff); });
+        }
+      }
+      // Annotate so a verdict comment shows the failure survived every retry -
+      // "one 524" and "524 through three spaced attempts" are different diagnoses.
+      return { ...result, error: `after ${stageAttempts} attempts: ${result.error}` };
     },
   };
 }

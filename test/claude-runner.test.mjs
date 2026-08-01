@@ -167,3 +167,65 @@ test('prompts lock clean v2, independent level voting, and no partial candidates
   assert.doesNotMatch(source, /includeErrorResultDiagnostic/);
   assert.match(source, /suggestion: no demonstrable wrong result/);
 });
+
+async function runStubbedVote({ responses, stageAttempts = 3 }) {
+  const root = await mkdtemp(path.join(tmpdir(), 'claude-runner-retry-'));
+  const callerRoot = path.join(root, 'repository');
+  await mkdir(callerRoot);
+  const calls = [];
+  const runner = createClaudeRunner({
+    centralRoot,
+    callerRoot,
+    policy: { version: 'project-review-policy.v2' },
+    repository: 'org/repo',
+    environment: { PATH: process.env.PATH },
+    executable: '/trusted/claude',
+    ripgrepExecutable: '/trusted/rg',
+    stageAttempts,
+    stageBackoffMs: [1, 1],
+    transport: async (request) => {
+      calls.push(request.model);
+      return responses[Math.min(calls.length - 1, responses.length - 1)];
+    },
+  });
+  const result = await runner.run({
+    stage: 'validate',
+    model: 'terra',
+    candidate: { fingerprint, validationCandidates: [{ fingerprint }] },
+    relatedDiff: 'diff --git a/src/a.mjs b/src/a.mjs\n',
+  });
+  return { result, calls };
+}
+
+test('transport retry: an infra_error stage is retried and can succeed on a later attempt', async () => {
+  const { result, calls } = await runStubbedVote({
+    responses: [
+      { status: 'infra_error', error: 'claude exited 1' },
+      { status: 'ok', data: { verdict: 'confirm' } },
+    ],
+  });
+  assert.equal(result.status, 'ok', `expected recovery on attempt 2, got ${result.status}: ${result.error}`);
+  assert.equal(calls.length, 2, 'exactly one retry should have happened');
+  assert.ok(calls.every((model) => model === 'terra'), 'every attempt must reuse the requested model');
+});
+
+test('transport retry: gives up after the attempt budget and annotates the surviving failure', async () => {
+  const { result, calls } = await runStubbedVote({
+    responses: [{ status: 'infra_error', error: 'claude exited 1' }],
+  });
+  assert.equal(result.status, 'infra_error');
+  assert.match(result.error, /^after 3 attempts: claude exited 1$/,
+    'the verdict must distinguish "one 524" from "524 through three spaced attempts"');
+  assert.equal(calls.length, 3, 'the attempt budget is a hard stop');
+});
+
+test('transport retry: a stage whose model answered is not retried', async () => {
+  // schema_error means the transport worked and the model produced output that
+  // failed validation - a retry is a different conversation, not a recovery.
+  const { result, calls } = await runStubbedVote({
+    responses: [{ status: 'schema_error', error: 'vote is not countable' }],
+  });
+  assert.equal(result.status, 'schema_error');
+  assert.equal(result.error, 'vote is not countable', 'a non-retried failure must stay unannotated');
+  assert.equal(calls.length, 1, 'schema_error must not consume retry attempts');
+});
