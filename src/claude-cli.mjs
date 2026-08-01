@@ -127,7 +127,7 @@ export function buildClaudeArgs({ model, prompt, jsonSchema }) {
   return [
     '--safe-mode', '--disable-slash-commands', '--no-chrome',
     '--strict-mcp-config', '--mcp-config', EMPTY_MCP_CONFIG,
-    '-p', prompt, '--no-session-persistence', '--model', model,
+    '-p', '--no-session-persistence', '--model', model,
     '--effort', 'max', '--tools', READ_ONLY_TOOLS, '--allowedTools', READ_ONLY_PERMISSIONS,
     '--permission-mode', 'dontAsk', '--output-format', 'stream-json', '--verbose',
     '--json-schema', schemaJson(jsonSchema),
@@ -364,7 +364,7 @@ export async function runFreshClaude({
     try {
       child = spawn(sandboxExecutable, sandboxArgs, {
         env: sanitizedEnv(sourceEnvironment),
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
       });
     } catch (error) {
@@ -422,6 +422,13 @@ export async function runFreshClaude({
     const timeoutTimer = setTimeout(() => {
       terminate({ status: 'infra_error', error: `timeout after ${timeoutMs}ms` });
     }, timeoutMs);
+
+    const failPromptWrite = (error) => {
+      terminate({
+        status: 'infra_error',
+        error: diagnostic(`prompt stdin: ${error.message}`, sourceEnvironment),
+      });
+    };
 
     child.stdout?.on('data', (chunk) => { stdoutBytes = append(stdoutChunks, chunk, stdoutBytes, maxStdoutBytes, 'stdout'); });
     child.stderr?.on('data', (chunk) => { stderrBytes = append(stderrChunks, chunk, stderrBytes, maxStderrBytes, 'stderr'); });
@@ -481,5 +488,15 @@ export async function runFreshClaude({
           : {}),
       });
     });
+    child.stdin?.once('error', failPromptWrite);
+    if (!child.stdin || typeof child.stdin.end !== 'function') {
+      failPromptWrite(new TypeError('child stdin is unavailable'));
+    } else {
+      try {
+        child.stdin.end(prompt);
+      } catch (error) {
+        failPromptWrite(error);
+      }
+    }
   });
 }
