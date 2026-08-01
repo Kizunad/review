@@ -152,6 +152,24 @@ test('workflow keeps a caller-owned fail-open circuit around automatic infrastru
   assert.doesNotMatch(finalize, /CIRCUIT_MANUAL_RETRY|circuit_manual_retry/);
 });
 
+test('missing-artifact handoff publishes Markdown with real newlines', async () => {
+  const yaml = await workflow();
+  const handoff = yaml.match(/Publish missing-artifact infrastructure handoff([\s\S]*?)\n      - name: Record infrastructure failure/);
+  assert.ok(handoff, 'missing-artifact handoff must be extractable');
+  const bodyMatch = handoff[1].match(/body="\$\(cat <<'EOF'\n([\s\S]*?)\n\s*EOF\n\s*\)"/);
+  assert.ok(bodyMatch, 'missing-artifact handoff must construct a heredoc body');
+  const body = bodyMatch[1].replace(/^ {10}/gm, '');
+  assert.equal(body, [
+    '## Central review',
+    '',
+    '**Decision:** `infrastructure_failure`',
+    '',
+    'The read-only review job did not produce a verifiable artifact. No code verdict was inferred.',
+  ].join('\n'));
+  assert.match(body, /\n\n/);
+  assert.doesNotMatch(body, /\\n/);
+});
+
 test('finalizer accepts only the layered v2 review envelope', async () => {
   const yaml = await workflow();
   const boundedString = (field, limit) => {

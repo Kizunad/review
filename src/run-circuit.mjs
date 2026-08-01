@@ -43,11 +43,9 @@ export async function runCircuit(command, {
 
   if (command === 'preflight') {
     requireEnvironment(environment, ['GITHUB_OUTPUT']);
-    const exactCommentRetry = environment.REVIEW_TRIGGER === 'issue_comment'
-      && environment.REVIEW_COMMENT_BODY === '/review';
     const trustedDispatchRetry = environment.REVIEW_TRIGGER === 'workflow_dispatch'
       && environment.CIRCUIT_MANUAL_RETRY === 'true';
-    if (exactCommentRetry || trustedDispatchRetry) {
+    if (trustedDispatchRetry) {
       await append(environment.GITHUB_OUTPUT, 'should_run=true\n');
       return;
     }

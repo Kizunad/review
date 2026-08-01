@@ -42,7 +42,11 @@ test('trusts only canonical GitHub bot markers and deduplicates run attempts', (
   ];
   assert.deepEqual(parseTrustedCircuitEvents(comments), [event]);
   assert.equal(evaluateCircuit([event, event], '2026-07-25T00:10:00.000Z', { threshold: 2 }).open, false);
-  assert.match(renderSkipComment({ open: true, openUntil: '2026-07-25T01:20:00.000Z' }), /\/review/);
+  const skip = renderSkipComment({ open: true, openUntil: '2026-07-25T01:20:00.000Z' });
+  assert.match(skip, /workflow_dispatch/);
+  assert.match(skip, /`pr_number`/);
+  assert.match(skip, /`circuit_manual_retry`/);
+  assert.doesNotMatch(skip, /\/review|comment/i);
 });
 
 test('loads, creates, records, and deduplicates circuit state through GitHub JSON endpoints', async () => {
