@@ -201,6 +201,7 @@ test('builds the fixed fresh read-only Claude command with inline schema JSON', 
 test('streams a large prompt through stdin without placing it in argv', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'claude-large-prompt-'));
   const worker = path.join(root, 'stdin-worker.mjs');
+  const promptSentinel = 'prompt-sentinel-7f3a';
   await writeFile(worker, `#!/usr/bin/env node
 import { createHash } from 'node:crypto';
 const chunks = [];
@@ -211,11 +212,11 @@ process.stdout.write(JSON.stringify({
   structured_output: {
     bytes: prompt.length,
     sha256: createHash('sha256').update(prompt).digest('hex'),
-    argvHasPrompt: process.argv.includes(${JSON.stringify('x'.repeat(230_000))}),
+    argvHasPrompt: process.argv.some((arg) => arg.includes(${JSON.stringify(promptSentinel)})),
   },
 }) + '\\n');
 `);
-  const prompt = `${'界'.repeat(75_000)}\nend`;
+  const prompt = `${promptSentinel}\n${'界'.repeat(75_000)}\nend`;
   const result = await runFreshClaude({
     ...baseRun(),
     prompt,
