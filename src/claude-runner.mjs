@@ -1,4 +1,5 @@
-import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { runFreshClaude } from './claude-cli.mjs';
 import { canonicalizeFinderCandidates, consolidateFindings } from './findings.mjs';
@@ -149,6 +150,16 @@ export function createClaudeRunner({
   // process no cross-invocation state, so attempt counting cannot be observed
   // through a real subprocess.
   transport = runFreshClaude,
+  // Resume memo. When stateDir is set, every completed stage result persists
+  // there keyed by sha256(stateSalt + full request), and a later run with the
+  // same key returns the stored result without spending a model call - so a
+  // re-trigger after an infrastructure failure continues from the failed stage
+  // instead of re-reviewing from scratch. Only status "ok" is ever stored:
+  // failures re-run by design. stateSalt carries the engine version (the pinned
+  // workflow ref), so an engine upgrade invalidates every prior entry; head or
+  // policy changes reach the hash through the request content itself.
+  stateDir,
+  stateSalt = '',
 }) {
   if (typeof centralRoot !== 'string' || centralRoot.length === 0) throw new TypeError('centralRoot is required');
   if (typeof callerRoot !== 'string' || callerRoot.length === 0) throw new TypeError('callerRoot is required');
@@ -174,6 +185,26 @@ export function createClaudeRunner({
       } catch (error) {
         return { status: 'infra_error', error: `prompt build: ${error.message}` };
       }
+      let cacheFile;
+      if (stateDir) {
+        const key = createHash('sha256')
+          .update(JSON.stringify({ salt: stateSalt, request }))
+          .digest('hex');
+        cacheFile = path.join(stateDir, `${key}.json`);
+        try {
+          const cached = JSON.parse(await readFile(cacheFile, 'utf8'));
+          if (cached?.status === 'ok') return cached;
+        } catch { /* miss or corrupt entry - run the stage */ }
+      }
+      const finish = async (finalResult) => {
+        if (cacheFile && finalResult.status === 'ok') {
+          try {
+            await mkdir(stateDir, { recursive: true });
+            await writeFile(cacheFile, `${JSON.stringify(finalResult)}\n`);
+          } catch { /* resume is best-effort; never fail a passed stage over persistence */ }
+        }
+        return finalResult;
+      };
       let result;
       for (let attempt = 1; attempt <= stageAttempts; attempt += 1) {
         result = await transport({
@@ -192,7 +223,7 @@ export function createClaudeRunner({
           includeErrorResultStatus: true,
           validate: (data) => validateStage(request.stage, data, request),
         });
-        if (result.status !== 'infra_error') return result;
+        if (result.status !== 'infra_error') return finish(result);
         if (attempt < stageAttempts) {
           const backoff = stageBackoffMs[Math.min(attempt - 1, stageBackoffMs.length - 1)] ?? 0;
           await new Promise((resolve) => { setTimeout(resolve, backoff); });
