@@ -240,7 +240,7 @@ jobs:
       # engine ref plus the full stage request, so a stale or foreign entry can
       # never match; only status "ok" results are ever stored or replayed.
       - name: Restore stage resume state
-        uses: actions/cache/restore@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: _state
           key: review-state-v1-${{ inputs.pr_number }}-${{ needs.preflight.outputs.head_oid }}-${{ github.run_id }}
@@ -278,7 +278,7 @@ jobs:
           node _central/src/run-review.mjs
       - name: Save stage resume state
         if: always() && hashFiles('_state/**') != ''
-        uses: actions/cache/save@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: _state
           key: review-state-v1-${{ inputs.pr_number }}-${{ needs.preflight.outputs.head_oid }}-${{ github.run_id }}
