@@ -568,13 +568,36 @@ test('structural error status is disclosable to reviewing callers while the exce
   assert.equal(statusOnly.diagnostic.includes('model not found'), false);
   assert.equal(JSON.stringify(statusOnly).includes(secret), false);
 
-  // A successful run discloses nothing extra, and neither does a stream with two results.
-  const clean = await runFreshClaude(baseRun({
+  // A genuinely successful run must disclose nothing extra. code: 0 with a valid
+  // structured_output, and includeSuccessDiagnostic so a diagnostic actually exists to assert on -
+  // otherwise the assertion would pass against `undefined` and prove nothing.
+  const success = await runFreshClaude(baseRun({
     environment,
     includeErrorResultStatus: true,
-    spawn: fakeSpawn({ code: 1, stdout: resultEvent(undefined, { is_error: false }) }),
+    includeSuccessDiagnostic: true,
+    spawn: fakeSpawn({ code: 0, stdout: resultEvent({ verdict: 'PASS' }) }),
   }));
-  assert.doesNotMatch(clean.diagnostic ?? '', /apiErrorStatus|terminalReason/);
+  assert.equal(success.status, 'ok');
+  assert.ok(typeof success.diagnostic === 'string' && success.diagnostic.length > 0);
+  assert.doesNotMatch(success.diagnostic, /apiErrorStatus|terminalReason|resultExcerpt/);
+
+  // Two result events must withhold the fields too - the resultEventCount === 1 gate exists
+  // because a second result makes it ambiguous which one the status belongs to.
+  const twoResults = await runFreshClaude(baseRun({
+    environment,
+    includeErrorResultStatus: true,
+    spawn: fakeSpawn({
+      code: 1,
+      stdout: resultEvent(undefined, {
+        is_error: true, api_error_status: 400, terminal_reason: 'api_error', structured_output: undefined,
+      }) + resultEvent(undefined, {
+        is_error: true, api_error_status: 500, terminal_reason: 'api_error', structured_output: undefined,
+      }),
+    }),
+  }));
+  assert.equal(twoResults.status, 'infra_error');
+  assert.ok(typeof twoResults.diagnostic === 'string' && twoResults.diagnostic.length > 0);
+  assert.doesNotMatch(twoResults.diagnostic, /apiErrorStatus|terminalReason/);
 });
 
 test('redacts quoted credential forms while keeping diagnostics valid JSON', async () => {
