@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { REVIEWER_MODEL, runReview } from '../src/orchestrator.mjs';
+import {
+  DEFAULT_REVIEWER_MODEL,
+  REVIEWER_MODEL,
+  REVIEWER_MODELS,
+  resolveReviewerModel,
+  runReview,
+} from '../src/orchestrator.mjs';
 import { finalDecision, partitionValidatedFindings } from '../src/review-entry.mjs';
 
 const finding = {
@@ -282,7 +288,7 @@ test('starts one independent Terra finder for every taxonomy dimension', async (
   });
   assert.deepEqual(result.findings, []);
   assert.deepEqual(finders.map((request) => request.taxonomy).sort(), dimensions.sort());
-  assert.equal(REVIEWER_MODEL, 'luna');
+  assert.equal(REVIEWER_MODEL, DEFAULT_REVIEWER_MODEL);
   assert.ok(finders.every((request) => request.model === REVIEWER_MODEL));
   assert.ok(finders.every((request) => !('plan' in request) && !('transcript' in request)));
 });
@@ -1002,4 +1008,21 @@ test('fails infrastructure when five validator seats cannot be filled and never 
   assert.deepEqual(result.findings, []);
   assert.equal(adjudications, 0);
   assert.ok(result.failures.some((failure) => /could not collect 5/.test(failure.error)));
+});
+
+test('reviewer tier is selectable at runtime and rejects anything outside the allow-list', () => {
+  // The point of this test: a hardcoded tier cannot track an upstream whose failing
+  // model rotates. Every accepted tier must be reachable without editing source.
+  assert.equal(resolveReviewerModel({}), DEFAULT_REVIEWER_MODEL);
+  assert.equal(resolveReviewerModel({ REVIEW_MODEL: '' }), DEFAULT_REVIEWER_MODEL);
+  assert.equal(resolveReviewerModel({ REVIEW_MODEL: undefined }), DEFAULT_REVIEWER_MODEL);
+  for (const model of REVIEWER_MODELS) {
+    assert.equal(resolveReviewerModel({ REVIEW_MODEL: model }), model);
+  }
+  // Fail closed on anything else - a typo must not silently fall back to the default
+  // and produce a review nobody realises ran on the wrong tier.
+  for (const bad of ['gpt-5.6-sol', 'SOL', 'opus', 'sol ', '../sol']) {
+    assert.throws(() => resolveReviewerModel({ REVIEW_MODEL: bad }), /REVIEW_MODEL must be one of/);
+  }
+  assert.deepEqual([...REVIEWER_MODELS], ['sol', 'terra', 'luna']);
 });

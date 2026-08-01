@@ -64,12 +64,13 @@ while [ "$#" -gt 0 ]; do
   if [ "$1" = '--model' ]; then model="$2"; break; fi
   shift
 done
-# The reviewer tier is shared by the summary and find stages, so branch on the
-# stage-specific prompt rather than on the model alone.
+# Branch on the STAGE, never on the model. The reviewer tier is selectable and may
+# be any allow-listed model - including the same one the planner runs on - so using
+# the model as a proxy for the stage silently mis-routes as soon as they coincide.
 case "$model" in
-  sol) output='{"version":"v1","assignments":[{"id":"all","shardIndexes":[0]}]}' ;;
-  luna|terra)
+  sol|terra|luna)
     case "$all" in
+      *planner*) output='{"version":"v1","assignments":[{"id":"all","shardIndexes":[0]}]}' ;;
       *summarizer*) output='{"version":"v1","summary":"one changed file","files":["src/a.mjs"]}' ;;
       *) output='[]' ;;
     esac ;;

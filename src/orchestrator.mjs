@@ -16,13 +16,31 @@ const FAILURE_STATUSES = ['infra_error', 'schema_error'];
 
 // Tier used for the find and validate stages.
 //
-// terra is the intended reviewer tier, but the upstream behind the configured
-// provider is currently returning 502/524 for it: measured 2026-07-31, terra
-// completed 13 of 71 requests (18%) while luna completed 13 of 13 (100%) on the
-// same channel in the same window. Every finder dimension therefore died and the
-// review returned infrastructure_failure. Route these stages to luna until terra
-// recovers upstream, then set this back to 'terra'.
-export const REVIEWER_MODEL = 'luna';
+// This was a hardcoded constant, pinned to whichever tier was healthy on the day
+// it was written. That is the wrong shape: the upstream behind this provider fails
+// PER MODEL and the failing model ROTATES. On 2026-07-31 terra completed 18% while
+// luna completed 100%, so the constant was set to luna; twelve hours later luna was
+// at 0/42 and sol at 11/11. A constant cannot track a rotating fault, and pinning
+// one turns every rotation into a manual edit plus a release.
+//
+// So it is selectable at runtime, validated against the same allow-list the CLI
+// enforces, and it defaults to the tier the production review gate already trusts.
+// Set REVIEW_MODEL to re-point it when the healthy tier rotates again.
+export const REVIEWER_MODELS = Object.freeze(['sol', 'terra', 'luna']);
+export const DEFAULT_REVIEWER_MODEL = 'sol';
+
+export function resolveReviewerModel(environment = process.env) {
+  const requested = environment?.REVIEW_MODEL;
+  if (requested == null || requested === '') return DEFAULT_REVIEWER_MODEL;
+  if (!REVIEWER_MODELS.includes(requested)) {
+    throw new Error(
+      `REVIEW_MODEL must be one of ${REVIEWER_MODELS.join(', ')}; received ${JSON.stringify(requested)}`,
+    );
+  }
+  return requested;
+}
+
+export const REVIEWER_MODEL = resolveReviewerModel();
 
 function boundedFailureText(value, limit = MAX_FAILURE_TEXT) {
   const text = String(value ?? 'runner returned no result');
