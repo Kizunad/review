@@ -458,7 +458,14 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number }}
         run: |
           set -euo pipefail
-          body='## Central review\n\n**Decision:** `infrastructure_failure`\n\nThe read-only review job did not produce a verifiable artifact. No code verdict was inferred.'
+          body="$(cat <<'EOF'
+          ## Central review
+
+          **Decision:** `infrastructure_failure`
+
+          The read-only review job did not produce a verifiable artifact. No code verdict was inferred.
+          EOF
+          )"
           jq -n --arg body "$body" '{body:$body}' | curl --fail-with-body --silent --show-error -X POST \
             -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" \
             -H 'Content-Type: application/json' \

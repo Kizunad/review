@@ -59,14 +59,21 @@ test('preflight reads circuit state without writing and emits an open-circuit sk
   assert.deepEqual(outputs, ['should_run=false\nopen_until=2026-07-25T01:20:00.000Z\n']);
 });
 
-test('exact manual review bypasses the circuit without reading or writing GitHub state', async () => {
-  const outputs = [];
-  await runCircuit('preflight', {
-    environment: environment({ REVIEW_TRIGGER: 'issue_comment', REVIEW_COMMENT_BODY: '/review' }),
-    fetchImpl: async () => { throw new Error('GitHub state must not be accessed'); },
-    append: async (_path, value) => outputs.push(value),
-  });
-  assert.deepEqual(outputs, ['should_run=true\n']);
+test('comment commands cannot bypass an open circuit', async () => {
+  for (const body of ['/review', '/review-next']) {
+    const outputs = [];
+    await runCircuit('preflight', {
+      environment: environment({
+        REVIEW_TRIGGER: 'issue_comment',
+        REVIEW_COMMENT_BODY: body,
+        CIRCUIT_MANUAL_RETRY: 'true',
+      }),
+      fetchImpl: readOnlyStateFetch(failureEvents),
+      append: async (_path, value) => outputs.push(value),
+      now: () => '2026-07-25T00:30:00.000Z',
+    });
+    assert.deepEqual(outputs, ['should_run=false\nopen_until=2026-07-25T01:20:00.000Z\n']);
+  }
 });
 
 test('explicit trusted workflow dispatch retry bypasses the circuit without reading or writing state', async () => {

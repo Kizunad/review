@@ -104,7 +104,7 @@ export function renderEventComment(event, pullNumber) {
 
 export function renderSkipComment(state) {
   if (!state?.open || !canonicalTimestamp(state.openUntil)) throw new Error('open circuit state is required');
-  return `## Central review skipped by infrastructure circuit\n\nThe automatic review circuit is open until **${state.openUntil}**. This is not a code verdict. A trusted member can comment the exact command \`/review\` to bypass the circuit and retry.`;
+  return `## Central review skipped by infrastructure circuit\n\nThe automatic review circuit is open until **${state.openUntil}**. This is not a code verdict. Retry through the caller's \`workflow_dispatch\` entrypoint with the \`pr_number\` input and \`circuit_manual_retry\` enabled.`;
 }
 
 function authorizedHeaders(token) {
