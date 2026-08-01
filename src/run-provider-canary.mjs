@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { runFreshClaude } from './claude-cli.mjs';
 
-const models = ['sol', 'luna', 'terra'];
+// The two placeholders are what production actually sends; the raw tiers stay so
+// a placeholder failure can be bisected to "mapping broken" vs "upstream down".
+const models = ['cc-review', 'cc-review-lite', 'sol', 'luna', 'terra'];
 
 export async function runProviderCanary({
   environment = process.env,

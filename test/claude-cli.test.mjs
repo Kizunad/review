@@ -180,7 +180,12 @@ test('builds the fixed fresh read-only Claude command with inline schema JSON', 
   assert.ok(args.includes('--disable-slash-commands'));
   assert.ok(args.includes('--strict-mcp-config'));
   assert.deepEqual(JSON.parse(args.at(-1)), schema);
-  assert.throws(() => buildClaudeArgs({ model: 'opus', prompt: 'x', jsonSchema: schema }), /model/);
+  // Shape gate, not membership: the relay owns the valid set, so an arbitrary
+  // well-formed name passes; malformed or flag-shaped names must throw.
+  assert.ok(buildClaudeArgs({ model: 'cc-review', prompt: 'x', jsonSchema: schema }).includes('cc-review'));
+  for (const bad of ['', ' sol', 'a b', '--model-injection', undefined]) {
+    assert.throws(() => buildClaudeArgs({ model: bad, prompt: 'x', jsonSchema: schema }), /model/);
+  }
 });
 
 test('strips schema metadata unsupported by the Claude CLI validator', () => {

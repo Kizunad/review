@@ -14,33 +14,50 @@ const MAX_FAILURE_SAMPLES = 4;
 const MAX_FAILURE_TEXT = 4_000;
 const FAILURE_STATUSES = ['infra_error', 'schema_error'];
 
-// Tier used for the find and validate stages.
+// Model names sent by every stage.
 //
-// This was a hardcoded constant, pinned to whichever tier was healthy on the day
-// it was written. That is the wrong shape: the upstream behind this provider fails
-// PER MODEL and the failing model ROTATES. On 2026-07-31 terra completed 18% while
-// luna completed 100%, so the constant was set to luna; twelve hours later luna was
-// at 0/42 and sol at 11/11. A constant cannot track a rotating fault, and pinning
-// one turns every rotation into a manual edit plus a release.
+// These are ROUTING PLACEHOLDERS, not provider tiers. The upstream behind this
+// provider fails PER MODEL and the failing model ROTATES; encoding a real tier
+// here (first terra, then luna, then sol) turned every rotation into a source
+// edit plus a release plus a consumer pin bump. An allow-list of real tiers has
+// the same flaw one level up: adding a tier is still a release. So the engine
+// now sends stable placeholder names and the relay maps each one to whichever
+// upstream model is currently healthy - re-pointable from the relay's web UI
+// with zero code changes. Membership is the relay's concern; this side checks
+// SHAPE only (and the leading alphanumeric keeps a name from ever parsing as a
+// CLI flag).
 //
-// So it is selectable at runtime, validated against the same allow-list the CLI
-// enforces, and it defaults to the tier the production review gate already trusts.
-// Set REVIEW_MODEL to re-point it when the healthy tier rotates again.
-export const REVIEWER_MODELS = Object.freeze(['sol', 'terra', 'luna']);
-export const DEFAULT_REVIEWER_MODEL = 'sol';
+//   cc-review       judgment stages: plan, find, validate, consolidate, adjudicate
+//   cc-review-lite  the cheap summary stage
+//
+// REVIEW_MODEL / REVIEW_MODEL_LITE still override per run for canaries and
+// bisection, bypassing the relay mapping with a literal upstream name.
+export const DEFAULT_REVIEWER_MODEL = 'cc-review';
+export const DEFAULT_LITE_MODEL = 'cc-review-lite';
 
-export function resolveReviewerModel(environment = process.env) {
-  const requested = environment?.REVIEW_MODEL;
-  if (requested == null || requested === '') return DEFAULT_REVIEWER_MODEL;
-  if (!REVIEWER_MODELS.includes(requested)) {
-    throw new Error(
-      `REVIEW_MODEL must be one of ${REVIEWER_MODELS.join(', ')}; received ${JSON.stringify(requested)}`,
-    );
+const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+
+function resolveModel(environment, key, fallback) {
+  const requested = environment?.[key];
+  if (requested == null || requested === '') return fallback;
+  // Fail closed on malformed names - a typo must not silently fall back to the
+  // default and produce a review nobody realises ran on the wrong model.
+  if (typeof requested !== 'string' || !MODEL_NAME.test(requested)) {
+    throw new Error(`${key} must match ${MODEL_NAME}; received ${JSON.stringify(requested)}`);
   }
   return requested;
 }
 
+export function resolveReviewerModel(environment = process.env) {
+  return resolveModel(environment, 'REVIEW_MODEL', DEFAULT_REVIEWER_MODEL);
+}
+
+export function resolveLiteModel(environment = process.env) {
+  return resolveModel(environment, 'REVIEW_MODEL_LITE', DEFAULT_LITE_MODEL);
+}
+
 export const REVIEWER_MODEL = resolveReviewerModel();
+export const LITE_MODEL = resolveLiteModel();
 
 function boundedFailureText(value, limit = MAX_FAILURE_TEXT) {
   const text = String(value ?? 'runner returned no result');
@@ -228,7 +245,7 @@ export async function runReview({
   const shards = shardDiff(diff, { maxChars: maxShardChars });
   const plan = await runner.run({
     stage: 'plan',
-    model: 'sol',
+    model: REVIEWER_MODEL,
     shardManifest: shards.map(({ index, paths, text }) => ({ index, paths, chars: text.length })),
     taxonomy,
   });
@@ -237,7 +254,7 @@ export async function runReview({
   const assignments = normalizeAssignments(plan.data, shards, maxShardChars);
   const summaryResults = await Promise.all(assignments.map(async (assignment) => {
     const summary = await runner.run({
-      stage: 'summary', model: 'luna', assignment, diff: assignmentDiff(assignment, shards),
+      stage: 'summary', model: LITE_MODEL, assignment, diff: assignmentDiff(assignment, shards),
     });
     return { assignment, summary };
   }));
@@ -322,7 +339,7 @@ export async function runReview({
   }
 
   const consolidation = await runner.run({
-    stage: 'consolidate', model: 'sol', candidates: exactCandidates,
+    stage: 'consolidate', model: REVIEWER_MODEL, candidates: exactCandidates,
   });
   if (!stageOk(consolidation)) {
     failures.push(stageFailure('consolidate', consolidation));
@@ -387,7 +404,7 @@ export async function runReview({
       });
     } else if (outcome?.decision === 'adjudicate') {
       const adjudication = await runner.run({
-        stage: 'adjudicate', model: 'sol', candidate, voteRounds,
+        stage: 'adjudicate', model: REVIEWER_MODEL, candidate, voteRounds,
       });
       if (!stageOk(adjudication)) {
         failures.push(stageFailure(`adjudicate:${candidate.fingerprint}`, adjudication));

@@ -64,17 +64,17 @@ while [ "$#" -gt 0 ]; do
   if [ "$1" = '--model' ]; then model="$2"; break; fi
   shift
 done
-# Branch on the STAGE, never on the model. The reviewer tier is selectable and may
-# be any allow-listed model - including the same one the planner runs on - so using
-# the model as a proxy for the stage silently mis-routes as soon as they coincide.
+# Branch on the STAGE, never on the model. Models are routing placeholders the
+# relay resolves - any well-formed name is legal here, so the model arm is only
+# a plumbing guard: empty or flag-shaped means the --model arg went missing.
 case "$model" in
-  sol|terra|luna)
+  ''|-*) exit 9 ;;
+  *)
     case "$all" in
       *planner*) output='{"version":"v1","assignments":[{"id":"all","shardIndexes":[0]}]}' ;;
       *summarizer*) output='{"version":"v1","summary":"one changed file","files":["src/a.mjs"]}' ;;
       *) output='[]' ;;
     esac ;;
-  *) exit 9 ;;
 esac
 printf '{"type":"result","structured_output":%s}\n' "$output"
 `);

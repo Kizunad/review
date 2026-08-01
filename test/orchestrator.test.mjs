@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  DEFAULT_LITE_MODEL,
   DEFAULT_REVIEWER_MODEL,
+  LITE_MODEL,
   REVIEWER_MODEL,
-  REVIEWER_MODELS,
+  resolveLiteModel,
   resolveReviewerModel,
   runReview,
 } from '../src/orchestrator.mjs';
@@ -403,7 +405,7 @@ test('runs every Luna assignment and fills uncovered shards deterministically', 
     }),
   });
   assert.ok(summaries.length >= 2);
-  assert.equal(summaries[0].model, 'luna');
+  assert.equal(summaries[0].model, LITE_MODEL);
   assert.ok(summaries.every((request) => !('plan' in request)));
   assert.ok(summaries.every((request) => request.diff.length <= 30));
 });
@@ -937,7 +939,7 @@ test('retries split votes three times then sends only structured votes to Sol ad
   assert.equal(result.findings[0].voteSupport, 2);
   assert.equal(requests.filter((request) => request.stage === 'validate').length, 15);
   const adjudication = requests.find((request) => request.stage === 'adjudicate');
-  assert.equal(adjudication.model, 'sol');
+  assert.equal(adjudication.model, REVIEWER_MODEL);
   assert.equal(adjudication.voteRounds.length, 3);
   assert.equal('summaries' in adjudication, false);
 });
@@ -1010,19 +1012,27 @@ test('fails infrastructure when five validator seats cannot be filled and never 
   assert.ok(result.failures.some((failure) => /could not collect 5/.test(failure.error)));
 });
 
-test('reviewer tier is selectable at runtime and rejects anything outside the allow-list', () => {
-  // The point of this test: a hardcoded tier cannot track an upstream whose failing
-  // model rotates. Every accepted tier must be reachable without editing source.
+test('models are routing placeholders: defaults are stable names, overrides are shape-checked passthrough', () => {
+  // The point of this test: the engine no longer knows which upstream tier is
+  // healthy - the relay maps stable placeholder names, so routing changes need
+  // zero code changes. The defaults ARE the contract with the relay mapping.
+  assert.equal(DEFAULT_REVIEWER_MODEL, 'cc-review');
+  assert.equal(DEFAULT_LITE_MODEL, 'cc-review-lite');
   assert.equal(resolveReviewerModel({}), DEFAULT_REVIEWER_MODEL);
   assert.equal(resolveReviewerModel({ REVIEW_MODEL: '' }), DEFAULT_REVIEWER_MODEL);
   assert.equal(resolveReviewerModel({ REVIEW_MODEL: undefined }), DEFAULT_REVIEWER_MODEL);
-  for (const model of REVIEWER_MODELS) {
+  assert.equal(resolveLiteModel({}), DEFAULT_LITE_MODEL);
+  assert.equal(resolveLiteModel({ REVIEW_MODEL_LITE: '' }), DEFAULT_LITE_MODEL);
+  // Membership is the relay's concern now: any well-formed name passes through,
+  // so canaries and bisection can name a literal upstream tier directly.
+  for (const model of ['sol', 'terra', 'luna', 'gpt-5.6-sol', 'claude-opus-5']) {
     assert.equal(resolveReviewerModel({ REVIEW_MODEL: model }), model);
+    assert.equal(resolveLiteModel({ REVIEW_MODEL_LITE: model }), model);
   }
-  // Fail closed on anything else - a typo must not silently fall back to the default
-  // and produce a review nobody realises ran on the wrong tier.
-  for (const bad of ['gpt-5.6-sol', 'SOL', 'opus', 'sol ', '../sol']) {
-    assert.throws(() => resolveReviewerModel({ REVIEW_MODEL: bad }), /REVIEW_MODEL must be one of/);
+  // Fail closed on malformed names - a typo with a space or a flag-shaped value
+  // must not silently fall back to the default, and must never parse as an arg.
+  for (const bad of ['sol ', ' sol', '../sol', '--model-injection', 'a b', '"sol"']) {
+    assert.throws(() => resolveReviewerModel({ REVIEW_MODEL: bad }), /REVIEW_MODEL must match/);
+    assert.throws(() => resolveLiteModel({ REVIEW_MODEL_LITE: bad }), /REVIEW_MODEL_LITE must match/);
   }
-  assert.deepEqual([...REVIEWER_MODELS], ['sol', 'terra', 'luna']);
 });
