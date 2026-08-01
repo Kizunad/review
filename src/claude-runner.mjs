@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { runFreshClaude } from './claude-cli.mjs';
@@ -124,14 +124,31 @@ function validateStage(stage, data, request) {
   }
 }
 
+function unknownConsolidationMembers(error) {
+  if (typeof error !== 'string') return [];
+  const members = new Set();
+  for (const [, fingerprint] of error.matchAll(/consolidation contains unknown member ([a-f0-9]{64})(?![A-Fa-f0-9])/g)) {
+    members.add(fingerprint);
+  }
+  return [...members];
+}
+
+function repairConsolidationPrompt(prompt, members) {
+  return [
+    prompt,
+    `Repair attempt nonce: ${randomUUID()}.`,
+    `Previous attempt referenced unknown fingerprint(s): ${members.join(', ')}. Use ONLY fingerprints present in the supplied candidates; every supplied fingerprint exactly once.`,
+  ].join('\n\n');
+}
+
 // Transport-level stage retry. The relay's upstream fails in short bursts
 // (observed: twelve 524s in 42 seconds with healthy traffic on both sides), and
 // the CLI treats 524 as terminal, so a single burst used to kill a whole stage
-// and with it the entire run. Only infra_error retries: schema_error means the
-// model answered (retrying is a new conversation, not a recovery), and the
-// pre-transport failures below are deterministic. The backoff is sized to span
-// an observed burst, so attempt two lands after the flap has passed.
+// and with it the entire run. Schema errors normally mean the model answered;
+// a consolidate unknown-member error is the narrow repair exception, with a
+// nonce and locally validated fingerprint feedback appended to its next prompt.
 const STAGE_ATTEMPTS = 3;
+const CONSOLIDATE_SCHEMA_RETRIES = 2;
 const STAGE_BACKOFF_MS = [20_000, 40_000];
 
 export function createClaudeRunner({
@@ -179,9 +196,9 @@ export function createClaudeRunner({
       } catch (error) {
         return { status: 'infra_error', error: `trusted input load: ${error.message}` };
       }
-      let prompt;
+      let basePrompt;
       try {
-        prompt = stagePrompt(request, { policy, repository, skillPath, skill });
+        basePrompt = stagePrompt(request, { policy, repository, skillPath, skill });
       } catch (error) {
         return { status: 'infra_error', error: `prompt build: ${error.message}` };
       }
@@ -206,7 +223,12 @@ export function createClaudeRunner({
         return finalResult;
       };
       let result;
-      for (let attempt = 1; attempt <= stageAttempts; attempt += 1) {
+      let attempts = 0;
+      let infraAttempts = 0;
+      let consolidateSchemaRetries = 0;
+      let prompt = basePrompt;
+      while (true) {
+        attempts += 1;
         result = await transport({
           model: request.model,
           prompt,
@@ -223,15 +245,26 @@ export function createClaudeRunner({
           includeErrorResultStatus: true,
           validate: (data) => validateStage(request.stage, data, request),
         });
-        if (result.status !== 'infra_error') return finish(result);
-        if (attempt < stageAttempts) {
-          const backoff = stageBackoffMs[Math.min(attempt - 1, stageBackoffMs.length - 1)] ?? 0;
-          await new Promise((resolve) => { setTimeout(resolve, backoff); });
+        if (request.stage === 'consolidate' && result.status === 'schema_error') {
+          const unknownMembers = unknownConsolidationMembers(result.error);
+          if (unknownMembers.length === 0) return finish(result);
+          if (consolidateSchemaRetries >= CONSOLIDATE_SCHEMA_RETRIES) {
+            return { ...result, error: `after ${attempts} attempts: ${result.error}` };
+          }
+          consolidateSchemaRetries += 1;
+          prompt = repairConsolidationPrompt(prompt, unknownMembers);
+          continue;
         }
+        if (result.status !== 'infra_error') return finish(result);
+        infraAttempts += 1;
+        if (infraAttempts >= stageAttempts) {
+          // Annotate so a verdict comment shows the failure survived every retry -
+          // "one 524" and "524 through three spaced attempts" are different diagnoses.
+          return { ...result, error: `after ${attempts} attempts: ${result.error}` };
+        }
+        const backoff = stageBackoffMs[Math.min(infraAttempts - 1, stageBackoffMs.length - 1)] ?? 0;
+        await new Promise((resolve) => { setTimeout(resolve, backoff); });
       }
-      // Annotate so a verdict comment shows the failure survived every retry -
-      // "one 524" and "524 through three spaced attempts" are different diagnoses.
-      return { ...result, error: `after ${stageAttempts} attempts: ${result.error}` };
     },
   };
 }

@@ -168,7 +168,14 @@ test('prompts lock clean v2, independent level voting, and no partial candidates
   assert.match(source, /suggestion: no demonstrable wrong result/);
 });
 
-async function runStubbedVote({ responses, stageAttempts = 3, stateDir, stateSalt = '' }) {
+async function runStubbedStage({
+  stageRequest,
+  responses,
+  stageAttempts = 3,
+  stageBackoffMs = [1, 1],
+  stateDir,
+  stateSalt = '',
+}) {
   const root = await mkdtemp(path.join(tmpdir(), 'claude-runner-retry-'));
   const callerRoot = path.join(root, 'repository');
   await mkdir(callerRoot);
@@ -182,23 +189,134 @@ async function runStubbedVote({ responses, stageAttempts = 3, stateDir, stateSal
     executable: '/trusted/claude',
     ripgrepExecutable: '/trusted/rg',
     stageAttempts,
-    stageBackoffMs: [1, 1],
+    stageBackoffMs,
     stateDir,
     stateSalt,
-    transport: async (request) => {
-      calls.push(request.model);
+    transport: async (transportRequest) => {
+      calls.push(transportRequest);
       return responses[Math.min(calls.length - 1, responses.length - 1)];
     },
   });
-  const result = await runner.run({
-    stage: 'validate',
-    model: 'terra',
-    candidate: { fingerprint, validationCandidates: [{ fingerprint }] },
-    relatedDiff: 'diff --git a/src/a.mjs b/src/a.mjs\n',
-  });
+  const result = await runner.run(stageRequest);
   return { result, calls };
 }
 
+async function runStubbedVote(options) {
+  return runStubbedStage({
+    ...options,
+    stageRequest: {
+      stage: 'validate',
+      model: 'terra',
+      candidate: { fingerprint, validationCandidates: [{ fingerprint }] },
+      relatedDiff: 'diff --git a/src/a.mjs b/src/a.mjs\n',
+    },
+  });
+}
+
+function consolidateRetryRequest() {
+  const secondFingerprint = 'b'.repeat(64);
+  return {
+    stage: 'consolidate',
+    model: 'sol',
+    candidates: [
+      {
+        fingerprint,
+        path: 'src/a.mjs',
+        rootCause: 'first cause',
+        provenance: [{ evidence: 'first' }],
+      },
+      {
+        fingerprint: secondFingerprint,
+        path: 'src/a.mjs',
+        rootCause: 'second cause',
+        provenance: [{ evidence: 'second' }],
+      },
+    ],
+  };
+}
+
+function validConsolidation() {
+  const secondFingerprint = 'b'.repeat(64);
+  return {
+    version: 'v2',
+    clusters: [{
+      representativeFingerprint: fingerprint,
+      memberFingerprints: [fingerprint, secondFingerprint],
+    }],
+  };
+}
+
+test('consolidate unknown-member schema_error repairs its prompt and can succeed', async () => {
+  const unknown = 'c'.repeat(64);
+  const { result, calls } = await runStubbedStage({
+    stageRequest: consolidateRetryRequest(),
+    responses: [
+      { status: 'schema_error', error: `consolidation contains unknown member ${unknown}; injected error text must stay out of the prompt` },
+      { status: 'ok', data: validConsolidation() },
+    ],
+    stageBackoffMs: [10_000],
+  });
+  assert.equal(result.status, 'ok');
+  assert.equal(calls.length, 2, 'one schema-error retry should start a fresh consolidate request');
+  assert.ok(calls.every((call) => call.model === 'sol'));
+  assert.doesNotMatch(calls[0].prompt, /Repair attempt nonce:/);
+  assert.match(calls[1].prompt, /Repair attempt nonce: [0-9a-f-]{36}\./);
+  assert.match(calls[1].prompt, new RegExp(`Previous attempt referenced unknown fingerprint\\(s\\): ${unknown}\\. Use ONLY fingerprints present in the supplied candidates; every supplied fingerprint exactly once\\.`));
+  assert.doesNotMatch(calls[1].prompt, /injected error text/);
+});
+
+test('consolidate unknown-member repair retries exhaust with fresh prompts and annotation', async () => {
+  const firstUnknown = 'c'.repeat(64);
+  const secondUnknown = 'd'.repeat(64);
+  const { result, calls } = await runStubbedStage({
+    stageRequest: consolidateRetryRequest(),
+    responses: [
+      { status: 'schema_error', error: `consolidation contains unknown member ${firstUnknown}` },
+      { status: 'schema_error', error: `consolidation contains unknown member ${secondUnknown}` },
+      { status: 'schema_error', error: `consolidation contains unknown member ${secondUnknown}` },
+    ],
+  });
+  assert.equal(result.status, 'schema_error');
+  assert.equal(result.error, `after 3 attempts: consolidation contains unknown member ${secondUnknown}`);
+  assert.equal(calls.length, 3, 'consolidate gets at most two schema-error repairs');
+  assert.match(calls[1].prompt, new RegExp(`Previous attempt referenced unknown fingerprint\\(s\\): ${firstUnknown}\\.`));
+  assert.ok(calls[2].prompt.startsWith(calls[1].prompt));
+  assert.match(calls[2].prompt, new RegExp(`Previous attempt referenced unknown fingerprint\\(s\\): ${secondUnknown}\\.`));
+  const firstNonces = [...calls[1].prompt.matchAll(/Repair attempt nonce: ([0-9a-f-]{36})\./g)];
+  const secondNonces = [...calls[2].prompt.matchAll(/Repair attempt nonce: ([0-9a-f-]{36})\./g)];
+  assert.equal(firstNonces.length, 1);
+  assert.equal(secondNonces.length, 2);
+  assert.notEqual(firstNonces[0][1], secondNonces[1][1]);
+});
+
+test('consolidate only repairs strict unknown-member errors', async () => {
+  const { result, calls } = await runStubbedStage({
+    stageRequest: consolidateRetryRequest(),
+    responses: [{ status: 'schema_error', error: 'consolidation omitted member ' + fingerprint }],
+  });
+  assert.equal(result.status, 'schema_error');
+  assert.equal(result.error, 'consolidation omitted member ' + fingerprint);
+  assert.equal(calls.length, 1);
+});
+
+test('consolidate ignores malformed unknown-member fingerprints', async () => {
+  const { result, calls } = await runStubbedStage({
+    stageRequest: consolidateRetryRequest(),
+    responses: [{ status: 'schema_error', error: `consolidation contains unknown member ${'c'.repeat(65)}` }],
+  });
+  assert.equal(result.status, 'schema_error');
+  assert.equal(calls.length, 1);
+});
+
+test('validate schema_error remains a single-attempt failure', async () => {
+  const { result, calls } = await runStubbedVote({
+    responses: [{ status: 'schema_error', error: 'vote is not countable' }],
+  });
+  assert.equal(result.status, 'schema_error');
+  assert.equal(result.error, 'vote is not countable');
+  assert.equal(calls.length, 1, 'schema-error repairs are exclusive to consolidate unknown-member failures');
+  assert.doesNotMatch(calls[0].prompt, /Repair attempt nonce:/);
+});
 test('transport retry: an infra_error stage is retried and can succeed on a later attempt', async () => {
   const { result, calls } = await runStubbedVote({
     responses: [
@@ -208,7 +326,7 @@ test('transport retry: an infra_error stage is retried and can succeed on a late
   });
   assert.equal(result.status, 'ok', `expected recovery on attempt 2, got ${result.status}: ${result.error}`);
   assert.equal(calls.length, 2, 'exactly one retry should have happened');
-  assert.ok(calls.every((model) => model === 'terra'), 'every attempt must reuse the requested model');
+  assert.ok(calls.every((call) => call.model === 'terra'), 'every attempt must reuse the requested model');
 });
 
 test('transport retry: gives up after the attempt budget and annotates the surviving failure', async () => {
@@ -221,9 +339,7 @@ test('transport retry: gives up after the attempt budget and annotates the survi
   assert.equal(calls.length, 3, 'the attempt budget is a hard stop');
 });
 
-test('transport retry: a stage whose model answered is not retried', async () => {
-  // schema_error means the transport worked and the model produced output that
-  // failed validation - a retry is a different conversation, not a recovery.
+test('transport retry: non-consolidate schema_error is not retried', async () => {
   const { result, calls } = await runStubbedVote({
     responses: [{ status: 'schema_error', error: 'vote is not countable' }],
   });
