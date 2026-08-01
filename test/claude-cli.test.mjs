@@ -960,3 +960,31 @@ test('unwraps the array envelope symmetrically and still accepts a raw array rep
     assert.deepEqual(result.data, ['a', 'b']);
   }
 });
+
+test('strips RE2-incompatible patterns for the CLI copy, keeps RE2-safe ones', () => {
+  // Structured-output providers compile patterns with RE2: lookaround or a
+  // backreference gets the whole schema rejected with 400 invalid_json_schema.
+  const args = buildClaudeArgs({
+    model: 'sol',
+    prompt: 'find',
+    jsonSchema: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', pattern: '^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]{1,500}$' },
+          fingerprint: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+          echo: { type: 'string', pattern: '^(a)\\1$' },
+        },
+        required: ['path', 'fingerprint', 'echo'],
+        additionalProperties: false,
+      },
+    },
+  });
+  const cliSchema = JSON.parse(args[args.indexOf('--json-schema') + 1]);
+  const properties = cliSchema.properties.items.items.properties;
+  assert.equal('pattern' in properties.path, false, 'lookaround pattern must be dropped');
+  assert.equal('pattern' in properties.echo, false, 'backreference pattern must be dropped');
+  assert.equal(properties.fingerprint.pattern, '^[a-f0-9]{64}$', 'RE2-safe pattern must survive');
+  assert.deepEqual(cliSchema.properties.items.items.required, ['path', 'fingerprint', 'echo']);
+});
