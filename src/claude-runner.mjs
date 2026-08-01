@@ -168,6 +168,10 @@ export function createClaudeRunner({
         cwd: callerRoot,
         environment,
         timeoutMs,
+        // Structural only. Without this a stage failure reports nothing but
+        // subtype/isError, which is why every historical infrastructure_failure was
+        // undiagnosable. The free-text excerpt stays off here - see streamDiagnostic.
+        includeErrorResultStatus: true,
         validate: (data) => validateStage(request.stage, data, request),
       });
     },

@@ -540,6 +540,66 @@ test('keeps result text private by default and exposes only an opted-in bounded 
   assert.equal(JSON.stringify(canaryResult).includes('token-secret'), false);
 });
 
+test('structural error status is disclosable to reviewing callers while the excerpt is not', async () => {
+  const secret = 'sk-ant-structural-secret-value';
+  const stdout = resultEvent(undefined, {
+    is_error: true,
+    api_error_status: 400,
+    terminal_reason: 'api_error',
+    result: 'API Error: 400 model not found: luna PROMPT_MARKER PR_DIFF_MARKER',
+    structured_output: undefined,
+  });
+  const environment = { ANTHROPIC_API_KEY: secret };
+
+  const statusOnly = await runFreshClaude(baseRun({
+    environment,
+    includeErrorResultStatus: true,
+    spawn: fakeSpawn({ code: 1, stdout }),
+  }));
+  assert.equal(statusOnly.status, 'infra_error');
+  // The whole point: a stage failure must name its upstream status instead of reporting
+  // only subtype/isError, which is indistinguishable between a relay 4xx and a local fault.
+  assert.match(statusOnly.diagnostic, /"apiErrorStatus":400/);
+  assert.match(statusOnly.diagnostic, /"terminalReason":"api_error"/);
+  // ...but reviewed content must still never appear.
+  assert.doesNotMatch(statusOnly.diagnostic, /resultExcerpt/);
+  assert.equal(statusOnly.diagnostic.includes('PROMPT_MARKER'), false);
+  assert.equal(statusOnly.diagnostic.includes('PR_DIFF_MARKER'), false);
+  assert.equal(statusOnly.diagnostic.includes('model not found'), false);
+  assert.equal(JSON.stringify(statusOnly).includes(secret), false);
+
+  // A genuinely successful run must disclose nothing extra. code: 0 with a valid
+  // structured_output, and includeSuccessDiagnostic so a diagnostic actually exists to assert on -
+  // otherwise the assertion would pass against `undefined` and prove nothing.
+  const success = await runFreshClaude(baseRun({
+    environment,
+    includeErrorResultStatus: true,
+    includeSuccessDiagnostic: true,
+    spawn: fakeSpawn({ code: 0, stdout: resultEvent({ verdict: 'PASS' }) }),
+  }));
+  assert.equal(success.status, 'ok');
+  assert.ok(typeof success.diagnostic === 'string' && success.diagnostic.length > 0);
+  assert.doesNotMatch(success.diagnostic, /apiErrorStatus|terminalReason|resultExcerpt/);
+
+  // Two result events must withhold the fields too - the resultEventCount === 1 gate exists
+  // because a second result makes it ambiguous which one the status belongs to.
+  const twoResults = await runFreshClaude(baseRun({
+    environment,
+    includeErrorResultStatus: true,
+    spawn: fakeSpawn({
+      code: 1,
+      stdout: resultEvent(undefined, {
+        is_error: true, api_error_status: 400, terminal_reason: 'api_error', structured_output: undefined,
+      }) + resultEvent(undefined, {
+        is_error: true, api_error_status: 500, terminal_reason: 'api_error', structured_output: undefined,
+      }),
+    }),
+  }));
+  assert.equal(twoResults.status, 'infra_error');
+  assert.ok(typeof twoResults.diagnostic === 'string' && twoResults.diagnostic.length > 0);
+  assert.doesNotMatch(twoResults.diagnostic, /apiErrorStatus|terminalReason/);
+});
+
 test('redacts quoted credential forms while keeping diagnostics valid JSON', async () => {
   const markers = [
     'JSON_TOKEN_LEAK_9f34c',

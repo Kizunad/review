@@ -180,7 +180,10 @@ function parseStreamJson(output) {
   return extractStructuredOutput(results[0]);
 }
 
-function streamDiagnostic(stdout, stderr, environment, { includeErrorResultDiagnostic = false } = {}) {
+function streamDiagnostic(stdout, stderr, environment, {
+  includeErrorResultDiagnostic = false,
+  includeErrorResultStatus = false,
+} = {}) {
   const lines = String(stdout ?? '').split('\n').filter((line) => line.trim().length > 0);
   const resultEventCount = lines.reduce((count, line) => {
     try {
@@ -216,7 +219,12 @@ function streamDiagnostic(stdout, stderr, environment, { includeErrorResultDiagn
           subtype: event.subtype,
           isError: event.is_error === true,
         };
-        if (includeErrorResultDiagnostic && resultEventCount === 1 && result.isError) {
+        // Two tiers, because the two carry different disclosure risk. api_error_status and
+        // terminal_reason are structural: a bounded HTTP status and a closed enum, neither of
+        // which can echo reviewed source. event.result is free model text and CAN echo the diff
+        // that was in the prompt, so it stays restricted to callers that review nothing.
+        const errorResult = resultEventCount === 1 && result.isError;
+        if (errorResult && (includeErrorResultDiagnostic || includeErrorResultStatus)) {
           if (Number.isInteger(event.api_error_status)
             && event.api_error_status >= 100
             && event.api_error_status <= 599) {
@@ -225,6 +233,8 @@ function streamDiagnostic(stdout, stderr, environment, { includeErrorResultDiagn
           if (typeof event.terminal_reason === 'string' && TERMINAL_REASON.test(event.terminal_reason)) {
             result.terminalReason = event.terminal_reason;
           }
+        }
+        if (errorResult && includeErrorResultDiagnostic) {
           if (typeof event.result === 'string' && event.result.length > 0) {
             result.resultExcerpt = diagnostic(event.result, environment, ERROR_RESULT_DIAGNOSTIC_BYTES);
           }
@@ -275,6 +285,7 @@ export async function runFreshClaude({
   maxStderrBytes = 64_000,
   includeSuccessDiagnostic = false,
   includeErrorResultDiagnostic = false,
+  includeErrorResultStatus = false,
   spawn = nodeSpawn,
   validate = () => true,
 }) {
@@ -331,7 +342,7 @@ export async function runFreshClaude({
       Buffer.concat(stdoutChunks).toString('utf8'),
       Buffer.concat(stderrChunks).toString('utf8'),
       sourceEnvironment,
-      { includeErrorResultDiagnostic },
+      { includeErrorResultDiagnostic, includeErrorResultStatus },
     );
     const finish = (result) => {
       if (settled) return;
