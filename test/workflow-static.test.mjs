@@ -45,11 +45,13 @@ test('consumer grants the reusable workflow actions metadata permission', async 
   assert.match(contract, /permissions:\n\s+actions: read\n\s+contents: read\n\s+pull-requests: write\n\s+issues: write/);
 });
 
-test('workflow obtains base history and never runs caller scripts', async () => {
+test('workflow obtains base history and diffs from the true merge base without binary patches', async () => {
   const yaml = await workflow();
   const callerCheckout = /Checkout exact caller head into isolated directory[\s\S]*?fetch-depth: 0/.test(yaml);
-  assert.equal(callerCheckout, true, 'caller checkout must fetch base history before diffing API base OID');
-  assert.match(yaml, /git -C _caller[^\n]*diff[^\n]*"\$BASE_OID" "\$HEAD_OID"/);
+  assert.equal(callerCheckout, true, 'caller checkout must fetch base history before resolving merge-base');
+  assert.match(yaml, /MB="\$\(git -C _caller merge-base "\$BASE_OID" "\$HEAD_OID"\)"/);
+  assert.match(yaml, /git -C _caller[^\n]*diff[^\n]*"\$MB" "\$HEAD_OID"/);
+  assert.doesNotMatch(yaml, /git -C _caller[^\n]*diff[^\n]*--binary/);
   assert.doesNotMatch(yaml, /(?:npm|yarn|pnpm|bash|sh)\s+(?:_caller|\.\/_caller|_caller\/)/);
 });
 

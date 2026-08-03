@@ -231,7 +231,9 @@ jobs:
           set -euo pipefail
           actual="$(git -C _caller rev-parse HEAD)"
           [[ "$actual" == "$HEAD_OID" ]] || { echo 'Caller checkout HEAD differs from authoritative PR head.' >&2; exit 1; }
-          git -C _caller -c core.hooksPath=/dev/null diff --no-ext-diff --no-renames --binary "$BASE_OID" "$HEAD_OID" > _input/review.diff
+          MB="$(git -C _caller merge-base "$BASE_OID" "$HEAD_OID")"
+          [[ "$MB" =~ ^[0-9a-f]{40}$ ]] || { echo 'Unable to resolve caller merge base.' >&2; exit 1; }
+          git -C _caller -c core.hooksPath=/dev/null diff --no-ext-diff --no-renames "$MB" "$HEAD_OID" > _input/review.diff
       # Resume state: completed stage results from a prior run of the SAME pr +
       # head, so a re-trigger after an infrastructure failure continues from the
       # failed stage instead of re-reviewing from scratch. Save keys are unique
