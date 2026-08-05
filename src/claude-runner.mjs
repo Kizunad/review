@@ -25,7 +25,14 @@ function levelInstructions() {
     '- minor: a reproducible defect with limited impact;',
     '- suggestion: no demonstrable wrong result, only maintainability, naming, comment, optional defense, helper extraction, or finer assertions around already-correct coverage.',
     'A proposed level is not authoritative. Never upgrade an improvement into a defect without a concrete wrong outcome.',
+    'Completeness expansion is not a defect: demanding coverage, tests, specs, or documentation beyond what the change itself claims to deliver is at most suggestion unless the omission produces a concrete wrong outcome inside what the change does claim.',
+    'For plan or skeleton documents, blocker/major additionally requires one of: an internal contradiction, a conflict with a binding authority document in the same repository, or a specification no implementer could satisfy as written. Everything else in such documents is at most suggestion.',
+    'Blocking for its own sake is forbidden: if the concrete wrong outcome cannot be named in one sentence, the level is suggestion.',
   ].join('\n');
+}
+
+function policyBindingInstruction() {
+  return 'The trusted caller policy below is binding for level assignment: when a policy rule matches a finding, assign at most the level that rule allows; policy rules can lower but never raise a level.';
 }
 
 function stagePrompt(request, { policy, repository, skillPath, skill }) {
@@ -61,6 +68,7 @@ function stagePrompt(request, { policy, repository, skillPath, skill }) {
         'Never emit a partial candidate. Omit any candidate whose required fields are not all concretely supported; return [] when no complete candidate qualifies.',
         'Every returned candidate must include taxonomy exactly equal to the assigned taxonomy dimension id, not its title or another dimension.',
         `Assigned taxonomy dimension:\n${json(request.taxonomy)}`,
+        policyBindingInstruction(),
         `Trusted caller policy:\n${json(policy)}`,
         `Validated Luna summaries:\n${json(request.summaries)}`,
         `Diff batch paths:\n${json(request.paths)}`,
@@ -83,6 +91,7 @@ function stagePrompt(request, { policy, repository, skillPath, skill }) {
         'Independently assign the impact level for the complete cluster. Do not defer to the finder-proposed level. Reject and split votes must use level suggestion because neither establishes a defect level.',
         levelInstructions(),
         'You do not know other candidates, validators, vote totals, or earlier transcripts. Your candidateFingerprint must exactly match the supplied cluster fingerprint.',
+        policyBindingInstruction(),
         `Trusted caller policy:\n${json(policy)}`,
         `Consolidated cluster with every member and complete provenance:\n${json(request.candidate)}`,
         `Related immutable diff:\n${request.relatedDiff}`,
@@ -94,6 +103,7 @@ function stagePrompt(request, { policy, repository, skillPath, skill }) {
         'For accept, independently return the final impact level; do not copy the finder-proposed level. Reject does not require a level.',
         levelInstructions(),
         'Do not invent a new finding or use any prior transcript. Your candidateFingerprint must exactly match the supplied fingerprint.',
+        policyBindingInstruction(),
         `Trusted caller policy:\n${json(policy)}`,
         `Candidate:\n${json(request.candidate)}`,
         `Three structured vote rounds:\n${json(request.voteRounds)}`,
