@@ -564,6 +564,33 @@ test('caps stdout and stderr by bytes and terminates overflowing children', asyn
   }
 });
 
+test('the default stdout backstop does not fire on a reasoning model\'s normal verbosity', async () => {
+  // Regression pin for the outage where every open PR came back infrastructure_failure.
+  // The default used to be 1_000_000, which predates the CLI emitting one
+  // system/thinking_tokens event per thinking token: a measured SUCCESSFUL summary run on
+  // a 12KB shard produced 365KB across 1798 lines, and larger shards cleared 1MB. Bytes
+  // are the wrong dimension for "runaway" - timeoutMs owns that - so the default must sit
+  // far above anything verbosity can reach. Streaming 8MB here would have tripped the old
+  // default eight times over.
+  const thinking = `${JSON.stringify({ type: 'system', subtype: 'thinking_tokens' })}\n`.repeat(40_000);
+  assert.ok(Buffer.byteLength(thinking) > 1_000_000, 'fixture must exceed the retired 1MB default');
+  const result = await runFreshClaude(baseRun({
+    timeoutMs: 5_000,
+    killGraceMs: 1,
+    spawn: fakeSpawn({ stdout: thinking + resultEvent({ verdict: 'PASS' }) }),
+  }));
+  assert.equal(result.status, 'ok');
+});
+
+test('a caller can retune the stdout backstop without a new engine pin', async () => {
+  const result = await runFreshClaude(baseRun({
+    timeoutMs: 5_000, killGraceMs: 1, maxStdoutBytes: 8,
+    spawn: fakeSpawn({ stdout: resultEvent({ verdict: 'PASS' }) }),
+  }));
+  assert.equal(result.status, 'infra_error');
+  assert.match(result.error, /stdout limit exceeded \(8 bytes\)/);
+});
+
 test('keeps result text private by default and exposes only an opted-in bounded redacted error excerpt', async () => {
   const secret = 'provider-secret-value';
   const baseUrl = 'https://private-provider.example/tenant';

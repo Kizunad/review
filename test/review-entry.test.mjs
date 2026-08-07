@@ -267,11 +267,16 @@ test('shards diffs above the finder budget and bounds absolute input before spaw
   });
   assert.equal(oversized.review.decision, 'infrastructure_failure');
   assert.deepEqual(oversized.review.findings, []);
-  assert.match(oversized.review.failures[0].error, new RegExp(`absolute ${ABSOLUTE_DIFF_BYTES} byte safety limit`));
+  assert.match(oversized.review.failures[0].error, new RegExp(`exceeds the ${ABSOLUTE_DIFF_BYTES} byte review ceiling`));
 });
 test('rejects multibyte diffs above the byte limit before spawning Claude', async () => {
   const { callerRoot } = await fixture();
-  const overLimitUnicode = '界'.repeat(349_526);
+  // Derived from the constant, not a number copied out of it. This was `'界'.repeat(349_526)`,
+  // sized by hand for a 1 MiB ceiling, so raising the ceiling silently turned the test's own
+  // premise false - it stopped exercising the multibyte path it exists to cover. The point is
+  // that a string SHORTER than the limit in characters can still exceed it in UTF-8 bytes, and
+  // that holds at any ceiling as long as the count is computed from it.
+  const overLimitUnicode = '界'.repeat(Math.ceil(ABSOLUTE_DIFF_BYTES / 3) + 1);
   assert.ok(overLimitUnicode.length < ABSOLUTE_DIFF_BYTES);
   assert.ok(Buffer.byteLength(overLimitUnicode) > ABSOLUTE_DIFF_BYTES);
 
@@ -289,7 +294,38 @@ test('rejects multibyte diffs above the byte limit before spawning Claude', asyn
   });
 
   assert.equal(result.review.decision, 'infrastructure_failure');
-  assert.match(result.review.failures[0].error, new RegExp(`absolute ${ABSOLUTE_DIFF_BYTES} byte safety limit`));
+  assert.match(result.review.failures[0].error, new RegExp(`exceeds the ${ABSOLUTE_DIFF_BYTES} byte review ceiling`));
+});
+
+test('honours an explicit maxDiffBytes ceiling instead of the built-in default', async () => {
+  const { callerRoot } = await fixture();
+  const ceiling = 4096;
+  // Comfortably under ABSOLUTE_DIFF_BYTES, so if the override were ignored this diff would sail
+  // through the size gate and the assertion below would fail - which is what makes this a test of
+  // the override rather than a second test of the default.
+  const diff = 'x'.repeat(ceiling + 1);
+  assert.ok(Buffer.byteLength(diff) < ABSOLUTE_DIFF_BYTES);
+
+  const result = await executeReview({
+    centralRoot: path.resolve('.'),
+    callerRoot,
+    repository: 'org/repo',
+    diff,
+    maxDiffBytes: ceiling,
+    policy,
+    policySha256,
+    executable: '/must-not-spawn/claude',
+    ripgrepExecutable: '/must-not-spawn/rg',
+    sandboxExecutable: '/must-not-spawn/bwrap',
+    environment: { PATH: process.env.PATH },
+  });
+
+  assert.equal(result.review.decision, 'infrastructure_failure');
+  assert.match(result.review.failures[0].error, new RegExp(`exceeds the ${ceiling} byte review ceiling`));
+  // The refusal must say it is a refusal. Both a size refusal and a genuine outage surface as
+  // decision=infrastructure_failure, and reading one as the other is what left PR #1315 classified
+  // as "engine never judged, retry later" when no retry could ever have helped.
+  assert.match(result.review.failures[0].error, /size refusal, not an engine failure/);
 });
 
 test('rejects a reported diff byte length below the supplied UTF-8 bytes before spawning Claude', async () => {
@@ -361,7 +397,7 @@ test('run-review emits a verifiable infrastructure artifact without reading an a
   const manifest = JSON.parse(await readFile(path.join(outputDirectory, 'manifest.json'), 'utf8'));
   const review = JSON.parse(reviewJson);
   assert.equal(review.decision, 'infrastructure_failure');
-  assert.match(review.failures[0].error, new RegExp(`absolute ${ABSOLUTE_DIFF_BYTES} byte safety limit`));
+  assert.match(review.failures[0].error, new RegExp(`exceeds the ${ABSOLUTE_DIFF_BYTES} byte review ceiling`));
   assert.equal(verifyManifest(manifest, context, {
     'review.json': reviewJson,
     'review.md': reviewMarkdown,

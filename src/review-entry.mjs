@@ -23,7 +23,29 @@ export {
 const LEVELS = new Set(['blocker', 'major', 'minor', 'suggestion']);
 export const MAX_REVIEW_JSON_BYTES = 1_048_576;
 export const MAX_REVIEW_MARKDOWN_BYTES = 65_536;
-export const ABSOLUTE_DIFF_BYTES = 1_048_576;
+// Runaway guard, NOT a size policy. It was 1_048_576 from the first commit, and at that value it
+// is a silent wall: PR #1315 was refused at 1,053,959 bytes - over by 0.5% - and got no review at
+// all, for weeks, while the refusal was reported as `infrastructure_failure` and therefore read
+// as "the engine is down" rather than "this PR is too big".
+//
+// What this actually bounds is the number of model calls, which scales linearly with diff size:
+// at max_shard_chars=12000 and max_diff_chars=40000 over 8 taxonomy dimensions, a 1 MiB diff is
+// ~88 summary calls plus 27 batches x 8 finders = ~304 calls. That is the one real cost, and it
+// is the only thing bounding spend per review - unlike the stdout backstop next door, this cannot
+// simply be deleted, because a PR that accidentally vendors a generated file would launch
+// thousands of calls with nothing to stop it.
+//
+// So the default is placed where code and resources actually separate in this repository, rather
+// than at a round number. Measured on Bong at d9b9db3d9:
+//   largest genuine all-code PR diff   1,053,959 bytes  (#1315; then #1336 782KB, #1314 638KB)
+//   smallest single resource blob      5,410,234 bytes  (a texture; generated blocks.json is
+//                                                        6.2MB, an NBT preview page 8.9MB)
+// There is a clean gap between those two populations. 4 MiB sits inside it: four times the
+// largest all-code diff ever seen here, yet smaller than any ONE resource file - so a diff that
+// exceeds it necessarily carries a generated or binary asset and cannot be all reviewable code.
+// That makes the refusal mean something ("you vendored something") instead of being an arbitrary
+// ceiling that a merely-large refactor can trip.
+export const ABSOLUTE_DIFF_BYTES = 4 * 1024 * 1024;
 
 function markdownCodeSpan(value) {
   const text = String(value);
@@ -435,6 +457,11 @@ export async function executeReview({
   maxDiffChars = 40_000,
   maxShardChars = 12_000,
   workerTimeoutMs = 120_000,
+  // Optional. Undefined means "use the engine default" rather than "use zero", so a
+  // caller that never sets it keeps runFreshClaude's backstop untouched.
+  maxStdoutBytes,
+  // Optional, same convention as maxStdoutBytes: undefined means "use ABSOLUTE_DIFF_BYTES".
+  maxDiffBytes,
   shadow = false,
   stateDir,
   stateSalt = '',
@@ -453,8 +480,17 @@ export async function executeReview({
     if (!Number.isSafeInteger(diffBytes) || diffBytes < measuredDiffBytes) {
       throw new Error('diffByteLength must be a safe integer no smaller than the supplied diff bytes');
     }
-    if (diffBytes > ABSOLUTE_DIFF_BYTES) {
-      throw new Error(`diff exceeds absolute ${ABSOLUTE_DIFF_BYTES} byte safety limit`);
+    const diffByteCeiling = maxDiffBytes === undefined || maxDiffBytes === ''
+      ? ABSOLUTE_DIFF_BYTES
+      : positiveInteger(maxDiffBytes, 'maxDiffBytes', ABSOLUTE_DIFF_BYTES);
+    if (diffBytes > diffByteCeiling) {
+      // Named so the caller can tell a refusal from an outage. Both surface as
+      // decision=infrastructure_failure, and reading one as the other cost several rounds of
+      // treating a permanently-unreviewable PR as a transient engine problem to retry.
+      throw new Error(
+        `diff of ${diffBytes} bytes exceeds the ${diffByteCeiling} byte review ceiling `
+        + '(this is a size refusal, not an engine failure; raise max_diff_bytes to review it)',
+      );
     }
     if (finderLimit < shardLimit) throw new Error('maxDiffChars must be at least maxShardChars');
     snapshot = await createSanitizedCallerSnapshot(callerRoot);
@@ -468,6 +504,9 @@ export async function executeReview({
       ripgrepExecutable,
       sandboxExecutable,
       timeoutMs: positiveInteger(workerTimeoutMs, 'workerTimeoutMs', 120_000),
+      ...(maxStdoutBytes === undefined || maxStdoutBytes === ''
+        ? {}
+        : { maxStdoutBytes: positiveInteger(maxStdoutBytes, 'maxStdoutBytes', undefined) }),
       stateDir,
       stateSalt,
     });

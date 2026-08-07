@@ -323,7 +323,25 @@ export async function runFreshClaude({
   environment,
   timeoutMs = 120_000,
   killGraceMs = 2_000,
-  maxStdoutBytes = 1_000_000,
+  // Backstop against a pathologically infinite stream, NOT a verbosity budget. This was
+  // 1_000_000 from the first commit, chosen when stdout was expected to be a handful of
+  // stream-json events. It is not: with a reasoning model the CLI emits one
+  // system/thinking_tokens event PER THINKING TOKEN, so stdout scales with reasoning
+  // length rather than answer length. A measured, fully SUCCESSFUL (exit 0) summary run
+  // on a 12KB shard produced 365,381 bytes across 1798 lines - 1793 of them thinking
+  // tokens, 2 assistant messages, 1 result. Bigger shards cleared 1MB, and because a
+  // stage that trips this returns infra_error, one benign condition turned every open PR
+  // into decision=infrastructure_failure at once.
+  //
+  // Nothing here justified a tight cap in the first place: this runs on ubuntu-latest,
+  // the same runner class where the caller's own e2e job runs cargo test for 45 minutes,
+  // so a few MB of buffer is noise; the job is an ephemeral isolated VM and the child is
+  // additionally confined by bwrap, so containment does not depend on this number; and a
+  // looping model is already handled by timeoutMs, which is the correct dimension. Bytes
+  // are a bad proxy for "runaway" - the 365KB run above was a success.
+  maxStdoutBytes = 256 * 1024 * 1024,
+  // Left tight on purpose: stderr carries unstructured text nobody parses, so there is
+  // no legitimate reason for it to grow.
   maxStderrBytes = 64_000,
   includeSuccessDiagnostic = false,
   includeErrorResultDiagnostic = false,
