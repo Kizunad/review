@@ -45,6 +45,7 @@ const { review, markdown } = await executeReview({
   maxShardChars: process.env.MAX_SHARD_CHARS,
   workerTimeoutMs: process.env.WORKER_TIMEOUT_MS,
   maxStdoutBytes: process.env.MAX_STDOUT_BYTES || undefined,
+  maxDiffBytes: process.env.MAX_DIFF_BYTES || undefined,
   shadow: process.env.SHADOW === 'true',
   stateDir: process.env.REVIEW_STATE_DIR || undefined,
   stateSalt: process.env.REVIEW_STATE_SALT || '',

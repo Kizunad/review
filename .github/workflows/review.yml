@@ -40,6 +40,11 @@ on:
         required: false
         default: 268435456
         type: number
+      max_diff_bytes:
+        description: Runaway guard on total diff size in bytes
+        required: false
+        default: 67108864
+        type: number
       circuit_manual_retry:
         description: Allow a trusted workflow_dispatch retry to bypass an open infrastructure circuit
         required: false
@@ -279,6 +284,14 @@ jobs:
           # guard against a stuck process - bytes are a bad proxy for "runaway". Kept out of the
           # workflow_call block above because consumers assert that section byte-for-byte.
           MAX_STDOUT_BYTES: ${{ inputs.max_stdout_bytes }}
+          # Runaway guard on total spend, not a size policy. Model calls scale linearly with diff
+          # size (~304 calls for a 1 MiB diff at the default shard/finder limits over 8
+          # dimensions), and this is the only thing bounding that, so unlike MAX_STDOUT_BYTES it
+          # cannot just be removed - a PR that accidentally vendors a generated file would launch
+          # thousands. The old 1 MiB default was a silent wall instead: it refused PR #1315 for
+          # being 0.5% over and reported it as infrastructure_failure, which reads as an outage.
+          # Also kept out of the workflow_call block above, which consumers assert byte-for-byte.
+          MAX_DIFF_BYTES: ${{ inputs.max_diff_bytes }}
           SHADOW: ${{ inputs.shadow }}
           REVIEW_STATE_DIR: ${{ github.workspace }}/_state
           REVIEW_STATE_SALT: ${{ needs.preflight.outputs.workflow_ref }}
