@@ -171,6 +171,9 @@ export function createClaudeRunner({
   ripgrepExecutable = process.env.RIPGREP_EXECUTABLE,
   sandboxExecutable = process.env.BWRAP_EXECUTABLE ?? 'bwrap',
   timeoutMs = 120_000,
+  // Threaded through so a caller can raise the runaway backstop without a new engine
+  // pin; undefined keeps runFreshClaude's own default.
+  maxStdoutBytes,
   stageAttempts = STAGE_ATTEMPTS,
   stageBackoffMs = STAGE_BACKOFF_MS,
   // Injectable for retry-orchestration tests only: the sandbox gives a stage
@@ -249,6 +252,7 @@ export function createClaudeRunner({
           cwd: callerRoot,
           environment,
           timeoutMs,
+          ...(maxStdoutBytes === undefined ? {} : { maxStdoutBytes }),
           // Structural only. Without this a stage failure reports nothing but
           // subtype/isError, which is why every historical infrastructure_failure was
           // undiagnosable. The free-text excerpt stays off here - see streamDiagnostic.

@@ -435,6 +435,9 @@ export async function executeReview({
   maxDiffChars = 40_000,
   maxShardChars = 12_000,
   workerTimeoutMs = 120_000,
+  // Optional. Undefined means "use the engine default" rather than "use zero", so a
+  // caller that never sets it keeps runFreshClaude's backstop untouched.
+  maxStdoutBytes,
   shadow = false,
   stateDir,
   stateSalt = '',
@@ -468,6 +471,9 @@ export async function executeReview({
       ripgrepExecutable,
       sandboxExecutable,
       timeoutMs: positiveInteger(workerTimeoutMs, 'workerTimeoutMs', 120_000),
+      ...(maxStdoutBytes === undefined || maxStdoutBytes === ''
+        ? {}
+        : { maxStdoutBytes: positiveInteger(maxStdoutBytes, 'maxStdoutBytes', undefined) }),
       stateDir,
       stateSalt,
     });
