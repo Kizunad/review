@@ -36,10 +36,6 @@ on:
         default: 120000
         type: number
       max_stdout_bytes:
-        # Runaway backstop, not a verbosity budget - a reasoning model emits one
-        # stream-json event per thinking token, so normal successful runs are large.
-        # worker_timeout_ms is the real guard against a stuck process. Exposed here so
-        # it can be retuned without cutting a new engine pin.
         description: Per-Claude-process stdout backstop in bytes
         required: false
         default: 268435456
@@ -277,6 +273,11 @@ jobs:
           MAX_DIFF_CHARS: ${{ inputs.max_diff_chars }}
           MAX_SHARD_CHARS: ${{ inputs.max_shard_chars }}
           WORKER_TIMEOUT_MS: ${{ inputs.worker_timeout_ms }}
+          # Runaway backstop, not a verbosity budget: a reasoning model emits one stream-json
+          # event per thinking token, so a normal SUCCESSFUL run is already large (a measured
+          # 12KB summary shard produced 365KB across 1798 lines). worker_timeout_ms is the real
+          # guard against a stuck process - bytes are a bad proxy for "runaway". Kept out of the
+          # workflow_call block above because consumers assert that section byte-for-byte.
           MAX_STDOUT_BYTES: ${{ inputs.max_stdout_bytes }}
           SHADOW: ${{ inputs.shadow }}
           REVIEW_STATE_DIR: ${{ github.workspace }}/_state
