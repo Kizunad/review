@@ -43,7 +43,7 @@ on:
       max_diff_bytes:
         description: Runaway guard on total diff size in bytes
         required: false
-        default: 67108864
+        default: 4194304
         type: number
       circuit_manual_retry:
         description: Allow a trusted workflow_dispatch retry to bypass an open infrastructure circuit
