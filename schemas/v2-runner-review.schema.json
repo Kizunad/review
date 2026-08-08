@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "v2-runner-review.schema.json",
+  "description": "v2 runner 编排原型的 review.json 契约。decision 枚举、判定不变式与 headOid 语义与 v1(final-review.schema.json + review.yml finalize 校验)逐字兼容;v2 新增实测证据对象、degradations[] 与 resumedFrom。校验实现在 harness/validate-review.mjs。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "decision", "headOid", "findings", "failures", "degradations", "resumedFrom"],
+  "properties": {
+    "version": { "type": "string", "const": "v2r1" },
+    "decision": { "type": "string", "enum": ["approve", "request_changes", "infrastructure_failure"] },
+    "headOid": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "findings": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["taxonomy", "path", "line", "title", "evidence", "rootCause", "level", "fingerprint"],
+        "properties": {
+          "taxonomy": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+          "path": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]{1,500}$" },
+          "line": { "type": "integer", "minimum": 1 },
+          "title": { "type": "string", "minLength": 1, "maxLength": 180 },
+          "evidence": {
+            "description": "与 v1 的自由文本不同:v2 finding 的证据是实测记录,assignmentId 必须指向一份已按 v2-evidence 契约落盘的证据。",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["mode", "commands", "artifacts", "exitCodes", "assignmentId"],
+            "properties": {
+              "mode": { "type": "string", "enum": ["static", "test", "probe", "adversarial"] },
+              "commands": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+              "artifacts": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]{1,500}$" } },
+              "exitCodes": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "integer", "minimum": 0, "maximum": 255 } },
+              "assignmentId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" }
+            }
+          },
+          "rootCause": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "level": { "type": "string", "enum": ["blocker", "major", "minor"] },
+          "fingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        }
+      }
+    },
+    "failures": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["stage", "status", "error"],
+        "properties": {
+          "stage": { "type": "string", "minLength": 1, "maxLength": 300 },
+          "status": { "type": "string", "enum": ["infra_error", "schema_error"] },
+          "error": { "type": "string", "minLength": 1, "maxLength": 4000 },
+          "diagnostic": { "type": "string", "minLength": 1, "maxLength": 4000 }
+        }
+      }
+    },
+    "degradations": {
+      "description": "降级梯子(§5.7)是 P2;P1 只保留字段。每次降级记 {何时, 从何级, 到何级, 为何}。",
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["at", "from", "to", "reason"],
+        "properties": {
+          "at": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "from": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "to": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 400 }
+        }
+      }
+    },
+    "resumedFrom": {
+      "description": "断点续审时的前次 run id;全新一轮为 null。",
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$" }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "decision": { "const": "infrastructure_failure" } },
+        "required": ["decision"]
+      },
+      "then": {
+        "properties": {
+          "findings": { "maxItems": 0 },
+          "failures": { "minItems": 1 }
+        }
+      },
+      "else": {
+        "properties": {
+          "failures": { "maxItems": 0 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "decision": { "const": "approve" } },
+        "required": ["decision"]
+      },
+      "then": {
+        "properties": {
+          "findings": {
+            "items": {
+              "properties": {
+                "level": { "const": "minor" }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "if": {
+          "properties": { "decision": { "const": "request_changes" } },
+          "required": ["decision"]
+        },
+        "then": {
+          "properties": {
+            "findings": { "minItems": 1 }
+          }
+        }
+      }
+    }
+  ]
+}
