@@ -10,6 +10,13 @@ import { decideRound, isCountableVote } from './vote-gate.mjs';
 import { groupShards, shardDiff } from './diff-sharder.mjs';
 
 const MAX_FINDER_CONCURRENCY = 2;
+// Summary calls all land on the cheap pool behind the relay. Firing every
+// assignment at once (a 1 MiB diff is ~88 assignments) overloads that pool:
+// per-request time-to-first-byte then exceeds the Cloudflare tunnel's ~100s
+// origin timeout, so the relay returns 524 before any streamed byte arrives.
+// The finder stage is already bounded this way for the same reason, and a
+// bounded lane serializes assignments in deterministic order.
+const MAX_SUMMARY_CONCURRENCY = 2;
 const MAX_FAILURE_SAMPLES = 4;
 const MAX_FAILURE_TEXT = 4_000;
 const FAILURE_STATUSES = ['infra_error', 'schema_error'];
@@ -252,12 +259,16 @@ export async function runReview({
   if (!stageOk(plan)) return { findings: [], failures: [stageFailure('plan', plan)] };
 
   const assignments = normalizeAssignments(plan.data, shards, maxShardChars);
-  const summaryResults = await Promise.all(assignments.map(async (assignment) => {
-    const summary = await runner.run({
-      stage: 'summary', model: LITE_MODEL, assignment, diff: assignmentDiff(assignment, shards),
-    });
-    return { assignment, summary };
-  }));
+  const summaryResults = await mapBounded(
+    assignments,
+    MAX_SUMMARY_CONCURRENCY,
+    async (assignment) => {
+      const summary = await runner.run({
+        stage: 'summary', model: LITE_MODEL, assignment, diff: assignmentDiff(assignment, shards),
+      });
+      return { assignment, summary };
+    },
+  );
   const summaries = [];
   for (const { assignment, summary } of summaryResults) {
     if (!stageOk(summary)) {

@@ -341,6 +341,58 @@ test('bounds Terra finder concurrency at two without dropping queued taxonomy wo
   assert.match(result.failures[0].error, /batch-0: provider unavailable/);
 });
 
+test('bounds Luna summary concurrency at two without dropping queued assignments', async () => {
+  const shardCount = 8;
+  // One diff section per shard, each comfortably under maxShardChars so the
+  // plan's one-assignment-per-shard layout survives normalization untouched.
+  // Trailing newline per section is required: shardDiff splits on ^diff --git
+  // at line starts, so sections joined without one collapse into a single shard.
+  const diff = Array.from(
+    { length: shardCount },
+    (_, index) => `diff --git a/f${index} b/f${index}\n${'x'.repeat(10)}\n`,
+  ).join('');
+  const started = [];
+  const releases = [];
+  let active = 0;
+  let peak = 0;
+  const review = runReview({
+    diff, taxonomy: ['security'], maxShardChars: 40,
+    runner: runnerFor(async (request) => {
+      if (request.stage === 'plan') {
+        return plan(shardCount > 0
+          ? Array.from({ length: shardCount }, (_, index) => ({ id: `s-${index}`, shardIndexes: [index] }))
+          : []);
+      }
+      if (request.stage === 'summary') {
+        started.push(request.assignment.id);
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => releases.push(resolve));
+        active -= 1;
+        return { status: 'ok', data: { summary: request.assignment.id, files: [] } };
+      }
+      if (request.stage === 'find') return { status: 'ok', data: [] };
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+
+  for (let released = 0; released < shardCount; released += 2) {
+    const expectedStarted = Math.min(released + 2, shardCount);
+    await waitFor(
+      () => started.length === expectedStarted,
+      `expected ${expectedStarted} queued summaries to start`,
+    );
+    assert.ok(active <= 2);
+    releases.splice(0).forEach((resolve) => resolve());
+  }
+
+  const result = await review;
+  assert.equal(peak, 2);
+  assert.deepEqual(started, Array.from({ length: shardCount }, (_, index) => `s-${index}`));
+  assert.deepEqual(result.findings, []);
+  assert.deepEqual(result.failures, []);
+});
+
 test('preserves taxonomy and batch order when bounded finder lanes finish out of order', async () => {
   const dimensions = ['slow', 'fast', 'queued'];
   const diff = `diff --git a/large.js b/large.js\n${'x'.repeat(41)}`;
