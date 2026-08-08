@@ -1,0 +1,127 @@
+# review engine v2 - P1 prototype: runner orchestration harness (design 5.5 + 5.7).
+#
+# Boots a tmux session on the runner: a trunk pane (headless claude) that
+# orchestrates and judges, two pi worker panes (cheap-pool models) that write
+# and run tests, plus a checkpoint watchdog. A deterministic bash wrapper
+# validates the trunk's review.json and converts trunk death/timeout into
+# decision=infrastructure_failure.
+#
+# P1 runs in TEST MODE: only script/knowledge files are dispatched (kind=testable),
+# nothing is built. The engine never builds binaries for P1.
+#
+# Smoke trials run via workflow_dispatch on this branch (gh workflow run
+# review-v2-p1.yml --ref <branch> -f repository=... -f pull_number=... -f head_oid=...).
+name: review-v2-p1
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        required: true
+        type: string
+      pull_number:
+        required: true
+        type: string
+      head_oid:
+        required: true
+        type: string
+      engine_ref:
+        required: false
+        type: string
+        default: ''
+      trunk_model:
+        required: false
+        type: string
+        default: ''
+    secrets:
+      AXONHUB_BASE_URL:
+        required: true
+      PI_AXONHUB_API_KEY:
+        required: true
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'owner/repo to review (defaults to this repo)'
+        required: false
+        default: 'Kizunad/review'
+        type: string
+      pull_number:
+        description: 'PR number to review'
+        required: true
+        type: string
+      head_oid:
+        description: 'PR head commit sha'
+        required: true
+        type: string
+      trunk_model:
+        description: 'model id the relay serves for the trunk (empty = relay default)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      HARNESS_DIR: ${{ github.workspace }}/_rv2
+      RV2_ROOT: ${{ github.workspace }}/_rv2
+      RV2_REPOSITORY: ${{ inputs.repository }}
+      PR_NUMBER: ${{ inputs.pull_number }}
+      HEAD_OID: ${{ inputs.head_oid }}
+      # Engine pin for the resume key (design 5.7c): the commit this workflow
+      # ran at. A different engine commit invalidates prior checkpoints.
+      ENGINE_PIN: ${{ github.sha }}
+      RUN_ID: ${{ github.run_id }}
+      RV2_WORKFLOW_FILE: review-v2-p1.yml
+      AXONHUB_BASE_URL: ${{ secrets.AXONHUB_BASE_URL }}
+      PI_AXONHUB_API_KEY: ${{ secrets.PI_AXONHUB_API_KEY }}
+      # Trunk: claude -p honors ANTHROPIC_BASE_URL (probed 2026-08-08) and
+      # carries the relay key as a Bearer token.
+      ANTHROPIC_BASE_URL: ${{ secrets.AXONHUB_BASE_URL }}
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.PI_AXONHUB_API_KEY }}
+      ANTHROPIC_MODEL: ${{ inputs.trunk_model }}
+    steps:
+      - name: Checkout engine
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.engine_ref || github.sha }}
+
+      - name: Set up Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+
+      - name: Install hash-pinned Claude Code
+        uses: ./.github/actions/setup-claude
+
+      - name: Install runner harness (tmux + jq + pi + axonhub plugin)
+        run: v2/install-runner.sh
+
+      - name: Prepare repo under review
+        run: v2/prepare-repo.sh
+
+      - name: Build PR diff
+        run: v2/build-diff.sh
+
+      - name: Restore prior checkpoint (resume)
+        run: v2/restore-checkpoint.sh
+
+      - name: Boot harness session (trunk + workers + watchdog)
+        run: v2/boot-session.sh
+
+      - name: Wait for review.json
+        run: v2/wait-review.sh
+        if: always()
+
+      - name: Wrapper validate / synthesize
+        run: v2/wrapper.sh
+        if: always()
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rv2-p1
+          path: ${{ env.HARNESS_DIR }}
+          if-no-files-found: warn
