@@ -15,7 +15,7 @@ const schemasDirectory = path.resolve('schemas');
 
 test('all review schemas are strict JSON Schema containers', async () => {
   const files = (await readdir(schemasDirectory)).sort();
-  assert.equal(files.length, 10);
+  assert.equal(files.length, 12);
   for (const file of files) {
     const schema = JSON.parse(await readFile(path.join(schemasDirectory, file), 'utf8'));
     assert.equal(schema.$schema, 'https://json-schema.org/draft/2020-12/schema');
