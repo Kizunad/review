@@ -28,11 +28,30 @@ tmux kill-session -t "$SESSION" 2>/dev/null || true
 tmux new-session -d -s "$SESSION" -x 220 -y 55
 tmux set-option -t "$SESSION" history-limit 5000
 
+# The session starts with exactly one window; the worker windows must be
+# created explicitly (send-keys to a nonexistent window aborts the boot).
+# Indexes are forced so a user tmux.conf with base-index != 0 cannot shift
+# the trunk/worker layout the rest of the harness addresses by number.
+first_window="$(tmux list-windows -t "$SESSION" -F '#{window_index}' | head -1)"
+if [ "$first_window" != "$TRUNK_INDEX" ]; then
+  tmux move-window -s "$SESSION:$first_window" -t "$SESSION:$TRUNK_INDEX"
+fi
+for i in $WORKERS; do
+  tmux new-window -d -t "$SESSION:$i"
+done
+
 # Trunk pane: headless claude runs the whole loop to completion. The prompt is
 # a one-liner that points at trunk-prompt.md - the file holds the protocol and
-# keeps the pane input short.
-tmux send-keys -t "$SESSION:$TRUNK_INDEX" \
-  "cd '$ROOT' && '$CLAUDE_BIN' -p \"Read $V2_DIR_ABS/trunk-prompt.md and execute it to completion. Do not stop until review.json is written or you physically cannot continue.\"" Enter
+# keeps the pane input short. RV2_FAKE=1 swaps in the deterministic stub trunk
+# (fake/trunk.sh) so the local smoke exercises the SAME pane lifecycle,
+# dispatch plumbing, and wrapper contract without touching any LLM.
+if [ "${RV2_FAKE:-0}" = "1" ]; then
+  tmux send-keys -t "$SESSION:$TRUNK_INDEX" \
+    "cd '$ROOT' && bash '$V2_DIR_ABS/../fake/trunk.sh'" Enter
+else
+  tmux send-keys -t "$SESSION:$TRUNK_INDEX" \
+    "cd '$ROOT' && '$CLAUDE_BIN' -p \"Read $V2_DIR_ABS/trunk-prompt.md and execute it to completion. Do not stop until review.json is written or you physically cannot continue.\"" Enter
+fi
 
 # Worker panes: pi TUIs seeded to read their brief (or the fake worker for a
 # deterministic smoke). Seeding is best-effort - every dispatch directive tells

@@ -76,7 +76,9 @@ rv2_alive() {
   local pp
   pp=$(tmux list-panes -t "$(rv2_session):$1" -F '#{pane_pid}' 2>/dev/null | head -1)
   [ -n "$pp" ] || return 1
-  pgrep -P "$pp" -f 'claude|pi|node' >/dev/null 2>&1
+  # 'fake' covers the deterministic smoke stubs (fake/trunk.sh runs as bash,
+  # whose cmdline matches neither claude nor node).
+  pgrep -P "$pp" -f 'claude|pi|node|fake' >/dev/null 2>&1
 }
 
 # The detailed-transcript view (ctrl+o in claude) has no input box, so
