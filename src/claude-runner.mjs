@@ -113,12 +113,41 @@ function stagePrompt(request, { policy, repository, skillPath, skill }) {
   }
 }
 
+// Field-level failure description for stage outputs that used to be judged by
+// a bare boolean. The observed failure mode is field-name drift (a plan answer
+// arriving as { luna_summary_assignments: [...] }), and a repair retry can only
+// correct what it can name - so the error spells out the expected shape AND the
+// top-level fields that actually arrived.
+function describeShape(data) {
+  if (Array.isArray(data)) return 'a JSON array';
+  if (data && typeof data === 'object') {
+    const fields = Object.keys(data).sort();
+    return fields.length === 0 ? 'an object with no fields' : `an object with top-level fields: ${fields.join(', ')}`;
+  }
+  return `a ${data === null ? 'null' : typeof data} value`;
+}
+
+function requireShape(valid, stage, contract, data) {
+  if (!valid) throw new TypeError(`${stage} output must be ${contract}; got ${describeShape(data)}`);
+  return true;
+}
+
 function validateStage(stage, data, request) {
   switch (stage) {
     case 'plan':
-      return data?.version === 'v1' && Array.isArray(data.assignments) && data.assignments.length > 0;
+      return requireShape(
+        data?.version === 'v1' && Array.isArray(data.assignments) && data.assignments.length > 0,
+        stage,
+        'an object with version "v1" and a non-empty assignments array',
+        data,
+      );
     case 'summary':
-      return data?.version === 'v1' && typeof data.summary === 'string' && data.summary.length > 0 && Array.isArray(data.files);
+      return requireShape(
+        data?.version === 'v1' && typeof data.summary === 'string' && data.summary.length > 0 && Array.isArray(data.files),
+        stage,
+        'an object with version "v1", a non-empty summary string, and a files array',
+        data,
+      );
     case 'find':
       canonicalizeFinderCandidates(data, request.taxonomy);
       return true;
@@ -126,9 +155,19 @@ function validateStage(stage, data, request) {
       consolidateFindings(request.candidates, data);
       return true;
     case 'validate':
-      return isCountableVote(data, request.candidate.fingerprint);
+      return requireShape(
+        isCountableVote(data, request.candidate.fingerprint),
+        stage,
+        'a countable v2 vote for the supplied cluster fingerprint, with exactly the fields version, candidateFingerprint, verdict, reachable, level, evidence, reason (confirm requires reachable=true; reject and split require reachable=false and level "suggestion")',
+        data,
+      );
     case 'adjudicate':
-      return validAdjudication(data, request.candidate.fingerprint);
+      return requireShape(
+        validAdjudication(data, request.candidate.fingerprint),
+        stage,
+        'a v2 adjudication for the supplied fingerprint, with exactly the fields version, candidateFingerprint, decision, reason, plus a valid level exactly when the decision is accept',
+        data,
+      );
     default:
       return false;
   }
@@ -151,14 +190,45 @@ function repairConsolidationPrompt(prompt, members) {
   ].join('\n\n');
 }
 
+// Bound on the previous-output excerpt echoed into a schema repair prompt. The
+// drifted outputs that motivate the repair are small (a misnamed field, a
+// missing property); a pathologically huge output must not double the retry
+// cost, so anything beyond the bound is cut with an explicit marker.
+const SCHEMA_FEEDBACK_OUTPUT_LIMIT = 32_000;
+
+function boundedFeedbackJson(value) {
+  const text = JSON.stringify(value) ?? String(value);
+  const symbols = [...text];
+  if (symbols.length <= SCHEMA_FEEDBACK_OUTPUT_LIMIT) return text;
+  return `${symbols.slice(0, SCHEMA_FEEDBACK_OUTPUT_LIMIT).join('')}… [truncated]`;
+}
+
+// Schema repair for every stage: the model answered, but the answer failed the
+// engine-side contract (observed drift: finder candidates missing required
+// fields, plan answers renaming assignments to luna_summary_assignments). The
+// next attempt gets the exact validation error plus the failing output, both
+// APPENDED to the unchanged base prompt so the upstream prefix cache still
+// covers the expensive part; the nonce keeps two identical consecutive
+// failures from replaying a cached identical answer.
+function schemaFeedbackPrompt(prompt, error, rawOutput) {
+  return [
+    prompt,
+    `Repair attempt nonce: ${randomUUID()}.`,
+    `Your previous output failed schema validation: ${error}`,
+    ...(rawOutput === undefined ? [] : [`Your previous output was:\n${boundedFeedbackJson(rawOutput)}`]),
+    'Return ONLY the corrected JSON value that strictly matches the required schema. Do not repeat the invalid shape.',
+  ].join('\n\n');
+}
+
 // Transport-level stage retry. The relay's upstream fails in short bursts
 // (observed: twelve 524s in 42 seconds with healthy traffic on both sides), and
 // the CLI treats 524 as terminal, so a single burst used to kill a whole stage
-// and with it the entire run. Schema errors normally mean the model answered;
-// a consolidate unknown-member error is the narrow repair exception, with a
-// nonce and locally validated fingerprint feedback appended to its next prompt.
+// and with it the entire run. Schema errors mean the model answered but broke
+// the contract; they get their own bounded repair budget - immediate, no
+// backoff - with validation feedback appended to the next prompt. A consolidate
+// unknown-member error keeps its specialized fingerprint repair prompt.
 const STAGE_ATTEMPTS = 3;
-const CONSOLIDATE_SCHEMA_RETRIES = 2;
+const SCHEMA_RETRIES = 2;
 const STAGE_BACKOFF_MS = [20_000, 40_000];
 
 export function createClaudeRunner({
@@ -238,7 +308,7 @@ export function createClaudeRunner({
       let result;
       let attempts = 0;
       let infraAttempts = 0;
-      let consolidateSchemaRetries = 0;
+      let schemaRetries = 0;
       let prompt = basePrompt;
       while (true) {
         attempts += 1;
@@ -259,14 +329,21 @@ export function createClaudeRunner({
           includeErrorResultStatus: true,
           validate: (data) => validateStage(request.stage, data, request),
         });
-        if (request.stage === 'consolidate' && result.status === 'schema_error') {
-          const unknownMembers = unknownConsolidationMembers(result.error);
-          if (unknownMembers.length === 0) return finish(result);
-          if (consolidateSchemaRetries >= CONSOLIDATE_SCHEMA_RETRIES) {
-            return { ...result, error: `after ${attempts} attempts: ${result.error}` };
+        if (result.status === 'schema_error') {
+          // rawOutput exists only to feed the repair prompt; it must never ride
+          // on a returned result (orchestrator failure records and verdict
+          // comments are built from these).
+          const { rawOutput, ...surfaced } = result;
+          if (schemaRetries >= SCHEMA_RETRIES) {
+            return { ...surfaced, error: `after ${attempts} attempts: ${result.error}` };
           }
-          consolidateSchemaRetries += 1;
-          prompt = repairConsolidationPrompt(prompt, unknownMembers);
+          schemaRetries += 1;
+          const unknownMembers = request.stage === 'consolidate'
+            ? unknownConsolidationMembers(result.error)
+            : [];
+          prompt = unknownMembers.length > 0
+            ? repairConsolidationPrompt(prompt, unknownMembers)
+            : schemaFeedbackPrompt(prompt, result.error, rawOutput);
           continue;
         }
         if (result.status !== 'infra_error') return finish(result);

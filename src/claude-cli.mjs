@@ -488,13 +488,23 @@ export async function runFreshClaude({
         });
         return;
       }
+      // Both schema_error branches carry the parsed model output back to the
+      // caller: the stage runner feeds it into a bounded repair retry ("your
+      // previous output failed validation because X - return corrected JSON"),
+      // which is only possible when the failing output survives the failure.
+      // rawOutput is runner-internal feedback material; the runner strips it
+      // from any result it returns after the repair budget is spent.
       try {
         if (!validate(data)) {
-          finish({ status: 'schema_error', error: 'structured output failed schema validation' });
+          finish({ status: 'schema_error', error: 'structured output failed schema validation', rawOutput: data });
           return;
         }
       } catch (error) {
-        finish({ status: 'schema_error', error: diagnostic(`schema validation failed: ${error.message}`, sourceEnvironment) });
+        finish({
+          status: 'schema_error',
+          error: diagnostic(`schema validation failed: ${error.message}`, sourceEnvironment),
+          rawOutput: data,
+        });
         return;
       }
       finish({

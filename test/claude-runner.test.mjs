@@ -289,33 +289,67 @@ test('consolidate unknown-member repair retries exhaust with fresh prompts and a
   assert.notEqual(firstNonces[0][1], secondNonces[1][1]);
 });
 
-test('consolidate only repairs strict unknown-member errors', async () => {
+test('consolidate reserves the fingerprint repair prompt for strict unknown-member errors', async () => {
   const { result, calls } = await runStubbedStage({
     stageRequest: consolidateRetryRequest(),
     responses: [{ status: 'schema_error', error: 'consolidation omitted member ' + fingerprint }],
   });
   assert.equal(result.status, 'schema_error');
-  assert.equal(result.error, 'consolidation omitted member ' + fingerprint);
-  assert.equal(calls.length, 1);
+  assert.equal(result.error, `after 3 attempts: consolidation omitted member ${fingerprint}`);
+  assert.equal(calls.length, 3, 'a non-unknown-member consolidate failure still gets the general schema repair');
+  assert.doesNotMatch(calls[1].prompt, /Previous attempt referenced unknown fingerprint/);
+  assert.match(calls[1].prompt, /Your previous output failed schema validation: consolidation omitted member/);
 });
 
-test('consolidate ignores malformed unknown-member fingerprints', async () => {
+test('consolidate never feeds malformed unknown-member fingerprints into the repair instruction', async () => {
   const { result, calls } = await runStubbedStage({
     stageRequest: consolidateRetryRequest(),
     responses: [{ status: 'schema_error', error: `consolidation contains unknown member ${'c'.repeat(65)}` }],
   });
   assert.equal(result.status, 'schema_error');
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 3);
+  assert.doesNotMatch(calls[1].prompt, /Previous attempt referenced unknown fingerprint/);
+  assert.doesNotMatch(calls[2].prompt, /Previous attempt referenced unknown fingerprint/);
 });
 
-test('validate schema_error remains a single-attempt failure', async () => {
+test('schema repair: two failing outputs then a valid one recovers with field-level feedback', async () => {
+  const driftedVote = { version: 'v2', vote_verdict: 'confirm' };
+  const firstError = 'schema validation failed: validate output must be a countable v2 vote for the supplied cluster fingerprint; got an object with top-level fields: version, vote_verdict';
+  const secondError = 'schema validation failed: validate output must be a countable v2 vote for the supplied cluster fingerprint; got an object with top-level fields: reachable, version, vote_verdict';
   const { result, calls } = await runStubbedVote({
-    responses: [{ status: 'schema_error', error: 'vote is not countable' }],
+    responses: [
+      { status: 'schema_error', error: firstError, rawOutput: driftedVote },
+      { status: 'schema_error', error: secondError, rawOutput: { ...driftedVote, reachable: true } },
+      { status: 'ok', data: { verdict: 'confirm' } },
+    ],
+  });
+  assert.equal(result.status, 'ok', `expected recovery on attempt 3, got ${result.status}: ${result.error}`);
+  assert.equal(calls.length, 3, 'exactly two schema repairs should have happened');
+  assert.ok(calls.every((call) => call.model === 'terra'), 'every attempt must reuse the requested model');
+  assert.doesNotMatch(calls[0].prompt, /Repair attempt nonce:/);
+  assert.ok(calls[1].prompt.startsWith(calls[0].prompt), 'feedback must append so the prompt prefix stays cache-hot');
+  assert.ok(calls[2].prompt.startsWith(calls[1].prompt));
+  assert.match(calls[1].prompt, /Your previous output failed schema validation: .*top-level fields: version, vote_verdict/);
+  assert.match(calls[1].prompt, /Your previous output was:\n\{"version":"v2","vote_verdict":"confirm"\}/);
+  assert.match(calls[1].prompt, /Return ONLY the corrected JSON value that strictly matches the required schema\./);
+  assert.match(calls[2].prompt, /top-level fields: reachable, version, vote_verdict/);
+  const nonces = [...calls[2].prompt.matchAll(/Repair attempt nonce: ([0-9a-f-]{36})\./g)];
+  assert.equal(nonces.length, 2);
+  assert.notEqual(nonces[0][1], nonces[1][1]);
+});
+
+test('schema repair: three failing outputs exhaust the budget and keep the last validation detail', async () => {
+  const driftedPlan = { version: 'v1', luna_summary_assignments: [] };
+  const detail = 'schema validation failed: plan output must be an object with version "v1" and a non-empty assignments array; got an object with top-level fields: luna_summary_assignments, version';
+  const { result, calls } = await runStubbedStage({
+    stageRequest: { stage: 'plan', model: 'sol', shardManifest: [{ shard: 'shard-0', paths: ['src/a.mjs'] }] },
+    responses: [{ status: 'schema_error', error: detail, rawOutput: driftedPlan }],
   });
   assert.equal(result.status, 'schema_error');
-  assert.equal(result.error, 'vote is not countable');
-  assert.equal(calls.length, 1, 'schema-error repairs are exclusive to consolidate unknown-member failures');
-  assert.doesNotMatch(calls[0].prompt, /Repair attempt nonce:/);
+  assert.equal(result.error, `after 3 attempts: ${detail}`, 'the audit trail must keep the field-level detail');
+  assert.equal(calls.length, 3, 'the schema repair budget is a hard stop');
+  assert.equal('rawOutput' in result, false, 'raw model output must never ride on a returned result');
+  assert.match(calls[2].prompt, /luna_summary_assignments/);
 });
 test('transport retry: an infra_error stage is retried and can succeed on a later attempt', async () => {
   const { result, calls } = await runStubbedVote({
@@ -339,13 +373,18 @@ test('transport retry: gives up after the attempt budget and annotates the survi
   assert.equal(calls.length, 3, 'the attempt budget is a hard stop');
 });
 
-test('transport retry: non-consolidate schema_error is not retried', async () => {
+test('transport retry: schema repairs and infra retries spend separate budgets', async () => {
   const { result, calls } = await runStubbedVote({
-    responses: [{ status: 'schema_error', error: 'vote is not countable' }],
+    responses: [
+      { status: 'schema_error', error: 'vote is not countable', rawOutput: { verdict: 'confirm' } },
+      { status: 'infra_error', error: 'claude exited 1' },
+      { status: 'ok', data: { verdict: 'confirm' } },
+    ],
   });
-  assert.equal(result.status, 'schema_error');
-  assert.equal(result.error, 'vote is not countable', 'a non-retried failure must stay unannotated');
-  assert.equal(calls.length, 1, 'schema_error must not consume retry attempts');
+  assert.equal(result.status, 'ok', `expected recovery on attempt 3, got ${result.status}: ${result.error}`);
+  assert.equal(calls.length, 3, 'one schema repair plus one infra retry');
+  assert.match(calls[1].prompt, /Your previous output failed schema validation: vote is not countable/);
+  assert.equal(calls[2].prompt, calls[1].prompt, 'an infra retry must reuse the repaired prompt unchanged');
 });
 
 test('resume memo: a completed stage replays from the state dir without a model call', async () => {
@@ -402,6 +441,26 @@ test('resume memo: without a state dir nothing is written anywhere', async () =>
   });
   assert.equal(result.status, 'ok');
   assert.equal(calls.length, 1);
+});
+
+test('plan field drift surfaces a field-level error through the real transport', async () => {
+  const planRequest = { stage: 'plan', model: 'sol', shardManifest: [{ shard: 'shard-0', paths: ['src/a.mjs'] }] };
+  const valid = await runStage(planRequest, {
+    version: 'v1',
+    assignments: [{ shard: 'shard-0', paths: ['src/a.mjs'] }],
+  });
+  assert.equal(valid.status, 'ok', `a conforming plan must validate: ${valid.error}`);
+  const drifted = await runStage(planRequest, {
+    version: 'v1',
+    luna_summary_assignments: [{ shard: 'shard-0', paths: ['src/a.mjs'] }],
+  });
+  assert.equal(drifted.status, 'schema_error');
+  assert.equal(
+    drifted.error,
+    'after 3 attempts: schema validation failed: plan output must be an object with version "v1" and a non-empty assignments array; got an object with top-level fields: luna_summary_assignments, version',
+    'the audit trail must name the drifted field, not a generic sentence',
+  );
+  assert.equal('rawOutput' in drifted, false);
 });
 
 test('finder results arrive unwrapped whether the model returns the envelope or the raw array', async () => {
