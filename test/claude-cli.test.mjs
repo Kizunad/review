@@ -545,6 +545,29 @@ test('returns structured infra and schema errors rather than findings', async ()
   assert.equal((await runFreshClaude({ ...baseRun(), cwd: 'relative', spawn: fakeSpawn() })).status, 'infra_error');
 });
 
+test('schema_error carries the validation detail and the failing output for repair retries', async () => {
+  const drifted = { verdict: 'FAIL', extra_field: true };
+  const rejected = await runFreshClaude(baseRun({
+    timeoutMs: 10,
+    killGraceMs: 1,
+    spawn: fakeSpawn({ stdout: resultEvent(drifted) }),
+    validate: () => false,
+  }));
+  assert.equal(rejected.status, 'schema_error');
+  assert.equal(rejected.error, 'structured output failed schema validation');
+  assert.deepEqual(rejected.rawOutput, drifted, 'the boolean-reject branch must surface the failing output');
+
+  const thrown = await runFreshClaude(baseRun({
+    timeoutMs: 10,
+    killGraceMs: 1,
+    spawn: fakeSpawn({ stdout: resultEvent(drifted) }),
+    validate: () => { throw new TypeError('finding is missing title; got fields: extra_field, verdict'); },
+  }));
+  assert.equal(thrown.status, 'schema_error');
+  assert.equal(thrown.error, 'schema validation failed: finding is missing title; got fields: extra_field, verdict');
+  assert.deepEqual(thrown.rawOutput, drifted, 'the throwing branch must surface the failing output');
+});
+
 test('caps stdout and stderr by bytes and terminates overflowing children', async () => {
   for (const stream of ['stdout', 'stderr']) {
     let child;
