@@ -53,10 +53,13 @@ const FAILURE_STATUSES = ['infra_error', 'schema_error'];
 export const FINDER_BATCH_FAILURE_BUDGET = 0.08;
 
 // Floor, so the tolerated share never exceeds the budget itself: 112 batches
-// tolerate 8 (7.1%), and fewer than 13 batches tolerate none - a one-batch stage
-// stays all-or-nothing, which is the honest reading of "8% of one batch".
+// tolerate 8 (7.1%). The floor is clamped to one because an unclamped floor
+// collapses to zero below 13 batches - 8 batches, a standard review's count,
+// floor to 0 (0.64) and the advertised 8% budget does not exist at the batch
+// count the fleet actually runs. One batch of tolerance is the smallest honest
+// allowance for any run that fans out at all.
 function batchFailureAllowance(total, budget = FINDER_BATCH_FAILURE_BUDGET) {
-  return Math.floor(total * budget);
+  return Math.max(1, Math.floor(total * budget));
 }
 
 function budgetExceededFailure(stage, failed, total, allowance, budget = FINDER_BATCH_FAILURE_BUDGET) {

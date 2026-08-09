@@ -155,12 +155,15 @@ test('adjudicator requires v2 and a final level for accept', async () => {
 
 test('prompts lock clean v2, independent level voting, and no partial candidates', async () => {
   const source = await readFile(path.resolve('src/claude-runner.mjs'), 'utf8');
-  assert.match(source, /Every finding requires version v2/);
+  assert.match(source, /Every finding requires version v2, a repository-relative path, positive line, title, evidence, root cause, and a proposed level/);
   assert.match(source, /Never emit a partial candidate/);
+  assert.match(source, /Return the response as a JSON array of finding candidates/);
   assert.match(source, /return \[\] when no complete candidate qualifies/);
   assert.match(source, /Independently assign the impact level/);
   assert.match(source, /Do not defer to the finder-proposed level/);
   assert.match(source, /Every supplied fingerprint must appear exactly once/);
+  assert.match(source, /The response must be a JSON object with exactly two fields: version and a clusters array/);
+  assert.match(source, /version must be the string "v2"/);
   assert.match(source, /Use split only when two or more members describe independent defects/);
   assert.match(source, /Reject only when the cluster is structurally coherent/);
   assert.match(source, /used only after three complete existence-split rounds with no structural split votes/);
