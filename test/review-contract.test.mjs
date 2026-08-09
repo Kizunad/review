@@ -108,6 +108,57 @@ test('reports reason over the length bound by count', () => {
   assert.match(message, /has reason of 4001 characters/);
 });
 
+test('an oversized candidateFingerprint is clipped before encoding, never reaching the text in full', () => {
+  const huge = 'a'.repeat(5_000);
+  const message = describeCountableVoteFailure(countableVote({ candidateFingerprint: huge }), fingerprint);
+  assert.match(message, /malformed candidateFingerprint/);
+  assert.match(message, /\+4904 more chars/);
+  assert.ok(!message.includes('a'.repeat(97)), 'no contiguous run of the oversized value may survive into the prompt');
+  assert.ok(message.length < 500, 'the message stays bounded');
+});
+
+test('an oversized verdict is clipped before encoding, never reaching the text in full', () => {
+  const huge = 'maybe'.repeat(5_000);
+  const message = describeCountableVoteFailure(countableVote({ verdict: huge }), fingerprint);
+  assert.match(message, /has verdict /);
+  assert.match(message, /\+24904 more chars/);
+  assert.ok(!message.includes('maybe'.repeat(97)), 'no contiguous run of the oversized value may survive into the prompt');
+  assert.ok(message.length < 500);
+});
+
+test('an oversized reachable is clipped before encoding, never reaching the text in full', () => {
+  const huge = 'x'.repeat(5_000);
+  const message = describeCountableVoteFailure(countableVote({ reachable: huge }), fingerprint);
+  assert.match(message, /has non-boolean reachable/);
+  assert.match(message, /\+4904 more chars/);
+  assert.ok(!message.includes('x'.repeat(97)), 'no contiguous run of the oversized value may survive into the prompt');
+  assert.ok(message.length < 500);
+});
+
+test('an oversized level is clipped before encoding, never reaching the text in full', () => {
+  const huge = 'critical'.repeat(5_000);
+  const message = describeCountableVoteFailure(countableVote({ level: huge }), fingerprint);
+  assert.match(message, /has unknown level/);
+  assert.match(message, /\+39904 more chars/);
+  assert.ok(!message.includes('critical'.repeat(97)), 'no contiguous run of the oversized value may survive into the prompt');
+  assert.ok(message.length < 500);
+});
+
+test('an object or array value reduces to a bounded structural summary, not a serialization', () => {
+  const objectMessage = describeCountableVoteFailure(countableVote({ reachable: { a: 1, b: 2, c: 3 } }), fingerprint);
+  assert.match(objectMessage, /has non-boolean reachable object\{"a", "b", "c"\}/);
+  const arrayMessage = describeCountableVoteFailure(countableVote({ reachable: [1, 2, 3] }), fingerprint);
+  assert.match(arrayMessage, /has non-boolean reachable array\(3\)/);
+});
+
+test('an object with a huge key name stays a bounded structural summary', () => {
+  const hugeKey = 'k'.repeat(10_000);
+  const message = describeCountableVoteFailure(countableVote({ reachable: { [hugeKey]: true } }), fingerprint);
+  assert.match(message, /object\{"k{64}"\}/, 'the key name is clipped to the field-name cap');
+  assert.ok(!message.includes(hugeKey), 'the huge key name must never be echoed');
+  assert.ok(message.length < 500);
+});
+
 test('an undefined supplied fingerprint skips the equality check, matching the boolean gate', () => {
   const mismatched = countableVote({ candidateFingerprint: otherFingerprint });
   assert.equal(describeCountableVoteFailure(mismatched, undefined), null);

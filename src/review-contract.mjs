@@ -27,14 +27,35 @@ const MAX_REPORTED_FIELD_CHARS = 64;
 // untrusted model output - and the model's input is the PR diff, a repository this engine
 // does not control. JSON.stringify escapes control characters and quotes; the length cap
 // stops a pathological value from filling the prompt. A valid 64-hex fingerprint renders
-// fully within the cap.
+// fully within the cap. The cap must bind the VALUE before encoding: serializing a giant
+// string and then clipping it still pays the full serialization, so describeUntrustedValue
+// clips content first and reduces objects/arrays to a structural summary.
 const MAX_REPORTED_VALUE_CHARS = 96;
 
+function clipChars(value, maxChars) {
+  const chars = [...value];
+  return chars.length <= maxChars ? value : chars.slice(0, maxChars).join('');
+}
+
 function describeUntrustedValue(value) {
-  const text = JSON.stringify(value) ?? String(value);
-  const chars = [...text];
-  if (chars.length <= MAX_REPORTED_VALUE_CHARS) return text;
-  return `${chars.slice(0, MAX_REPORTED_VALUE_CHARS).join('')}… (truncated)`;
+  if (value === null) return 'null';
+  const kind = typeof value;
+  if (kind === 'string') {
+    const chars = [...value];
+    if (chars.length <= MAX_REPORTED_VALUE_CHARS) return JSON.stringify(value);
+    return `${JSON.stringify(clipChars(value, MAX_REPORTED_VALUE_CHARS))}… (+${chars.length - MAX_REPORTED_VALUE_CHARS} more chars)`;
+  }
+  if (kind === 'number' || kind === 'boolean') return String(value);
+  if (Array.isArray(value)) return `array(${value.length})`;
+  if (kind === 'object') {
+    const keys = Object.keys(value);
+    const head = keys.slice(0, MAX_REPORTED_FIELDS)
+      .map((key) => JSON.stringify(clipChars(key, MAX_REPORTED_FIELD_CHARS)))
+      .join(', ');
+    const omitted = keys.length - Math.min(keys.length, MAX_REPORTED_FIELDS);
+    return `object{${clipChars(head, MAX_REPORTED_VALUE_CHARS)}}${omitted > 0 ? ` (+${omitted} more)` : ''}`;
+  }
+  return kind;
 }
 
 function describeUntrustedFields(fields) {
