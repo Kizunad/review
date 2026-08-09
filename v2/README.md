@@ -93,6 +93,17 @@ Set by the workflow (`review-v2-p1.yml`):
 | `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL` | trunk |
 | `CLAUDE_EXECUTABLE` | set by setup-claude; boot-session uses it for the trunk |
 
+Those relay names are internal to the harness; the workflow fills them from the SAME place v1
+does - the `review_base_url` input (falling back to `vars.REVIEW_CLAUDE_BASE_URL`) and the
+`review_api_key` secret (falling back to `secrets.REVIEW_CLAUDE_API_KEY`). P1 first declared
+secrets named `AXONHUB_BASE_URL` / `PI_AXONHUB_API_KEY`, which exist in neither Kizunad/review
+nor Kizunad/Bong, so every early trial booted with an empty relay and died two minutes later as
+"trunk pane never came alive". `rv2_require_relay` now refuses that up front with EX_CONFIG.
+
+A `workflow_dispatch` smoke trial only sees secrets defined on the repo that OWNS the workflow.
+Kizunad/review currently has none, so standalone trials need either a secret defined there or a
+thin caller in Bong passing `secrets.REVIEW_CLAUDE_API_KEY`.
+
 ## Local smoke (no relay, no tmux UI)
 
 ```bash

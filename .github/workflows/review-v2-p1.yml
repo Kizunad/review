@@ -33,10 +33,17 @@ on:
         required: false
         type: string
         default: ''
+      # Same shape as v1 review.yml on purpose: the relay URL is an input (not a secret) and
+      # the key is `review_api_key`. P1 originally declared AXONHUB_BASE_URL and
+      # PI_AXONHUB_API_KEY, which exist in NEITHER Kizunad/review nor Kizunad/Bong - so every
+      # trial booted with an empty relay and died as "trunk pane never came alive". Reusing
+      # v1's names means v2 inherits plumbing that is already proven in production.
+      review_base_url:
+        required: false
+        type: string
+        default: ''
     secrets:
-      AXONHUB_BASE_URL:
-        required: true
-      PI_AXONHUB_API_KEY:
+      review_api_key:
         required: true
   workflow_dispatch:
     inputs:
@@ -74,12 +81,17 @@ jobs:
       ENGINE_PIN: ${{ github.sha }}
       RUN_ID: ${{ github.run_id }}
       RV2_WORKFLOW_FILE: review-v2-p1.yml
-      AXONHUB_BASE_URL: ${{ secrets.AXONHUB_BASE_URL }}
-      PI_AXONHUB_API_KEY: ${{ secrets.PI_AXONHUB_API_KEY }}
+      # AXONHUB_* stay as the INTERNAL names the pi plugin reads; only their source changes.
+      # The `||` chain covers both call shapes: workflow_call supplies review_base_url /
+      # review_api_key, while a workflow_dispatch smoke trial falls back to whatever the
+      # owning repo defines. secrets.<undeclared> is empty rather than an error, so the same
+      # expression is valid in both modes.
+      AXONHUB_BASE_URL: ${{ inputs.review_base_url || vars.REVIEW_CLAUDE_BASE_URL || 'https://api.claudeopus.world' }}
+      PI_AXONHUB_API_KEY: ${{ secrets.review_api_key || secrets.REVIEW_CLAUDE_API_KEY }}
       # Trunk: claude -p honors ANTHROPIC_BASE_URL (probed 2026-08-08) and
       # carries the relay key as a Bearer token.
-      ANTHROPIC_BASE_URL: ${{ secrets.AXONHUB_BASE_URL }}
-      ANTHROPIC_AUTH_TOKEN: ${{ secrets.PI_AXONHUB_API_KEY }}
+      ANTHROPIC_BASE_URL: ${{ inputs.review_base_url || vars.REVIEW_CLAUDE_BASE_URL || 'https://api.claudeopus.world' }}
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.review_api_key || secrets.REVIEW_CLAUDE_API_KEY }}
       ANTHROPIC_MODEL: ${{ inputs.trunk_model }}
     steps:
       - name: Checkout engine

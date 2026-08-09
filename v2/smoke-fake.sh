@@ -201,6 +201,33 @@ case "$queue_out" in
   *) pass "F --queue bypasses the cap" ;;
 esac
 
+echo "== leg G: empty relay env is a config refusal, not a pane death =="
+# The first three CI trials all ended with "boot: trunk pane never came alive" after two and
+# a half minutes of booting, and the real cause - AXONHUB_BASE_URL and PI_AXONHUB_API_KEY
+# sourced from secrets that exist in no repo - was invisible in that message. Boot must now
+# refuse up front with EX_CONFIG and name the empty variable, and it must do so BEFORE
+# creating a session (a leg that boots nothing is also the proof that it exits early).
+G="$WORK/run-g"
+mkdir -p "$G/tmux"
+g_out="$(env -u AXONHUB_BASE_URL -u PI_AXONHUB_API_KEY -u ANTHROPIC_BASE_URL \
+             -u ANTHROPIC_AUTH_TOKEN \
+         RV2_ROOT="$G" HARNESS_DIR="$G" TMUX_TMPDIR="$G/tmux" RV2_FAKE=0 \
+         "$HERE/boot-session.sh" 2>&1)"
+g_rc=$?
+assert_eq "G empty relay refuses with rc=78" "$g_rc" "78"
+case "$g_out" in
+  *AXONHUB_BASE_URL*PI_AXONHUB_API_KEY*) pass "G refusal names the empty variables" ;;
+  *) fail "G refusal must name the empty variables (got: $g_out)" ;;
+esac
+# Asserted on the socket, not on the message: the refusal text deliberately quotes the old
+# "pane never came alive" wording to explain what it replaces, so a string match here would
+# pass on its own explanation. An empty TMUX_TMPDIR is the property that actually matters.
+if [ -n "$(ls -A "$G/tmux" 2>/dev/null)" ]; then
+  fail "G must refuse before starting a tmux server"
+else
+  pass "G refuses before booting a session"
+fi
+
 echo
 if [ "$FAILURES" -eq 0 ]; then
   echo "smoke-fake: ALL LEGS GREEN ($WORK)"

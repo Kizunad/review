@@ -13,6 +13,8 @@ V2_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=v2/lib.sh
 . "$V2_DIR/lib.sh"
 
+rv2_require_relay || exit $?
+
 SESSION="$(rv2_session)"
 ORCH="$(rv2_orch)"
 mkdir -p "$ORCH"
@@ -105,4 +107,5 @@ for i in $(seq 1 30); do
   sleep 2
 done
 echo "boot: trunk pane never came alive" >&2
+rv2_dump_panes trunk-never-alive
 exit 1

@@ -37,6 +37,53 @@ rv2_head_oid()   { printf '%s' "${HEAD_OID:-${RV2_HEAD_OID:-}}"; }
 rv2_engine_pin() { printf '%s' "${ENGINE_PIN:-${RV2_ENGINE_PIN:-}}"; }
 rv2_run_id()     { printf '%s' "${RUN_ID:-${RV2_RUN_ID:-local-run}}"; }
 
+# Refuse to boot without the relay env, and say which name is empty.
+#
+# The 2026-08-09 trial spent two and a half minutes creating the session, launching pi twice,
+# re-seeding both workers three times each, and then reported "boot: trunk pane never came
+# alive" - which reads like a harness bug and cost an entire debugging round. It was not a
+# harness bug: AXONHUB_BASE_URL and PI_AXONHUB_API_KEY were empty, because the workflow
+# sourced them from secrets that exist in neither Kizunad/review nor Kizunad/Bong, so claude
+# and pi both had nothing to dial and every pane exited on startup.
+#
+# A missing credential is a configuration error. It must be reported as one, before anything
+# expensive runs, naming the variable - never as a runtime death two minutes later.
+rv2_require_relay() {
+  [ "${RV2_FAKE:-0}" = "1" ] && return 0   # the fake harness dials nothing
+  local missing="" v
+  for v in AXONHUB_BASE_URL PI_AXONHUB_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN; do
+    [ -n "${!v:-}" ] || missing="$missing $v"
+  done
+  [ -n "$missing" ] || return 0
+  {
+    echo "rv2: relay env is empty:$missing"
+    echo "rv2: the trunk (claude -p) and the pi workers both dial the relay, so with these"
+    echo "rv2: unset every pane dies at startup and the harness can only report that the"
+    echo "rv2: pane never came alive. Fix the caller, not the harness."
+    echo "rv2: a workflow_dispatch run only sees secrets defined on the repo that OWNS the"
+    echo "rv2: workflow - Kizunad/review has none. Either call this workflow from Bong with"
+    echo "rv2: secrets.review_api_key, or define the secret on Kizunad/review."
+  } >&2
+  return 78   # EX_CONFIG
+}
+
+# Dump every pane into the run's logs (and stderr) so a boot failure carries the reason.
+#
+# Panes are the only place the trunk's and workers' own stderr exists; when boot gave up it
+# killed the session and that output was gone for good, which is why the first two failed
+# trials had to be re-run to learn anything at all.
+rv2_dump_panes() {
+  local tag="${1:-failure}" session dir w
+  session="$(rv2_session)"
+  dir="$(rv2_root)/logs"; mkdir -p "$dir"
+  for w in $(tmux list-windows -t "$session" -F '#{window_index}' 2>/dev/null); do
+    {
+      echo "=== window $w ($tag) ==="
+      tmux capture-pane -p -S -200 -t "$session:$w" 2>&1
+    } | tee -a "$dir/panes-$tag.log" >&2
+  done
+}
+
 # Reject non-ASCII text destined for a pane. Refusing beats silently mangling:
 # send-keys -l passes bytes through and the TUI renders mojibake. This is the
 # standing rule from ~/orch/dispatch.sh, ported verbatim.
