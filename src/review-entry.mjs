@@ -3,19 +3,26 @@ import path from 'node:path';
 import { createSanitizedCallerSnapshot } from './caller-snapshot.mjs';
 import { createClaudeRunner } from './claude-runner.mjs';
 import { compareStrings } from './deterministic.mjs';
+import { safeRelativePath } from './diff-sharder.mjs';
 import { runReview } from './orchestrator.mjs';
 import {
+  MAX_PUBLIC_COVERAGE_GAP_PATHS,
+  MAX_PUBLIC_COVERAGE_GAPS,
   MAX_PUBLIC_FAILURES,
   MAX_PUBLIC_FINDINGS,
   MAX_PUBLIC_SUGGESTIONS,
+  PUBLIC_COVERAGE_GAP_TEXT_LIMITS,
   PUBLIC_FAILURE_TEXT_LIMITS,
   PUBLIC_FINDING_TEXT_LIMITS,
 } from './review-limits.mjs';
 
 export {
+  MAX_PUBLIC_COVERAGE_GAP_PATHS,
+  MAX_PUBLIC_COVERAGE_GAPS,
   MAX_PUBLIC_FAILURES,
   MAX_PUBLIC_FINDINGS,
   MAX_PUBLIC_SUGGESTIONS,
+  PUBLIC_COVERAGE_GAP_TEXT_LIMITS,
   PUBLIC_FAILURE_TEXT_LIMITS,
   PUBLIC_FINDING_TEXT_LIMITS,
 };
@@ -85,6 +92,11 @@ function parsePolicy(value, repository) {
   return value;
 }
 
+// coverageGaps is deliberately absent from this signature. A tolerated batch gap
+// is accounting, not a verdict input: the engine reports the hole and the
+// consumer decides whether a review with that hole is good enough to merge on.
+// Folding it in here would turn one stubborn upstream batch back into the
+// all-or-nothing infrastructure_failure the budget exists to end.
 export function finalDecision({ findings, failures }, policy) {
   if (failures.length > 0) return 'infrastructure_failure';
   if (findings.some((finding) => finding.level === 'blocker' || finding.level === 'major')) return 'request_changes';
@@ -164,6 +176,41 @@ function publicFailure(failure) {
   };
 }
 
+// Dropped rather than truncated: a shortened path is a path that points at the
+// wrong file, and the gap is still fully identified by stage and batch. Every
+// path here already came through safeRelativePath in the sharder, so this only
+// has to guarantee that the published artifact can never fail its own contract.
+function publicCoverageGapPaths(paths) {
+  if (!Array.isArray(paths)) return [];
+  const bounded = [];
+  for (const value of paths) {
+    if (bounded.length >= MAX_PUBLIC_COVERAGE_GAP_PATHS) break;
+    let canonical;
+    try {
+      canonical = safeRelativePath(value);
+    } catch {
+      continue;
+    }
+    if ([...canonical].length > PUBLIC_COVERAGE_GAP_TEXT_LIMITS.path) continue;
+    bounded.push(canonical);
+  }
+  return bounded;
+}
+
+function publicCoverageGap(gap) {
+  return {
+    stage: nonEmptyBoundedText(gap?.stage, PUBLIC_COVERAGE_GAP_TEXT_LIMITS.stage, 'unknown-stage'),
+    batch: Number.isSafeInteger(gap?.batch) && gap.batch >= 0 ? gap.batch : 0,
+    paths: publicCoverageGapPaths(gap?.paths),
+    error: nonEmptyBoundedText(gap?.error, PUBLIC_COVERAGE_GAP_TEXT_LIMITS.error, 'runner returned no result'),
+  };
+}
+
+export function publicCoverageGaps(gaps) {
+  if (!Array.isArray(gaps)) throw new TypeError('coverageGaps must be an array');
+  return gaps.slice(0, MAX_PUBLIC_COVERAGE_GAPS).map(publicCoverageGap);
+}
+
 function reviewJsonBytes(review) {
   return Buffer.byteLength(`${JSON.stringify(review, null, 2)}\n`);
 }
@@ -204,6 +251,16 @@ export function compactReviewFailures(failures, {
   if (!Number.isSafeInteger(omittedSuggestions) || omittedSuggestions < 0) {
     throw new TypeError('omittedSuggestions must be a non-negative safe integer');
   }
+  // coverageGaps is always the empty array on an infrastructure_failure artifact
+  // (compactFinalReview empties it with the findings), so carrying the constant
+  // here keeps this byte arithmetic exact rather than optimistic.
+  const probe = (compactedFailures, contents = { findings, suggestions, omittedSuggestions }) => ({
+    version: 'v2',
+    decision: 'infrastructure_failure',
+    ...contents,
+    failures: compactedFailures,
+    coverageGaps: [],
+  });
   const total = failures.length;
   const omittedCounts = publicFailureCounts(failures);
   const retained = [];
@@ -216,14 +273,7 @@ export function compactReviewFailures(failures, {
     const compacted = omitted > 0
       ? [...retained, candidate, failureReport(total, retained.length + 1, omittedCounts)]
       : [...retained, candidate];
-    if (compacted.length > MAX_PUBLIC_FAILURES || reviewJsonBytes({
-      version: 'v2',
-      decision: 'infrastructure_failure',
-      findings,
-      suggestions,
-      omittedSuggestions,
-      failures: compacted,
-    }) > maxBytes) {
+    if (compacted.length > MAX_PUBLIC_FAILURES || reviewJsonBytes(probe(compacted)) > maxBytes) {
       omittedCounts[candidateStatus] += 1;
       break;
     }
@@ -232,24 +282,12 @@ export function compactReviewFailures(failures, {
   if (retained.length === total) return retained;
   const report = failureReport(total, retained.length, omittedCounts);
   const compacted = [...retained.slice(0, MAX_PUBLIC_FAILURES - 1), report];
-  if (reviewJsonBytes({
-    version: 'v2',
-    decision: 'infrastructure_failure',
-    findings,
-    suggestions,
-    omittedSuggestions,
-    failures: compacted,
-  }) <= maxBytes) return compacted;
+  if (reviewJsonBytes(probe(compacted)) <= maxBytes) return compacted;
   const allCounts = publicFailureCounts(failures);
   const fallback = [failureReport(total, 0, allCounts)];
-  if (reviewJsonBytes({
-    version: 'v2',
-    decision: 'infrastructure_failure',
-    findings: [],
-    suggestions: [],
-    omittedSuggestions: 0,
-    failures: fallback,
-  }) <= maxBytes) return fallback;
+  if (reviewJsonBytes(probe(fallback, {
+    findings: [], suggestions: [], omittedSuggestions: 0,
+  })) <= maxBytes) return fallback;
   throw new Error('infrastructure failure report exceeds review.json publication budget');
 }
 
@@ -265,6 +303,7 @@ function artifactBudgetFallback() {
       status: 'infra_error',
       error: 'Validated review output exceeded the final review publication contract; no code verdict was published.',
     }],
+    coverageGaps: [],
   };
 }
 
@@ -273,35 +312,45 @@ export function compactFinalReview(review, maxBytes = MAX_REVIEW_JSON_BYTES) {
   if (!Array.isArray(review.findings) || !Array.isArray(review.suggestions) || !Array.isArray(review.failures)) {
     throw new TypeError('review findings, suggestions, and failures must be arrays');
   }
+  if (review.coverageGaps !== undefined && !Array.isArray(review.coverageGaps)) {
+    throw new TypeError('review coverageGaps must be an array when present');
+  }
   if (!Number.isSafeInteger(review.omittedSuggestions) || review.omittedSuggestions < 0) {
     throw new TypeError('review omittedSuggestions must be a non-negative safe integer');
   }
   if (review.decision === 'infrastructure_failure') {
     if (review.failures.length === 0) return artifactBudgetFallback();
-    if (review.findings.length === 0
-      && review.suggestions.length === 0
-      && review.omittedSuggestions === 0
-      && review.failures.length <= MAX_PUBLIC_FAILURES
-      && reviewJsonBytes(review) <= maxBytes) return review;
-    const failures = compactReviewFailures(review.failures, {
+    // Coverage accounting is emptied, not omitted: the key stays so consumers can
+    // read it unconditionally, but a run that published no verdict has no
+    // coverage for the gaps to qualify, its failures already name every batch
+    // that died, and the constant keeps compactReviewFailures' bytes exact.
+    const failed = { ...review, coverageGaps: [] };
+    if (failed.findings.length === 0
+      && failed.suggestions.length === 0
+      && failed.omittedSuggestions === 0
+      && failed.failures.length <= MAX_PUBLIC_FAILURES
+      && reviewJsonBytes(failed) <= maxBytes) return failed;
+    const failures = compactReviewFailures(failed.failures, {
       findings: [], suggestions: [], omittedSuggestions: 0, maxBytes,
     });
     return {
-      ...review,
+      ...failed,
       findings: [],
       suggestions: [],
       omittedSuggestions: 0,
       failures,
     };
   }
-  const decisionContentsAreValid = review.failures.length === 0
-    && (review.decision === 'approve'
-      ? review.findings.every((finding) => finding?.level === 'minor')
-      : review.decision === 'request_changes' && review.findings.length > 0);
+  const complete = { ...review, coverageGaps: review.coverageGaps ?? [] };
+  const decisionContentsAreValid = complete.failures.length === 0
+    && (complete.decision === 'approve'
+      ? complete.findings.every((finding) => finding?.level === 'minor')
+      : complete.decision === 'request_changes' && complete.findings.length > 0);
   if (decisionContentsAreValid
-    && review.findings.length <= MAX_PUBLIC_FINDINGS
-    && review.suggestions.length <= MAX_PUBLIC_SUGGESTIONS
-    && reviewJsonBytes(review) <= maxBytes) return review;
+    && complete.findings.length <= MAX_PUBLIC_FINDINGS
+    && complete.suggestions.length <= MAX_PUBLIC_SUGGESTIONS
+    && complete.coverageGaps.length <= MAX_PUBLIC_COVERAGE_GAPS
+    && reviewJsonBytes(complete) <= maxBytes) return complete;
   const fallback = artifactBudgetFallback();
   if (reviewJsonBytes(fallback) > maxBytes) throw new Error('review.json publication fallback exceeds size limit');
   return fallback;
@@ -346,6 +395,15 @@ export function renderReviewMarkdown(review, metadata) {
   ];
   if (markdownBytes(lines) > MAX_REVIEW_MARKDOWN_BYTES) {
     return minimalReviewMarkdown(review, metadata);
+  }
+  // A verdict reached over an incomplete corpus must say so on the human surface
+  // too: `approve` next to a silent hole is the one way this budget could read as
+  // a stronger result than it is. One counted line, no per-gap detail - the
+  // audit trail lives in review.json's coverageGaps.
+  const coverageGapCount = review.coverageGaps?.length ?? 0;
+  if (coverageGapCount > 0) {
+    const notice = [`**Coverage gaps:** ${markdownCodeSpan(coverageGapCount)} batch(es) produced no usable output; see \`coverageGaps\` in review.json.`];
+    if (appendMarkdown(lines, notice)) lines.push(...notice);
   }
   if (review.decision === 'infrastructure_failure') {
     const introduction = [
@@ -525,6 +583,7 @@ export async function executeReview({
   const rawFailures = Array.isArray(result.failures) ? result.failures : [];
   const partitioned = partitionValidatedFindings(Array.isArray(result.findings) ? result.findings : []);
   const decision = finalDecision({ findings: partitioned.findings, failures: rawFailures }, trustedPolicy);
+  const coverageGaps = publicCoverageGaps(Array.isArray(result.coverageGaps) ? result.coverageGaps : []);
   const review = compactFinalReview({
     version: 'v2',
     decision,
@@ -536,6 +595,10 @@ export async function executeReview({
         findings: [], suggestions: [], omittedSuggestions: 0,
       })
       : [],
+    // Unconditional, empty array included: a consumer that has to branch on
+    // whether the key exists cannot tell "fully covered" from "engine too old to
+    // say", and that is exactly the distinction a merge gate needs.
+    coverageGaps,
   });
   return {
     review,

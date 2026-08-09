@@ -3,7 +3,7 @@
   "$id": "final-review.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "decision", "findings", "suggestions", "omittedSuggestions", "failures"],
+  "required": ["version", "decision", "findings", "suggestions", "omittedSuggestions", "failures", "coverageGaps"],
   "properties": {
     "version": { "type": "string", "const": "v2" },
     "decision": { "type": "string", "enum": ["approve", "request_changes", "infrastructure_failure"] },
@@ -60,6 +60,25 @@
           "diagnostic": { "type": "string", "minLength": 1, "maxLength": 4000 }
         }
       }
+    },
+    "coverageGaps": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["stage", "batch", "paths", "error"],
+        "properties": {
+          "stage": { "type": "string", "minLength": 1, "maxLength": 300 },
+          "batch": { "type": "integer", "minimum": 0 },
+          "paths": {
+            "type": "array",
+            "maxItems": 32,
+            "items": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]{1,500}$" }
+          },
+          "error": { "type": "string", "minLength": 1, "maxLength": 1000 }
+        }
+      }
     }
   },
   "allOf": [
@@ -73,7 +92,8 @@
           "findings": { "maxItems": 0 },
           "suggestions": { "maxItems": 0 },
           "omittedSuggestions": { "const": 0 },
-          "failures": { "minItems": 1 }
+          "failures": { "minItems": 1 },
+          "coverageGaps": { "maxItems": 0 }
         }
       },
       "else": {

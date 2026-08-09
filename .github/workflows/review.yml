@@ -428,7 +428,7 @@ jobs:
           decision="$(jq -er '
             if (
               type == "object" and
-              (keys | sort == ["decision","failures","findings","omittedSuggestions","suggestions","version"]) and
+              (keys | sort == ["coverageGaps","decision","failures","findings","omittedSuggestions","suggestions","version"]) and
               .version == "v2" and
               (.decision == "approve" or .decision == "request_changes" or .decision == "infrastructure_failure") and
               (.findings | type == "array" and length <= 128 and all(.[];
@@ -461,8 +461,16 @@ jobs:
                 (.status == "infra_error" or .status == "schema_error") and
                 (.error | type == "string" and length >= 1 and length <= 4000) and
                 (has("diagnostic") == false or (.diagnostic | type == "string" and length >= 1 and length <= 4000)))) and
+              (.coverageGaps | type == "array" and length <= 128 and all(.[];
+                type == "object" and
+                (keys | sort == ["batch","error","paths","stage"]) and
+                (.stage | type == "string" and length >= 1 and length <= 300) and
+                (.batch | type == "number" and . >= 0 and floor == .) and
+                (.paths | type == "array" and length <= 32 and all(.[];
+                  type == "string" and length >= 1 and length <= 500 and contains("\u0000") == false and startswith("/") == false and test("(^|/)\\.\\.(/|$)") == false)) and
+                (.error | type == "string" and length >= 1 and length <= 1000))) and
               (if .decision == "infrastructure_failure"
-               then (.findings | length == 0) and (.suggestions | length == 0) and .omittedSuggestions == 0 and (.failures | length >= 1)
+               then (.findings | length == 0) and (.suggestions | length == 0) and .omittedSuggestions == 0 and (.failures | length >= 1) and (.coverageGaps | length == 0)
                elif .decision == "approve"
                then (.failures | length == 0) and all(.findings[]; .level == "minor")
                else (.failures | length == 0) and (.findings | length >= 1)

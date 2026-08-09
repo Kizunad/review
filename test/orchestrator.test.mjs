@@ -126,11 +126,14 @@ test('fails closed with a candidate-specific taxonomy error before validation', 
   });
 
   assert.deepEqual(result.findings, []);
-  assert.deepEqual(result.failures.map(({ stage, status }) => ({ stage, status })), [{
-    stage: 'find:security',
-    status: 'schema_error',
-  }]);
-  assert.match(result.failures[0].error, /batch-0: candidate-1: finding is missing taxonomy/);
+  // One batch in the whole stage, so the 8% budget tolerates none of it.
+  assert.deepEqual(result.failures.map(({ stage, status }) => ({ stage, status })), [
+    { stage: 'find', status: 'infra_error' },
+    { stage: 'find:security', status: 'schema_error' },
+  ]);
+  assert.match(result.failures[0].error, /1\/1 failed batches exceeds budget 8%/);
+  assert.match(result.failures[1].error, /batch-0: candidate-1: finding is missing taxonomy/);
+  assert.deepEqual(result.coverageGaps, []);
   assert.equal(requests.some((request) => request.stage === 'validate' || request.stage === 'adjudicate'), false);
   assert.equal(result.failures.some((failure) => failure.stage === 'orchestrator'), false);
 });
@@ -150,11 +153,11 @@ test('rejects a finder candidate assigned to another taxonomy dimension', async 
   });
 
   assert.deepEqual(result.findings, []);
-  assert.deepEqual(result.failures.map(({ stage, status }) => ({ stage, status })), [{
-    stage: 'find:security',
-    status: 'schema_error',
-  }]);
-  assert.match(result.failures[0].error, /candidate taxonomy must exactly equal assigned dimension "security"/);
+  assert.deepEqual(result.failures.map(({ stage, status }) => ({ stage, status })), [
+    { stage: 'find', status: 'infra_error' },
+    { stage: 'find:security', status: 'schema_error' },
+  ]);
+  assert.match(result.failures[1].error, /candidate taxonomy must exactly equal assigned dimension "security"/);
   assert.equal(requests.some((request) => request.stage === 'validate' || request.stage === 'adjudicate'), false);
 });
 
@@ -204,15 +207,137 @@ test('collects deterministic finder contract failures after all queued work comp
     assert.ok(scoped.every((call) => call.paths[0] === 'large.js'));
   }
   assert.deepEqual(result.findings, []);
+  // 3 dimensions x 7 batches = 21 finder batches, so the budget tolerates 1 and
+  // these 2 losses still fail the stage closed.
   assert.deepEqual(result.failures.map(({ stage, status }) => ({ stage, status })), [
+    { stage: 'find', status: 'infra_error' },
     { stage: 'find:slow', status: 'schema_error' },
     { stage: 'find:queued', status: 'schema_error' },
   ]);
-  assert.match(result.failures[0].error, /batch-1: candidate-0: finding is missing taxonomy/);
-  assert.match(result.failures[1].error, /batch-0: candidate-0: finding is missing taxonomy/);
+  assert.match(result.failures[0].error, /2\/21 failed batches exceeds budget 8% \(at most 1 of 21/);
+  assert.match(result.failures[1].error, /batch-1: candidate-0: finding is missing taxonomy/);
+  assert.match(result.failures[2].error, /batch-0: candidate-0: finding is missing taxonomy/);
+  assert.deepEqual(result.coverageGaps, []);
   assert.equal(requests.some((request) => request.stage === 'validate' || request.stage === 'adjudicate'), false);
 });
 
+
+// 13 dimensions x 1 batch = 13 finder batches, the smallest run whose 8% budget
+// funds a single loss: floor(13 * 0.08) == 1.
+function budgetedFinderRun(handleFind) {
+  return runReview({
+    diff: 'diff --git a/a.mjs b/a.mjs\n',
+    taxonomy: Array.from({ length: 13 }, (_, index) => `dimension-${index}`),
+    runner: runnerFor((request) => {
+      if (request.stage === 'plan') return plan();
+      if (request.stage === 'summary') return { status: 'ok', data: { summary: 'one file', files: ['a.mjs'] } };
+      if (request.stage === 'find') return handleFind(request);
+      if (request.stage === 'consolidate') return consolidate(request);
+      if (request.stage === 'validate') return vote(request, 'confirm');
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+}
+
+test('books finder batch losses inside the budget as coverage gaps and still decides', async () => {
+  const result = await budgetedFinderRun((request) => {
+    if (request.taxonomy === 'dimension-3') {
+      return { status: 'schema_error', error: 'candidate fields do not match the v2 contract' };
+    }
+    if (request.taxonomy === 'dimension-0') {
+      return { status: 'ok', data: [{ ...finding, taxonomy: 'dimension-0' }] };
+    }
+    return { status: 'ok', data: [] };
+  });
+
+  assert.deepEqual(result.failures, []);
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.findings[0].level, 'major');
+  assert.deepEqual(result.coverageGaps, [{
+    stage: 'find:dimension-3',
+    batch: 0,
+    paths: ['a.mjs'],
+    error: 'candidate fields do not match the v2 contract',
+  }]);
+});
+
+test('fails closed once finder batch losses pass the budget and publishes no surviving finding', async () => {
+  const result = await budgetedFinderRun((request) => {
+    if (request.taxonomy === 'dimension-3' || request.taxonomy === 'dimension-9') {
+      return { status: 'schema_error', error: 'finder data must be an array' };
+    }
+    return { status: 'ok', data: [{ ...finding, taxonomy: request.taxonomy }] };
+  });
+
+  assert.deepEqual(result.findings, []);
+  assert.deepEqual(result.coverageGaps, []);
+  assert.deepEqual(result.failures.map(({ stage, status }) => ({ stage, status })), [
+    { stage: 'find', status: 'infra_error' },
+    { stage: 'find:dimension-3', status: 'schema_error' },
+    { stage: 'find:dimension-9', status: 'schema_error' },
+  ]);
+  assert.match(result.failures[0].error, /2\/13 failed batches exceeds budget 8% \(at most 1 of 13 batch\(es\) may fail\)/);
+});
+
+test('leaves every batch of a fully covered run out of coverageGaps', async () => {
+  const result = await budgetedFinderRun((request) => ({
+    status: 'ok',
+    data: request.taxonomy === 'dimension-0' ? [{ ...finding, taxonomy: 'dimension-0' }] : [],
+  }));
+
+  assert.deepEqual(result.failures, []);
+  assert.deepEqual(result.coverageGaps, []);
+  assert.equal(result.findings.length, 1);
+});
+
+test('gives single-point stages no budget however many batches would fund one', async () => {
+  // 14 shards produce 14 summary assignments, so an 8% budget would have funded
+  // exactly one loss had summary been budgeted at all.
+  const diff = Array.from({ length: 14 }, (_, index) => `diff --git a/f${index}.mjs b/f${index}.mjs\n+a\n`).join('');
+  const summaryResult = await runReview({
+    diff,
+    taxonomy: ['security'],
+    maxShardChars: 40,
+    maxFinderChars: 40,
+    runner: runnerFor((request) => {
+      if (request.stage === 'plan') return plan();
+      if (request.stage === 'summary') {
+        return request.assignment.id === 'summary-5'
+          ? { status: 'infra_error', error: 'timeout after 120000ms' }
+          : { status: 'ok', data: { summary: 'one file', files: [request.assignment.paths[0]] } };
+      }
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+  assert.deepEqual(summaryResult.findings, []);
+  assert.deepEqual(summaryResult.coverageGaps, []);
+  assert.deepEqual(summaryResult.failures, [{
+    stage: 'summary:summary-5',
+    status: 'infra_error',
+    error: 'timeout after 120000ms',
+  }]);
+
+  const consolidateFailure = await runReview({
+    diff: 'diff --git a/a.mjs b/a.mjs\n',
+    taxonomy: Array.from({ length: 13 }, (_, index) => `dimension-${index}`),
+    runner: runnerFor((request) => {
+      if (request.stage === 'plan') return plan();
+      if (request.stage === 'summary') return { status: 'ok', data: { summary: 'one file', files: ['a.mjs'] } };
+      if (request.stage === 'find') {
+        return { status: 'ok', data: request.taxonomy === 'dimension-0' ? [{ ...finding, taxonomy: 'dimension-0' }] : [] };
+      }
+      if (request.stage === 'consolidate') return { status: 'infra_error', error: 'timeout after 120000ms' };
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+  assert.deepEqual(consolidateFailure.findings, []);
+  assert.deepEqual(consolidateFailure.coverageGaps, []);
+  assert.deepEqual(consolidateFailure.failures, [{
+    stage: 'consolidate',
+    status: 'infra_error',
+    error: 'timeout after 120000ms',
+  }]);
+});
 
 test('rejects finder batches above the candidate array contract', async () => {
   const tooMany = Array.from({ length: 129 }, (_, index) => ({
@@ -233,10 +358,10 @@ test('rejects finder batches above the candidate array contract', async () => {
   });
 
   assert.deepEqual(result.findings, []);
-  assert.equal(result.failures.length, 1);
-  assert.equal(result.failures[0].stage, 'find:security');
-  assert.equal(result.failures[0].status, 'schema_error');
-  assert.match(result.failures[0].error, /at most 128 candidates/);
+  assert.equal(result.failures.length, 2);
+  assert.equal(result.failures[1].stage, 'find:security');
+  assert.equal(result.failures[1].status, 'schema_error');
+  assert.match(result.failures[1].error, /at most 128 candidates/);
 });
 test('aggregates unbounded malformed finder candidates by taxonomy and status', async () => {
   const dimensions = Array.from({ length: 8 }, (_, index) => `dimension-${index}`);
@@ -263,12 +388,13 @@ test('aggregates unbounded malformed finder candidates by taxonomy and status', 
 
   assert.ok(finderCalls > dimensions.length);
   assert.deepEqual(result.findings, []);
-  assert.ok(result.failures.length <= dimensions.length * 2);
-  assert.deepEqual(result.failures.slice(0, 2).map(({ stage, status }) => ({ stage, status })), [
+  assert.ok(result.failures.length <= dimensions.length * 2 + 1);
+  assert.deepEqual(result.failures[0].stage, 'find');
+  assert.deepEqual(result.failures.slice(1, 3).map(({ stage, status }) => ({ stage, status })), [
     { stage: 'find:dimension-0', status: 'infra_error' },
     { stage: 'find:dimension-0', status: 'schema_error' },
   ]);
-  assert.match(result.failures[0].diagnostic, /error_max_structured_output_retries/);
+  assert.match(result.failures[1].diagnostic, /error_max_structured_output_retries/);
   assert.ok(result.failures.filter((failure) => failure.status === 'schema_error').every((failure) => /occurrence\(s\)/.test(failure.error)));
   assert.ok(result.failures.filter((failure) => failure.status === 'schema_error').every((failure) => /omitted/.test(failure.error)));
 });
@@ -334,11 +460,11 @@ test('bounds Terra finder concurrency at two without dropping queued taxonomy wo
   assert.equal(peak, 2);
   assert.deepEqual(started, dimensions);
   assert.deepEqual(result.findings, []);
-  assert.deepEqual(result.failures.map(({ stage, status }) => ({ stage, status })), [{
-    stage: 'find:dimension-0',
-    status: 'infra_error',
-  }]);
-  assert.match(result.failures[0].error, /batch-0: provider unavailable/);
+  assert.deepEqual(result.failures.map(({ stage, status }) => ({ stage, status })), [
+    { stage: 'find', status: 'infra_error' },
+    { stage: 'find:dimension-0', status: 'infra_error' },
+  ]);
+  assert.match(result.failures[1].error, /batch-0: provider unavailable/);
 });
 
 test('bounds Luna summary concurrency at two without dropping queued assignments', async () => {
@@ -436,9 +562,9 @@ test('preserves taxonomy and batch order when bounded finder lanes finish out of
   }
   assert.deepEqual(
     result.failures.map((failure) => failure.stage),
-    ['find:slow', 'find:queued'],
+    ['find', 'find:slow', 'find:queued'],
   );
-  assert.ok(result.failures.every((failure) => /occurrence\(s\)/.test(failure.error)));
+  assert.ok(result.failures.slice(1).every((failure) => /occurrence\(s\)/.test(failure.error)));
 });
 
 test('runs every Luna assignment and fills uncovered shards deterministically', async () => {
