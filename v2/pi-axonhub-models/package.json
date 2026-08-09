@@ -1,0 +1,14 @@
+{
+	"name": "pi-axonhub-models",
+	"version": "0.1.0",
+	"description": "Dynamic model discovery for an AxonHub gateway (vendored for the v2 runner harness)",
+	"main": "index.ts",
+	"type": "module",
+	"private": true,
+	"pi": {
+		"extensions": ["./index.ts"]
+	},
+	"peerDependencies": {
+		"@mariozechner/pi-coding-agent": ">=0.52.0"
+	}
+}
