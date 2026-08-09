@@ -13,8 +13,8 @@
 # Usage: v2/install-runner.sh   (run from the review job workspace)
 #   Env: RV2_PI_VERSION (default 0.82.0), PI_AXONHUB_API_KEY (optional at
 #   install; the workflow injects it into the panes), AXONHUB_BASE_URL.
-#   Writes RV2_PI_CLI to $GITHUB_ENV when present, so boot-session.sh can
-#   launch pi by literal path.
+#   Writes RV2_PI_CLI to $GITHUB_ENV when present; boot-session.sh launches the
+#   worker panes as `node $RV2_PI_CLI` off that value.
 set -euo pipefail
 
 V2_DIR="$(cd "$(dirname "$0")" && pwd)"

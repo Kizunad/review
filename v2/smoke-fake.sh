@@ -19,6 +19,14 @@ REPO="$(cd "$HERE/.." && pwd)"
 command -v tmux >/dev/null || { echo "smoke: tmux required" >&2; exit 69; }
 command -v jq >/dev/null || { echo "smoke: jq required" >&2; exit 69; }
 
+# TMUX_TMPDIR only chooses the socket when we are NOT already inside tmux: an
+# inherited $TMUX pins every client to the *outer* server, so running this smoke
+# from a tmux pane would send boot-session.sh's `kill-session -t bong-v2` (and
+# every dispatch send-keys) into the developer's real session. Unset at the door,
+# once, so every leg below is isolated - including the ones that never boot a
+# session but still probe pane liveness.
+unset TMUX TMUX_PANE
+
 HEAD_A="$(printf '1%.0s' $(seq 40))"
 PIN_A="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || printf '2%.0s' $(seq 40))"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/rv2-smoke.XXXXXX")"
@@ -152,6 +160,46 @@ run_leg run-e run-e 10 FAKE_TRUNK_HANG=1
 E="$WORK/run-e"
 assert_eq "E review decision" "$(jq -r .decision "$E/output/review.json" 2>/dev/null)" "infrastructure_failure"
 assert_file_grep "E wait-review timed out" "$E/logs/smoke.log" 'wait-review: timeout'
+
+echo "== leg F: active cap refuses the third dispatch (ENGINE524 pacing) =="
+# Legs A-C never saturate the cap (the fake worker returns before a third shard
+# is ready), so the limiter itself needs a direct leg: a ledger with two
+# dispatched-but-incomplete rows is exactly the state the cap exists to refuse.
+# The cap is checked before any pane liveness probe, so this leg needs no
+# session - only an empty TMUX_TMPDIR so a stray tmux call cannot escape.
+F="$WORK/run-f"
+mkdir -p "$F/evidence" "$F/logs" "$F/tmux"
+{
+  printf 'worker\tassignment\tutc\tstatus\n'
+  printf 'W1\ts-0\t2026-01-01T00:00Z\tdispatched\n'
+  printf 'W2\ts-1\t2026-01-01T00:00Z\tdispatched\n'
+} >"$F/ledger.tsv"
+cap_out="$(RV2_ROOT="$F" HARNESS_DIR="$F" TMUX_TMPDIR="$F/tmux" \
+  "$HERE/dispatch.sh" W1 s-2 TEST "ASSIGNMENT s-2 over the cap" 2>&1)"
+cap_rc=$?
+assert_eq "F cap refuses with rc=75" "$cap_rc" "75"
+case "$cap_out" in
+  *'at/over the cap of 2'*) pass "F refusal names the cap" ;;
+  *) fail "F refusal names the cap (got: $cap_out)" ;;
+esac
+# Completing one shard frees a slot: the same call must get past the cap and
+# fail later, on pane liveness, proving the gate counts evidence and not rows.
+printf '{}\n' >"$F/evidence/s-0.json"
+free_out="$(RV2_ROOT="$F" HARNESS_DIR="$F" TMUX_TMPDIR="$F/tmux" \
+  "$HERE/dispatch.sh" W1 s-2 TEST "ASSIGNMENT s-2 under the cap" 2>&1)"
+case "$free_out" in
+  *'at/over the cap'*) fail "F completed evidence must free a slot (got: $free_out)" ;;
+  *'no pi process'*) pass "F completed evidence frees a slot (stops at liveness)" ;;
+  *) fail "F expected a liveness refusal after the slot freed (got: $free_out)" ;;
+esac
+# --queue is the deliberate bypass; it must never be refused by the cap.
+printf 'W1\ts-2\t2026-01-01T00:00Z\tdispatched\n' >>"$F/ledger.tsv"
+queue_out="$(RV2_ROOT="$F" HARNESS_DIR="$F" TMUX_TMPDIR="$F/tmux" \
+  "$HERE/dispatch.sh" --queue W1 s-3 TEST "ASSIGNMENT s-3 queued past the cap" 2>&1)"
+case "$queue_out" in
+  *'at/over the cap'*) fail "F --queue must bypass the cap (got: $queue_out)" ;;
+  *) pass "F --queue bypasses the cap" ;;
+esac
 
 echo
 if [ "$FAILURES" -eq 0 ]; then

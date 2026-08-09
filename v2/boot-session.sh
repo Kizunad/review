@@ -24,6 +24,16 @@ V2_DIR_ABS="$(cd "$V2_DIR" && pwd)"
 # claude executable: absolute path from setup-claude (GITHUB_ENV), else `claude`.
 CLAUDE_BIN="${CLAUDE_EXECUTABLE:-claude}"
 
+# pi launch command: install-runner.sh publishes the literal cli.js path as
+# RV2_PI_CLI precisely because a pane cannot be trusted to have the global npm
+# bin on PATH (it runs its own login shell). Honor it; fall back to bare `pi`
+# only when the install step did not publish one.
+if [ -n "${RV2_PI_CLI:-}" ]; then
+  PI_LAUNCH="node '$RV2_PI_CLI'"
+else
+  PI_LAUNCH="pi"
+fi
+
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 tmux new-session -d -s "$SESSION" -x 220 -y 55
 tmux set-option -t "$SESSION" history-limit 5000
@@ -73,7 +83,7 @@ for i in $WORKERS; do
   if [ "${RV2_FAKE:-0}" = "1" ]; then
     tmux send-keys -t "$SESSION:$i" "cd '$ROOT' && node '$V2_DIR_ABS/../fake/worker.mjs' W$i" Enter
   else
-    tmux send-keys -t "$SESSION:$i" "cd '$ROOT' && pi" Enter
+    tmux send-keys -t "$SESSION:$i" "cd '$ROOT' && $PI_LAUNCH" Enter
     sleep 12
     seed_worker "$i" &
   fi
