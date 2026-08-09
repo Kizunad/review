@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { runFreshClaude } from './claude-cli.mjs';
 import { canonicalizeFinderCandidates, consolidateFindings } from './findings.mjs';
-import { isCountableVote, validAdjudication } from './review-contract.mjs';
+import { describeCountableVoteFailure, validAdjudication } from './review-contract.mjs';
 
 export const STAGE_SCHEMA = Object.freeze({
   plan: 'review-plan.schema.json',
@@ -136,6 +136,18 @@ function requireShape(valid, stage, contract, data) {
   return true;
 }
 
+// The other stages' gates throw already-specific TypeErrors; validate is the only one whose
+// boolean collapses ten independent conditions. describeCountableVoteFailure names the broken
+// condition (plus the observed verdict/reachable/level) so the schema repair prompt - which
+// echoes this error verbatim - can tell the model what actually changed. Before this, a
+// field-perfect vote that broke a VALUE rule was told its fields were wrong, re-emitted a
+// near-identical vote, and burned the whole repair budget.
+function requireCountableVote(data, fingerprint, stage) {
+  const failure = describeCountableVoteFailure(data, fingerprint);
+  if (failure) throw new TypeError(`${stage} output is not a countable v2 vote: ${failure}`);
+  return true;
+}
+
 function validateStage(stage, data, request) {
   switch (stage) {
     case 'plan':
@@ -159,12 +171,7 @@ function validateStage(stage, data, request) {
       consolidateFindings(request.candidates, data);
       return true;
     case 'validate':
-      return requireShape(
-        isCountableVote(data, request.candidate.fingerprint),
-        stage,
-        'a countable v2 vote for the supplied cluster fingerprint, with exactly the fields version, candidateFingerprint, verdict, reachable, level, evidence, reason (confirm requires reachable=true; reject and split require reachable=false and level "suggestion")',
-        data,
-      );
+      return requireCountableVote(data, request.candidate.fingerprint, stage);
     case 'adjudicate':
       return requireShape(
         validAdjudication(data, request.candidate.fingerprint),
