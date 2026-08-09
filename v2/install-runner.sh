@@ -49,6 +49,9 @@ node "$PI_CLI" --version
 PI_CONFIG_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 mkdir -p "$PI_CONFIG_DIR"
 PLUGIN_TARGET="$PI_CONFIG_DIR/plugins/pi-axonhub-models"
+# mkdir -p above only creates the config dir itself; plugins/ does not exist on a
+# fresh runner and cp refuses to create two levels (first real Actions run, 31295796234).
+mkdir -p "$PI_CONFIG_DIR/plugins"
 if [ ! -e "$PLUGIN_TARGET" ]; then
   cp -r "$V2_DIR/pi-axonhub-models" "$PLUGIN_TARGET"
 fi
