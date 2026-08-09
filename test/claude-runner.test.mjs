@@ -161,6 +161,8 @@ test('prompts lock clean v2, independent level voting, and no partial candidates
   assert.match(source, /Independently assign the impact level/);
   assert.match(source, /Do not defer to the finder-proposed level/);
   assert.match(source, /Every supplied fingerprint must appear exactly once/);
+  assert.match(source, /The response must be a JSON object with exactly two fields: version and a clusters array/);
+  assert.match(source, /version must be the string "v2"/);
   assert.match(source, /Use split only when two or more members describe independent defects/);
   assert.match(source, /Reject only when the cluster is structurally coherent/);
   assert.match(source, /used only after three complete existence-split rounds with no structural split votes/);

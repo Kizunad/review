@@ -80,7 +80,8 @@ function stagePrompt(request, { policy, repository, skillPath, skill }) {
         'You are a fresh Sol consolidator. Cluster only candidates that describe the same underlying root cause in the same repository path.',
         'Every supplied fingerprint must appear exactly once. Every representativeFingerprint must be one of that cluster\'s memberFingerprints.',
         'Do not merge different paths. Similar locations or topics are not enough when the root causes differ.',
-        'Do not add, omit, rewrite, relabel, or split candidates. Return only group membership and an existing representative fingerprint.',
+        'Do not add, omit, rewrite, relabel, or split candidates.',
+        'The response must be a JSON object with exactly two fields: version and a clusters array. version must be the string "v2". Each clusters entry carries only that cluster\'s representativeFingerprint and its memberFingerprints.',
         `Exact-deduplicated candidates with provenance:\n${json(request.candidates)}`,
       ].join('\n\n');
     case 'validate':
