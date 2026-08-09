@@ -39,9 +39,19 @@ function collectStaticRequired(schema) {
   return [...out];
 }
 
+// Match a term as a standalone token, never as a substring of a longer word -
+// `prompt.includes('id')` would be satisfied by "provided schema" in the common
+// preamble even after a prompt dropped the `id` requirement, turning a missing
+// field into a silent pass. The boundary charset is the complement of
+// [A-Za-z0-9_$] so identifier-like terms are matched whole.
+function mentionsToken(prompt, term) {
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^A-Za-z0-9_$])${escaped}(?=$|[^A-Za-z0-9_$])`).test(prompt);
+}
+
 function promptMentions(prompt, field) {
-  if (prompt.includes(field)) return true;
-  return (FIELD_ALIASES[field] ?? []).some((alias) => prompt.includes(alias));
+  if (mentionsToken(prompt, field)) return true;
+  return (FIELD_ALIASES[field] ?? []).some((alias) => mentionsToken(prompt, alias));
 }
 
 // Collect {field, value} for every property whose schema carries a `const` in a
@@ -105,13 +115,13 @@ test('every stage prompt names every schema-required field', async () => {
     const container = schema.type;
     if (container === 'array' || container === 'object') {
       assert.ok(
-        prompt.includes(container),
+        mentionsToken(prompt, container),
         `${stage} schema is a top-level ${container} but the prompt never names the ${container} container`
         + ' - a model that returns an object where the schema requires an array ships as'
         + ' "finder data must be an array". State the container shape in the prompt.',
       );
     }
-    const missingConsts = collectConstValues(schema).filter(({ value }) => !prompt.includes(String(value)));
+    const missingConsts = collectConstValues(schema).filter(({ value }) => !mentionsToken(prompt, String(value)));
     assert.deepEqual(
       missingConsts.map(({ field }) => field),
       [],
