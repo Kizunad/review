@@ -266,6 +266,22 @@ test('consolidation rejects cross-path clusters and all malformed bounds', () =>
     () => consolidateFindings(candidates, { version: 'v2', clusters: [singleton(first), singleton(second)], extra: true }),
     /fields do not match/,
   );
+  // The message IS the repair prompt (claude-runner echoes it verbatim), so it has to carry
+  // the delta. Asserting only /fields do not match/ let the content-free version ship, and a
+  // repair loop fed a content-free error cannot converge - three attempts, same drift, one
+  // infrastructure_failure on a healthy pool.
+  assert.throws(
+    () => consolidateFindings(candidates, { version: 'v2', clusters: [singleton(first), singleton(second)], extra: true }),
+    /unexpected extra;.*expected exactly clusters, version/,
+  );
+  assert.throws(
+    () => consolidateFindings(candidates, { clusters: [singleton(first), singleton(second)] }),
+    /missing version;.*expected exactly clusters, version/,
+  );
+  assert.throws(
+    () => consolidateFindings(candidates, { version: 'v2', groups: [singleton(first), singleton(second)] }),
+    /missing clusters; unexpected groups/,
+  );
   assert.throws(
     () => consolidateFindings(candidates, {
       version: 'v2',

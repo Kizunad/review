@@ -24,12 +24,27 @@ function normalizedText(value, name) {
   return value.trim().replace(/\s+/g, ' ');
 }
 
+// The message is the repair prompt's only content: claude-runner echoes it back verbatim as
+// "Your previous output failed schema validation: <error>". A bare "fields do not match the
+// v2 contract" tells the model nothing it can act on, so all three repair attempts reproduced
+// the same drift and the stage died as infrastructure_failure. On 2026-08-09 that was the
+// leading cause of failed reviews on a fully healthy pool - PRs 1991, 1995, 1996 and 1999 all
+// lost a paid review to a consolidation whose only sin was an extra top-level key nobody could
+// see. Name the delta, and the existing bounded repair loop can actually converge.
 function exactFields(value, fields, name) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError(`${name} must be an object`);
   const actual = Object.keys(value).sort();
   const expected = [...fields].sort();
   if (actual.length !== expected.length || actual.some((field, index) => field !== expected[index])) {
-    throw new TypeError(`${name} fields do not match the v2 contract`);
+    const missing = expected.filter((field) => !actual.includes(field));
+    const unexpected = actual.filter((field) => !expected.includes(field));
+    const delta = [
+      missing.length ? `missing ${missing.join(', ')}` : '',
+      unexpected.length ? `unexpected ${unexpected.join(', ')}` : '',
+    ].filter(Boolean).join('; ');
+    throw new TypeError(
+      `${name} fields do not match the v2 contract (${delta}; expected exactly ${expected.join(', ')})`,
+    );
   }
 }
 
