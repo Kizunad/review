@@ -21,6 +21,64 @@ const MAX_FAILURE_SAMPLES = 4;
 const MAX_FAILURE_TEXT = 4_000;
 const FAILURE_STATUSES = ['infra_error', 'schema_error'];
 
+// Bounded batch-failure budget for the finder stage - the only stage that fans
+// out into independent slices of the corpus (one call per taxonomy dimension x
+// diff batch), so the only one where losing a call loses a bounded fraction of
+// the review rather than the review itself.
+//
+// The upstream model refuses a bounded fraction of batches outright: it keeps
+// answering with a non-contract shape ("finder data must be an array",
+// "candidate fields do not match the v2 contract") even after the schema-retry
+// loop has fed the field-level errors back three times. Measured on Bong that
+// stubborn rate is ~5% per batch, and one review of that repository runs 112
+// finder batches (8 dimensions x 14 batches); Bong#1308 lost 3 of them and threw
+// away all 112 batches' worth of work. Under an all-or-nothing policy the odds
+// that a whole review comes back clean are 0.95^112 ~= 0.2%, so the run and
+// every retry of it report infrastructure_failure forever. All-or-nothing is not
+// a strictness setting at that scale, it is an outage.
+//
+// A review with a small, NAMED hole in its coverage is worth more than no review
+// at all. Batches that fail within this budget are therefore dropped from the
+// corpus and booked in coverageGaps; lose more than the budget and the stage
+// still fails closed, because at that point the surviving corpus is no longer a
+// fair sample of the diff. The engine only keeps the books - it never softens
+// the decision for a gap, and a consumer that wants zero gaps reads coverageGaps
+// and tightens its own gate.
+//
+// Every other stage stays strict, and not only the single-call ones (plan,
+// consolidate, adjudicate) that have no second batch to carry the review:
+// summary is fanned out per assignment but is an INPUT to every finder batch,
+// not a slice of the corpus, so silently dropping one narrows what all 112
+// finder calls can see instead of leaving one nameable hole.
+export const FINDER_BATCH_FAILURE_BUDGET = 0.08;
+
+// Floor, so the tolerated share never exceeds the budget itself: 112 batches
+// tolerate 8 (7.1%), and fewer than 13 batches tolerate none - a one-batch stage
+// stays all-or-nothing, which is the honest reading of "8% of one batch".
+function batchFailureAllowance(total, budget = FINDER_BATCH_FAILURE_BUDGET) {
+  return Math.floor(total * budget);
+}
+
+function budgetExceededFailure(stage, failed, total, allowance, budget = FINDER_BATCH_FAILURE_BUDGET) {
+  return {
+    stage,
+    status: 'infra_error',
+    error: `${failed}/${total} failed batches exceeds budget ${Number((budget * 100).toFixed(4))}%`
+      + ` (at most ${allowance} of ${total} batch(es) may fail)`,
+  };
+}
+
+// paths names what the dropped batch was covering, so a gap can be read against
+// the diff instead of being an opaque batch number.
+function coverageGap(stage, batch, paths, error) {
+  return {
+    stage,
+    batch,
+    paths: Array.isArray(paths) ? [...paths] : [],
+    error: boundedFailureText(error),
+  };
+}
+
 // Model names sent by every stage.
 //
 // These are ROUTING PLACEHOLDERS, not provider tiers. The upstream behind this
@@ -249,6 +307,7 @@ export async function runReview({
   }
 
   const failures = [];
+  const coverageGaps = [];
   const shards = shardDiff(diff, { maxChars: maxShardChars });
   const plan = await runner.run({
     stage: 'plan',
@@ -256,7 +315,8 @@ export async function runReview({
     shardManifest: shards.map(({ index, paths, text }) => ({ index, paths, chars: text.length })),
     taxonomy,
   });
-  if (!stageOk(plan)) return { findings: [], failures: [stageFailure('plan', plan)] };
+  // Single-shot stage: no budget applies, one failed call is the whole stage.
+  if (!stageOk(plan)) return { findings: [], failures: [stageFailure('plan', plan)], coverageGaps };
 
   const assignments = normalizeAssignments(plan.data, shards, maxShardChars);
   const summaryResults = await mapBounded(
@@ -277,7 +337,9 @@ export async function runReview({
     }
     summaries.push({ assignment: assignment.id, data: summary.data });
   }
-  if (summaries.length !== assignments.length) return { findings: [], failures };
+  // No budget: every finder batch reads every summary, so a missing one degrades
+  // the whole corpus rather than one nameable slice of it.
+  if (summaries.length !== assignments.length) return { findings: [], failures, coverageGaps };
 
   const finderBatches = shards.length > 0
     ? groupShards(shards, { maxChars: maxFinderChars })
@@ -307,6 +369,7 @@ export async function runReview({
       finderFailureRecords.push({
         dimensionId,
         batchIndex: batch.index,
+        batchPaths: batch.paths,
         status: FAILURE_STATUSES.includes(finder?.status) ? finder.status : 'infra_error',
         error: finder?.error ?? 'runner returned no result',
         diagnostic: finder?.diagnostic,
@@ -317,6 +380,7 @@ export async function runReview({
       finderFailureRecords.push({
         dimensionId,
         batchIndex: batch.index,
+        batchPaths: batch.paths,
         status: 'schema_error',
         error: 'finder data must be an array',
       });
@@ -328,40 +392,52 @@ export async function runReview({
       finderFailureRecords.push({
         dimensionId,
         batchIndex: batch.index,
+        batchPaths: batch.paths,
         status: 'schema_error',
         error: error.message,
       });
     }
   }
-  if (finderFailureRecords.length > 0) {
-    failures.push(...aggregateFinderFailures(taxonomy, finderBatches, finderFailureRecords));
-    return { findings: [], failures };
+  // Exactly one record per failed (dimension, batch) pair above, so the record
+  // count IS the failed batch count and can be compared against the budget.
+  const finderBatchCount = taxonomy.length * finderBatches.length;
+  const finderAllowance = batchFailureAllowance(finderBatchCount);
+  if (finderFailureRecords.length > finderAllowance) {
+    failures.push(
+      budgetExceededFailure('find', finderFailureRecords.length, finderBatchCount, finderAllowance),
+      ...aggregateFinderFailures(taxonomy, finderBatches, finderFailureRecords),
+    );
+    return { findings: [], failures, coverageGaps };
+  }
+  for (const record of finderFailureRecords) {
+    coverageGaps.push(coverageGap(`find:${record.dimensionId}`, record.batchIndex, record.batchPaths, record.error));
   }
 
   const exactCandidates = dedupeFindings(candidates);
-  if (exactCandidates.length === 0) return { findings: [], failures };
+  if (exactCandidates.length === 0) return { findings: [], failures, coverageGaps };
   if (exactCandidates.length > MAX_CONSOLIDATION_CANDIDATES) {
     failures.push({
       stage: 'consolidate',
       status: 'schema_error',
       error: `consolidation input must contain at most ${MAX_CONSOLIDATION_CANDIDATES} candidates`,
     });
-    return { findings: [], failures };
+    return { findings: [], failures, coverageGaps };
   }
 
   const consolidation = await runner.run({
     stage: 'consolidate', model: REVIEWER_MODEL, candidates: exactCandidates,
   });
+  // Single-shot stage: no budget applies.
   if (!stageOk(consolidation)) {
     failures.push(stageFailure('consolidate', consolidation));
-    return { findings: [], failures };
+    return { findings: [], failures, coverageGaps };
   }
   let consolidatedCandidates;
   try {
     consolidatedCandidates = consolidateFindings(exactCandidates, consolidation.data);
   } catch (error) {
     failures.push({ stage: 'consolidate', status: 'schema_error', error: error.message });
-    return { findings: [], failures };
+    return { findings: [], failures, coverageGaps };
   }
 
   const accepted = [];
@@ -435,5 +511,5 @@ export async function runReview({
       }
     }
   }
-  return { findings: accepted, failures };
+  return { findings: accepted, failures, coverageGaps };
 }

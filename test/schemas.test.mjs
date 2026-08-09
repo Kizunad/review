@@ -4,9 +4,12 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createManifest } from '../src/artifact-manifest.mjs';
 import {
+  MAX_PUBLIC_COVERAGE_GAP_PATHS,
+  MAX_PUBLIC_COVERAGE_GAPS,
   MAX_PUBLIC_FAILURES,
   MAX_PUBLIC_FINDINGS,
   MAX_PUBLIC_SUGGESTIONS,
+  PUBLIC_COVERAGE_GAP_TEXT_LIMITS,
   PUBLIC_FAILURE_TEXT_LIMITS,
   PUBLIC_FINDING_TEXT_LIMITS,
 } from '../src/review-entry.mjs';
@@ -83,6 +86,7 @@ test('v2 schemas separate validated defects from bounded suggestions', async () 
     'suggestions',
     'omittedSuggestions',
     'failures',
+    'coverageGaps',
   ]);
   assert.equal(review.properties.version.const, 'v2');
   assert.equal(review.properties.findings.maxItems, MAX_PUBLIC_FINDINGS);
@@ -108,6 +112,17 @@ test('v2 schemas separate validated defects from bounded suggestions', async () 
       PUBLIC_FAILURE_TEXT_LIMITS[property],
     );
   }
+  assert.equal(review.properties.coverageGaps.maxItems, MAX_PUBLIC_COVERAGE_GAPS);
+  const gap = review.properties.coverageGaps.items;
+  assert.deepEqual(gap.required, ['stage', 'batch', 'paths', 'error']);
+  assert.equal(gap.additionalProperties, false);
+  assert.equal(gap.properties.batch.minimum, 0);
+  assert.equal(gap.properties.paths.maxItems, MAX_PUBLIC_COVERAGE_GAP_PATHS);
+  assert.equal(gap.properties.paths.items.pattern, review.properties.findings.items.properties.path.pattern);
+  for (const property of ['stage', 'error']) {
+    assert.equal(gap.properties[property].maxLength, PUBLIC_COVERAGE_GAP_TEXT_LIMITS[property]);
+  }
+  assert.equal(gap.properties.paths.items.maxLength, PUBLIC_COVERAGE_GAP_TEXT_LIMITS.path);
   assert.equal(review.properties.omittedSuggestions.minimum, 0);
 });
 
@@ -120,6 +135,7 @@ test('final review schema locks decision and content semantics', async () => {
   assert.equal(failureContract.then.properties.suggestions.maxItems, 0);
   assert.equal(failureContract.then.properties.omittedSuggestions.const, 0);
   assert.equal(failureContract.then.properties.failures.minItems, 1);
+  assert.equal(failureContract.then.properties.coverageGaps.maxItems, 0);
   assert.equal(failureContract.else.properties.failures.maxItems, 0);
 
   assert.equal(normalContract.if.properties.decision.const, 'approve');

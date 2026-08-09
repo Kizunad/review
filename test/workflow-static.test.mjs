@@ -2,9 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import {
+  MAX_PUBLIC_COVERAGE_GAP_PATHS,
+  MAX_PUBLIC_COVERAGE_GAPS,
   MAX_PUBLIC_FAILURES,
   MAX_PUBLIC_FINDINGS,
   MAX_PUBLIC_SUGGESTIONS,
+  PUBLIC_COVERAGE_GAP_TEXT_LIMITS,
   PUBLIC_FAILURE_TEXT_LIMITS,
   PUBLIC_FINDING_TEXT_LIMITS,
 } from '../src/review-entry.mjs';
@@ -180,7 +183,7 @@ test('finalizer accepts only the layered v2 review envelope', async () => {
       new RegExp(`\\.${field} \\| type == "string" and length >= 1 and length <= ${limit}`),
     );
   };
-  assert.match(yaml, /keys \| sort == \["decision","failures","findings","omittedSuggestions","suggestions","version"\]/);
+  assert.match(yaml, /keys \| sort == \["coverageGaps","decision","failures","findings","omittedSuggestions","suggestions","version"\]/);
   assert.match(yaml, /\.version == "v2"/);
   assert.match(
     yaml,
@@ -209,7 +212,24 @@ test('finalizer accepts only the layered v2 review envelope', async () => {
     boundedString(field, PUBLIC_FAILURE_TEXT_LIMITS[field]);
   }
   assert.match(yaml, /keys \| sort == \["diagnostic","error","stage","status"\]/);
-  assert.match(yaml, /if \.decision == "infrastructure_failure"[\s\S]*?then \(\.findings \| length == 0\)[\s\S]*?elif \.decision == "approve"[\s\S]*?all\(\.findings\[\]; \.level == "minor"\)[\s\S]*?else \(\.failures \| length == 0\) and \(\.findings \| length >= 1\)/);
+  // A tolerated finder batch loss is published, so the gate has to accept it as
+  // a first-class field rather than reject the artifact for carrying it.
+  assert.match(
+    yaml,
+    new RegExp(`\\.coverageGaps \\| type == "array" and length <= ${MAX_PUBLIC_COVERAGE_GAPS}`),
+  );
+  assert.match(yaml, /keys \| sort == \["batch","error","paths","stage"\]/);
+  assert.match(yaml, /\.batch \| type == "number" and \. >= 0 and floor == \./);
+  assert.match(
+    yaml,
+    new RegExp(`\\.paths \\| type == "array" and length <= ${MAX_PUBLIC_COVERAGE_GAP_PATHS}`),
+  );
+  assert.match(
+    yaml,
+    new RegExp(`length >= 1 and length <= ${PUBLIC_COVERAGE_GAP_TEXT_LIMITS.path} and contains`),
+  );
+  boundedString('error', PUBLIC_COVERAGE_GAP_TEXT_LIMITS.error);
+  assert.match(yaml, /if \.decision == "infrastructure_failure"[\s\S]*?then \(\.findings \| length == 0\)[\s\S]*?and \(\.coverageGaps \| length == 0\)[\s\S]*?elif \.decision == "approve"[\s\S]*?all\(\.findings\[\]; \.level == "minor"\)[\s\S]*?else \(\.failures \| length == 0\) and \(\.findings \| length >= 1\)/);
   assert.doesNotMatch(yaml, /\.version == "v1"/);
 });
 

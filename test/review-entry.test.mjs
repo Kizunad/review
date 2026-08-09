@@ -8,6 +8,7 @@ import path from 'node:path';
 import { verifyManifest } from '../src/artifact-manifest.mjs';
 import {
   ABSOLUTE_DIFF_BYTES,
+  MAX_PUBLIC_COVERAGE_GAP_PATHS,
   MAX_PUBLIC_SUGGESTIONS,
   MAX_REVIEW_JSON_BYTES,
   MAX_REVIEW_MARKDOWN_BYTES,
@@ -16,6 +17,7 @@ import {
   executeReview,
   finalDecision,
   partitionValidatedFindings,
+  publicCoverageGaps,
   renderReviewMarkdown,
 } from '../src/review-entry.mjs';
 
@@ -540,6 +542,63 @@ test('keeps Markdown decision aligned with a normal JSON verdict when detail sec
   assert.ok(Buffer.byteLength(markdown) <= MAX_REVIEW_MARKDOWN_BYTES);
   assert.match(markdown, /\*\*Decision:\*\* ` request_changes `/);
   assert.doesNotMatch(markdown, /\*\*Decision:\*\* ` infrastructure_failure `/);
+});
+
+test('always publishes coverageGaps beside a computed decision', () => {
+  const gap = {
+    stage: 'find:correctness', batch: 7, paths: ['src/a.mjs'], error: 'finder data must be an array',
+  };
+  const metadata = { headOid: 'b'.repeat(40), policyVersion: 'project-review-policy.v2', policySha256 };
+
+  // A consumer that had to branch on whether the key exists could not tell a
+  // fully covered review from an engine too old to report coverage at all.
+  const covered = compactFinalReview({
+    version: 'v2', decision: 'approve', findings: [], suggestions: [], omittedSuggestions: 0, failures: [],
+  });
+  assert.equal(covered.decision, 'approve');
+  assert.deepEqual(covered.coverageGaps, []);
+  assert.doesNotMatch(renderReviewMarkdown(covered, metadata), /Coverage gaps/);
+
+  const gapped = compactFinalReview({
+    version: 'v2', decision: 'approve', findings: [], suggestions: [], omittedSuggestions: 0, failures: [],
+    coverageGaps: [gap],
+  });
+  assert.equal(gapped.decision, 'approve');
+  assert.deepEqual(gapped.coverageGaps, [gap]);
+  assert.match(renderReviewMarkdown(gapped, metadata), /\*\*Coverage gaps:\*\* ` 1 ` batch\(es\)/);
+
+  // No verdict was published, so there is no coverage for a gap to qualify.
+  const failed = compactFinalReview({
+    version: 'v2', decision: 'infrastructure_failure', findings: [], suggestions: [], omittedSuggestions: 0,
+    failures: [{ stage: 'find', status: 'infra_error', error: '2/13 failed batches exceeds budget 8%' }],
+    coverageGaps: [gap],
+  });
+  assert.equal(failed.decision, 'infrastructure_failure');
+  assert.deepEqual(failed.coverageGaps, []);
+});
+
+test('bounds published coverage gaps without ever emitting an unpublishable path', () => {
+  const [gap] = publicCoverageGaps([{
+    stage: '   ',
+    batch: -1,
+    paths: ['src/a.mjs', '/etc/passwd', '../escape.mjs', 42, `src/${'界'.repeat(500)}.mjs`],
+    error: '',
+  }]);
+  assert.equal(gap.stage, 'unknown-stage');
+  assert.equal(gap.batch, 0);
+  assert.deepEqual(gap.paths, ['src/a.mjs']);
+  assert.equal(gap.error, 'runner returned no result');
+
+  const [wide] = publicCoverageGaps([{
+    stage: 'find:correctness',
+    batch: 3,
+    paths: Array.from({ length: MAX_PUBLIC_COVERAGE_GAP_PATHS + 5 }, (_, index) => `src/f${index}.mjs`),
+    error: 'x'.repeat(4_000),
+  }]);
+  assert.equal(wide.paths.length, MAX_PUBLIC_COVERAGE_GAP_PATHS);
+  assert.equal([...wide.error].length, 1_000);
+  assert.deepEqual(publicCoverageGaps([]), []);
+  assert.throws(() => publicCoverageGaps(undefined), /coverageGaps must be an array/);
 });
 
 test('fails closed on contradictory final review decisions', () => {
