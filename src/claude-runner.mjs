@@ -63,7 +63,7 @@ function stagePrompt(request, { policy, repository, skillPath, skill }) {
         ...common,
         `Explicitly apply the strict /code-review skill. Its trusted central contents are included below from ${skillPath}:\n${skill}`,
         'You are a fresh Terra finder. Sol output and transcripts are intentionally absent. Independently inspect the read-only repository to prove concrete, reachable defects.',
-        'Only report high-conviction issues introduced or exposed by the diff. Every finding requires version v2, a repository-relative path, positive line, evidence, root cause, and a proposed level.',
+        'Only report high-conviction issues introduced or exposed by the diff. Every finding requires version v2, a repository-relative path, positive line, title, evidence, root cause, and a proposed level.',
         levelInstructions(),
         'Never emit a partial candidate. Omit any candidate whose required fields are not all concretely supported; return [] when no complete candidate qualifies.',
         'Every returned candidate must include taxonomy exactly equal to the assigned taxonomy dimension id, not its title or another dimension.',
