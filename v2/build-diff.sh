@@ -10,7 +10,8 @@ V2_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$V2_DIR/lib.sh"
 
 REPO_DIR="$RV2_ROOT/repo"
-head_oid="${RV2_HEAD_OID:?RV2_HEAD_OID required}"
+head_oid="$(rv2_head_oid)"
+[ -n "$head_oid" ] || { echo "build-diff: HEAD_OID / RV2_HEAD_OID required" >&2; exit 64; }
 [ -d "$REPO_DIR/.git" ] || { echo "build-diff: $REPO_DIR is not a git checkout" >&2; exit 1; }
 
 if ! git -C "$REPO_DIR" cat-file -e "$head_oid^{commit}" 2>/dev/null; then

@@ -10,7 +10,8 @@ V2_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$V2_DIR/lib.sh"
 
 repo="${RV2_REPOSITORY:?RV2_REPOSITORY required}"
-head_oid="${RV2_HEAD_OID:?RV2_HEAD_OID required}"
+head_oid="$(rv2_head_oid)"
+[ -n "$head_oid" ] || { echo "prepare-repo: HEAD_OID / RV2_HEAD_OID required" >&2; exit 64; }
 ROOT="${RV2_ROOT:?RV2_ROOT required}"
 TARGET="$ROOT/repo"
 mkdir -p "$ROOT"
