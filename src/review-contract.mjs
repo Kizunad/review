@@ -29,21 +29,37 @@ const MAX_REPORTED_FIELD_CHARS = 64;
 // stops a pathological value from filling the prompt. A valid 64-hex fingerprint renders
 // fully within the cap. The cap must bind the VALUE before encoding: serializing a giant
 // string and then clipping it still pays the full serialization, so describeUntrustedValue
-// clips content first and reduces objects/arrays to a structural summary.
+// clips content first and reduces objects/arrays to a structural summary. Length and
+// prefixes are measured by ITERATION over code points, never by spreading into a character
+// array - [...value] would materialize millions of single-char strings just to measure a
+// value this code exists to be safe against.
 const MAX_REPORTED_VALUE_CHARS = 96;
 
+function codePointCount(value) {
+  let count = 0;
+  const iterator = value[Symbol.iterator]();
+  while (!iterator.next().done) count += 1;
+  return count;
+}
+
 function clipChars(value, maxChars) {
-  const chars = [...value];
-  return chars.length <= maxChars ? value : chars.slice(0, maxChars).join('');
+  let clipped = '';
+  let count = 0;
+  for (const codePoint of value) {
+    if (count === maxChars) break;
+    clipped += codePoint;
+    count += 1;
+  }
+  return clipped;
 }
 
 function describeUntrustedValue(value) {
   if (value === null) return 'null';
   const kind = typeof value;
   if (kind === 'string') {
-    const chars = [...value];
-    if (chars.length <= MAX_REPORTED_VALUE_CHARS) return JSON.stringify(value);
-    return `${JSON.stringify(clipChars(value, MAX_REPORTED_VALUE_CHARS))}… (+${chars.length - MAX_REPORTED_VALUE_CHARS} more chars)`;
+    const count = codePointCount(value);
+    if (count <= MAX_REPORTED_VALUE_CHARS) return JSON.stringify(value);
+    return `${JSON.stringify(clipChars(value, MAX_REPORTED_VALUE_CHARS))}… (+${count - MAX_REPORTED_VALUE_CHARS} more chars)`;
   }
   if (kind === 'number' || kind === 'boolean') return String(value);
   if (Array.isArray(value)) return `array(${value.length})`;
@@ -60,9 +76,8 @@ function describeUntrustedValue(value) {
 
 function describeUntrustedFields(fields) {
   const shown = fields.slice(0, MAX_REPORTED_FIELDS).map((field) => {
-    const chars = [...field];
-    const clipped = chars.slice(0, MAX_REPORTED_FIELD_CHARS).join('');
-    return JSON.stringify(clipped) + (chars.length > MAX_REPORTED_FIELD_CHARS ? '(truncated)' : '');
+    const clipped = clipChars(field, MAX_REPORTED_FIELD_CHARS);
+    return JSON.stringify(clipped) + (codePointCount(field) > MAX_REPORTED_FIELD_CHARS ? '(truncated)' : '');
   });
   const omitted = fields.length - shown.length;
   return omitted > 0 ? `${shown.join(', ')}, +${omitted} more` : shown.join(', ');

@@ -159,6 +159,25 @@ test('an object with a huge key name stays a bounded structural summary', () => 
   assert.ok(message.length < 500);
 });
 
+test('an oversized multi-byte string is counted and clipped on code-point boundaries', () => {
+  const huge = '😀'.repeat(5_000);
+  const message = describeCountableVoteFailure(countableVote({ verdict: huge }), fingerprint);
+  assert.match(message, /has verdict /);
+  assert.match(message, /\+4904 more chars/, 'the count is in code points, not UTF-16 units');
+  assert.match(message, /😀{96}/u, 'the preview keeps 96 whole code points');
+  assert.doesNotMatch(message, /😀{97}/u, 'no contiguous run beyond the cap');
+  assert.ok(message.length < 1_000, 'the message stays far smaller than the 10000-unit input');
+});
+
+test('a huge unexpected key name is clipped, never reaching the text in full', () => {
+  const hugeKey = 'k'.repeat(10_000);
+  const message = describeCountableVoteFailure(countableVote({ [hugeKey]: true }), fingerprint);
+  assert.match(message, /wrong field set/);
+  assert.match(message, /unexpected "k{64}"\(truncated\)/);
+  assert.ok(!message.includes(hugeKey), 'the huge key name must never be echoed');
+  assert.ok(message.length < 500);
+});
+
 test('an undefined supplied fingerprint skips the equality check, matching the boolean gate', () => {
   const mismatched = countableVote({ candidateFingerprint: otherFingerprint });
   assert.equal(describeCountableVoteFailure(mismatched, undefined), null);
