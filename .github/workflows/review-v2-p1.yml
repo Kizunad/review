@@ -135,5 +135,19 @@ jobs:
         if: always()
         with:
           name: rv2-p1
-          path: ${{ env.HARNESS_DIR }}
+          # Enumerated, not the whole HARNESS_DIR. prepare-repo.sh puts the repo under review
+          # at $ROOT/repo, so uploading the root shipped an entire Bong checkout: the first
+          # successful trial produced a 245MB artifact that took minutes to download and would
+          # have burned storage quota within a handful of runs. Everything a human or a resume
+          # needs to reconstruct the run is in these paths; the checkout is reproducible from
+          # head_oid and belongs nowhere near an artifact.
+          path: |
+            ${{ env.HARNESS_DIR }}/output
+            ${{ env.HARNESS_DIR }}/evidence
+            ${{ env.HARNESS_DIR }}/logs
+            ${{ env.HARNESS_DIR }}/checkpoint
+            ${{ env.HARNESS_DIR }}/resume
+            ${{ env.HARNESS_DIR }}/directives
+            ${{ env.HARNESS_DIR }}/assignments
+            ${{ env.HARNESS_DIR }}/ledger.tsv
           if-no-files-found: warn
