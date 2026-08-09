@@ -161,6 +161,10 @@ test('prompts lock clean v2, independent level voting, and no partial candidates
   assert.match(source, /return \[\] when no complete candidate qualifies/);
   assert.match(source, /Independently assign the impact level/);
   assert.match(source, /Do not defer to the finder-proposed level/);
+  // The reject/split-suggestion override and the level taxonomy are adjacency-coupled:
+  // d28d045 separated them and validate began killing runs. levelInstructions() must sit
+  // immediately after the override sentence, never after the fingerprint or field-list lines.
+  assert.match(source, /neither establishes a defect level\.',\n\s*levelInstructions\(\),/);
   assert.match(source, /Every supplied fingerprint must appear exactly once/);
   assert.match(source, /The response must be a JSON object with exactly two fields: version and a clusters array/);
   assert.match(source, /version must be the string "v2"/);
