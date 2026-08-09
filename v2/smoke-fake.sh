@@ -228,6 +228,28 @@ else
   pass "G refuses before booting a session"
 fi
 
+echo "== leg H: trunk dies mid-run -> early give-up WITH the panes captured =="
+# Trial 4 (run 31302835151) is this leg's fixture. It booted cleanly for the first time, sat
+# in wait-review for the full timeout, and produced decision=infrastructure_failure with
+# "trunk produced no review.json" - and its artifact contained no logs, no evidence, no
+# ledger, because wait-review killed the session without reading anything out of it. Two
+# defects in one: the corpse was never examined, and the runner paid for the whole timeout
+# after the review was already lost.
+run_leg run-h run-h 60 FAKE_TRUNK_STOP_AFTER=1
+H="$WORK/run-h"
+assert_eq "H review decision" "$(jq -r .decision "$H/output/review.json" 2>/dev/null)" "infrastructure_failure"
+assert_file_grep "H gave up early on a dead trunk" "$H/logs/smoke.log" 'trunk pane dead for'
+if grep -q 'wait-review: timeout after' "$H/logs/smoke.log"; then
+  fail "H must not sit out the full timeout once the trunk is gone"
+else
+  pass "H did not wait out the full timeout"
+fi
+if [ -s "$H/logs/panes-trunk-died.log" ]; then
+  pass "H captured the panes before killing the session"
+else
+  fail "H must capture panes before kill-session - that output exists nowhere else"
+fi
+
 echo
 if [ "$FAILURES" -eq 0 ]; then
   echo "smoke-fake: ALL LEGS GREEN ($WORK)"
