@@ -264,11 +264,22 @@ jobs:
         run: v2/restore-checkpoint.sh
 
       - name: Boot harness session (trunk + workers + watchdog)
+        id: boot
         run: v2/boot-session.sh
 
+      # Only wait if there is something to wait FOR. The boot step reports its own failure, and
+      # this used to poll for the full RV2_REVIEW_TIMEOUT_S afterwards anyway - fifty minutes of
+      # runner time waiting on a review that was never started, on a run that already knew.
+      #
+      # A failed boot leaves the panes up (it dumps them and exits without killing the session),
+      # so the dead-trunk early give-up does not fire either: rv2_alive sees a live claude that
+      # simply never accepted its brief. Nothing was going to end this early except the clock.
+      #
+      # On skip, the wrapper still runs and still synthesizes decision=infrastructure_failure
+      # from the absent review.json - which is the correct outcome and arrives at once.
       - name: Wait for review.json
         run: v2/wait-review.sh
-        if: always()
+        if: always() && steps.boot.conclusion == 'success'
 
       - name: Wrapper validate / synthesize
         run: v2/wrapper.sh
