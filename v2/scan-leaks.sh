@@ -34,13 +34,23 @@ REPORT="$ROOT/logs/leak-scan.txt"
 mkdir -p "$ROOT/logs"
 : >"$REPORT"
 
-# Crew-produced surfaces only. The report itself is excluded or the second run
-# would find the first run's findings and report a leak about a leak report.
-TARGETS=()
-for d in evidence logs output directives assignments resume; do
-  [ -d "$ROOT/$d" ] && TARGETS+=("$ROOT/$d")
-done
-[ "${#TARGETS[@]}" -gt 0 ] || { echo "scan-leaks: nothing produced yet, nothing to scan"; exit 0; }
+# SCAN THE WHOLE STATE ROOT, minus the one thing that is not crew output.
+#
+# This was a hand-maintained list of six directories, and it had ALREADY
+# diverged from the upload set: checkpoint/ and ledger.tsv are uploaded as
+# artifacts and were not being scanned. A leak scanner whose target list is
+# narrower than what leaves the machine is the same defect as a detector that
+# excludes the class it was sent to find - and the second list is what makes it
+# happen, because nobody updates two lists.
+#
+# So there is one list, and it is an EXCLUSION: repo/ is the checkout of the
+# repository under review. It is excluded because it is not crew output and
+# because any credential shape in it belongs to the PR author's code, not to a
+# worker being careless - and because prepare-repo.sh puts a whole Bong tree
+# there, which is why the artifact upload enumerates paths in the first place.
+# Anything else written under the root is scanned by default, including
+# directories that do not exist yet.
+GREP_EXCLUDES=(--exclude-dir=repo --exclude-dir=.git --exclude="$(basename "$REPORT")")
 
 hits=0
 
@@ -60,7 +70,7 @@ for var in ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY GITHUB_TOKEN GH_TOKEN; do
   while IFS=: read -r f n _; do
     [ -n "$f" ] || continue
     report "$f" "$n" "${val:0:6}" "exact match of \$$var"
-  done < <(grep -rIn -F -e "$val" "${TARGETS[@]}" --exclude="$(basename "$REPORT")" 2>/dev/null)
+  done < <(grep -rIn -F -e "$val" "$ROOT" "${GREP_EXCLUDES[@]}" 2>/dev/null)
 done
 
 # 2. Shape: tokens whose value we do not know.
@@ -78,7 +88,7 @@ for pat in "${PATTERNS[@]}"; do
     [ -n "$f" ] || continue
     m="$(grep -oE "$pat" <<<"$rest" | head -1)"
     report "$f" "$n" "${m:0:6}" "credential-shaped string"
-  done < <(grep -rIn -E -e "$pat" "${TARGETS[@]}" --exclude="$(basename "$REPORT")" 2>/dev/null)
+  done < <(grep -rIn -E -e "$pat" "$ROOT" "${GREP_EXCLUDES[@]}" 2>/dev/null)
 done
 
 if [ "$hits" -gt 0 ]; then

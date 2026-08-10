@@ -278,6 +278,18 @@ mkdir -p "$I/evidence" "$I/logs"
 LIVE_TOKEN='tok-smoke-live-value-0123456789'
 printf '{"notes":"clean enough","stray":"sk-abcdefghij0123456789XYZ"}\n' >"$I/evidence/s-0.json"
 printf 'worker echoed %s by mistake\n' "$LIVE_TOKEN" >"$I/logs/pane.log"
+# The two surfaces a hand-maintained target list had ALREADY missed while both
+# were being uploaded as artifacts. Pinned here because the bug was not the
+# missing entries, it was maintaining a second list at all - and a second list
+# grows back.
+mkdir -p "$I/checkpoint"
+printf 'W1\ts-0\t2026-08-10T00:00Z\tsk-LEDGERaaaaaaaaaaaaaaaa1\n' >"$I/ledger.tsv"
+printf '{"completed":["s-0"],"note":"sk-CHECKPOINTbbbbbbbbbbbb2"}\n' >"$I/checkpoint/checkpoint.json"
+# ...and the reviewed repo, which must NOT be reported: a credential shape in
+# there is the PR author's code, not a worker leaking ours. Scanning it would
+# make every run with a fixture key cry wolf until nobody reads the alarm.
+mkdir -p "$I/repo/src"
+printf 'const k = "sk-INREPOccccccccccccccccc3";\n' >"$I/repo/src/x.js"
 i_out="$(ANTHROPIC_AUTH_TOKEN="$LIVE_TOKEN" RV2_ROOT="$I" HARNESS_DIR="$I" \
          "$HERE/scan-leaks.sh" "$I" 2>&1)"
 i_rc=$?
@@ -293,6 +305,20 @@ esac
 case "$i_out" in
   *"credential-shaped"*) pass "I catches an unknown-value token by shape" ;;
   *) fail "I must catch sk- by shape" ;;
+esac
+case "$i_out" in
+  *ledger.tsv*) pass "I scans ledger.tsv (uploaded, and the old list missed it)" ;;
+  *) fail "I must scan ledger.tsv - it is uploaded as an artifact" ;;
+esac
+case "$i_out" in
+  # The full path, not just "checkpoint": a bare glob would also match the word
+  # in any future message the scanner prints, and pass without scanning anything.
+  *checkpoint/checkpoint.json*) pass "I scans checkpoint/ (uploaded, and the old list missed it)" ;;
+  *) fail "I must scan checkpoint/ - it is uploaded as an artifact" ;;
+esac
+case "$i_out" in
+  *repo/src*) fail "I must NOT scan the reviewed repo - that is the author's code, not a leak" ;;
+  *) pass "I leaves the reviewed repo alone" ;;
 esac
 # The one that matters. Asserted against BOTH the report file and the stdout/
 # stderr the CI log captures - withholding it from one and not the other is the
