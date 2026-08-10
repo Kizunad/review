@@ -37,6 +37,27 @@ on:
         required: false
         type: string
         default: ''
+      # THE CREW'S MODEL, AND WHY IT IS AN INPUT RATHER THAN A CONSTANT.
+      #
+      # v2's crew had never once acted. The pane dump of run 31400471913 showed a worker
+      # printing its tool call as literal text - DeepSeek tool-call tokens arriving as content
+      # and parsed by nothing - so it narrated the intention to read its brief and went idle.
+      # Empty ledger, empty evidence, on every run since v2 existed.
+      #
+      # Measured directly against AxonHub, that model calls tools cleanly (content types
+      # thinking,tool_use), so neither the model nor its channel is at fault; something between
+      # the runner and AxonHub is destroying the calls. That is a routing question owned by the
+      # operator, and it is NOT this input's job to answer it.
+      #
+      # This input exists so the ARCHITECTURE question can be separated from the ROUTING one:
+      # point the crew at a model whose tool calls are known to survive the CI path and the run
+      # answers "can this produce a verdict end to end when the crew can act" while leaving
+      # "which model the crew should be" entirely open. Empty keeps the designed default.
+      worker_model:
+        description: 'model id for the crew panes (empty = the designed default, cc-review-lite)'
+        required: false
+        type: string
+        default: ''
       # Same shape as v1 review.yml on purpose: the relay URL is an input (not a secret) and
       # the key is `review_api_key`. P1 originally declared AXONHUB_BASE_URL and
       # PI_AXONHUB_API_KEY, which exist in NEITHER Kizunad/review nor Kizunad/Bong - so every
@@ -107,6 +128,13 @@ on:
         type: string
       trunk_model:
         description: 'model id the relay serves for the trunk (empty = relay default)'
+        required: false
+        default: ''
+        type: string
+      # Mirrored into dispatch because a trial is the ONLY place this should be reached for.
+      # Declared only under workflow_call it would be unusable by the experiment it exists for.
+      worker_model:
+        description: 'model id for the crew panes (empty = the designed default, cc-review-lite)'
         required: false
         default: ''
         type: string
@@ -426,6 +454,7 @@ jobs:
       # every claude process in the job, trunk and crew alike, and silently override the
       # per-pane --model that keeps the two roles apart.
       RV2_TRUNK_MODEL: ${{ inputs.trunk_model }}
+      RV2_WORKER_MODEL: ${{ inputs.worker_model }}
     steps:
       # The engine identity is RESOLVED IN PREFLIGHT and only consumed here.
       #
