@@ -183,3 +183,36 @@ test('record does not double-count an event returned by the post-write reload', 
   assert.ok(stored);
   assert.deepEqual(errors, []);
 });
+
+test('a skip notice that cannot be posted does not destroy the skip decision', async () => {
+  // Run 31400071113: the breaker was open until 14:50:26Z and correctly refused to spend a
+  // fifty-minute review. Posting the notice then threw an unhandled 403 "Resource not
+  // accessible by integration" - github.token is scoped to the repository the RUN lives in,
+  // and a cross-repo dispatch trial cannot comment on the reviewed repo - which turned a
+  // correct decision into a red step with an exception where the reason should have been.
+  //
+  // The comment is a courtesy; the skip is the product. This asserts the failure is caught AND
+  // that the body still reaches the log, because a swallowed failure would be the silence this
+  // job exists to prevent rather than a fix for it.
+  const logged = [];
+  const originalError = console.error;
+  console.error = (...args) => logged.push(args.join(' '));
+  try {
+    await runCircuit('skip-comment', {
+      environment: environment({ CIRCUIT_OPEN_UNTIL: '2026-07-25T01:20:00.000Z' }),
+      fetchImpl: async () => ({
+        ok: false,
+        status: 403,
+        text: async () => '{"message":"Resource not accessible by integration"}',
+      }),
+      append: async () => {},
+      now: () => '2026-07-25T00:30:00.000Z',
+    });
+  } finally {
+    console.error = originalError;
+  }
+  const all = logged.join('\n');
+  assert.match(all, /could not post the skip notice/, 'the failure must be reported, not swallowed');
+  assert.match(all, /403/, 'the status must be named so the token scope is diagnosable');
+  assert.match(all, /2026-07-25T01:20:00\.000Z/, 'the undelivered body must still reach the log');
+});

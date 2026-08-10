@@ -76,10 +76,31 @@ export async function runCircuit(command, {
 
   if (command === 'skip-comment') {
     requireEnvironment(environment, ['CIRCUIT_OPEN_UNTIL']);
-    await store.postPullRequestComment(environment.PR_NUMBER, renderSkipComment({
-      open: true,
-      openUntil: environment.CIRCUIT_OPEN_UNTIL,
-    }));
+    // THE COMMENT IS THE COURTESY. THE SKIP IS THE PRODUCT.
+    //
+    // Observed on run 31400071113: this threw an unhandled 403 "Resource not accessible by
+    // integration" and killed the step. The breaker had decided correctly - it was open until
+    // 14:50:26Z and it saved a fifty-minute run - and the only thing that went wrong was that a
+    // dispatch trial in Kizunad/review cannot comment on a pull request in Kizunad/Bong, because
+    // github.token is scoped to the repository the run lives in. Under the shipped workflow_call
+    // the token is the caller's and this succeeds.
+    //
+    // Crashing here converted a correct decision into a red step, and it is the SECOND place a
+    // cross-repo comment failure has been fatal in this workflow. So the failure is caught - but
+    // NOT swallowed: it prints the comment body it could not post, so the decision is still
+    // legible in the log, and it names the token scope so the next person is not sent looking
+    // for a breaker bug that does not exist. Silence is the failure mode this whole job exists
+    // to prevent; a loud log is not silence, an unhandled throw with no comment is.
+    const body = renderSkipComment({ open: true, openUntil: environment.CIRCUIT_OPEN_UNTIL });
+    try {
+      await store.postPullRequestComment(environment.PR_NUMBER, body);
+    } catch (error) {
+      console.error(`circuit: could not post the skip notice to PR ${environment.PR_NUMBER}: ${error.message}`);
+      console.error('circuit: the skip decision below STANDS - only the comment failed.');
+      console.error('circuit: a 403 here means github.token cannot write to the reviewed repo,');
+      console.error('circuit: which is expected for a cross-repo dispatch trial and not for workflow_call.');
+      console.error(body);
+    }
     return;
   }
 
