@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { chmod, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -13,6 +13,7 @@ import {
   runFreshClaude,
   sanitizedEnv,
 } from '../src/claude-cli.mjs';
+import { createCredentialProxy } from '../src/credential-proxy.mjs';
 
 const schema = { type: 'object', properties: { verdict: { type: 'string' } }, required: ['verdict'], additionalProperties: false };
 const executable = '/trusted/claude';
@@ -338,11 +339,12 @@ test('imposes no tool fence, because the sandbox is the boundary', () => {
 // MOVED: confinement is the mount table's now, and it is asserted directly below.
 //
 // MEASURED, NOT ASSUMED, and recorded here so nobody re-derives it later as a surprise: inside
-// the sandbox `env` reads ANTHROPIC_API_KEY, a child process reads its own /proc/self/environ
-// (the existing /dev/null mask covers bwrap's own pid, not children), and outbound DNS resolves.
-// That is inherent to a reviewer that runs code and must authenticate to a model API - no
-// arrangement of tool permissions changes it. The lever that does is the KEY: give review a
-// scoped, short-lived credential so leaking it costs one review, not an account.
+// the sandbox `env` reads ANTHROPIC_API_KEY, a child process reads the environment it inherits,
+// and outbound DNS resolves. That is inherent to a reviewer that runs code and must authenticate
+// to a model API - no arrangement of tool permissions changes it. What DOES change it is that the
+// value `env` reads is a worthless per-run nonce: when a relay base URL is configured the real key
+// never enters the sandbox at all, and a host-side loopback proxy (credential-proxy.mjs) injects
+// it only into requests toward the fixed relay origin. Leaking the nonce costs nothing.
 
 test('the sandbox, not a permission list, is what confines the reviewer', () => {
   const args = buildSandboxArgs({
@@ -357,16 +359,130 @@ test('the sandbox, not a permission list, is what confines the reviewer', () => 
   // The repository is READ-ONLY. Every capability granted above is bounded by this line.
   assert.ok(pairIndex('--ro-bind', '/host/repo') >= 0);
   assert.equal(args[args.indexOf('--ro-bind', pairIndex('--ro-bind', '/host/repo')) + 2], '/workspace');
-  assert.equal(args.includes('--bind'), false, 'nothing may be mounted writable');
+  for (const writable of ['--bind', '--bind-try', '--dev-bind', '--dev-bind-try']) {
+    assert.equal(args.includes(writable), false, `${writable} may not exist: nothing may be mounted writable`);
+  }
 
-  // The host environment does not leak in, and the process environment cannot be read back out
-  // of /proc by anything running inside.
+  // The host environment does not leak in: --clearenv rebuilds the sandbox env from --setenv
+  // only, and the /proc environ path is masked per triple so nothing inside reads it back - not
+  // even a child process, since the /dev/null binds overlay the shared mount namespace. What the
+  // masks do NOT do is hide the process environment block from env/getenv; that is why the sandbox
+  // holds a nonce (asserted in the runFreshClaude test below) rather than the real key.
   assert.ok(args.includes('--clearenv'));
-  assert.ok(pairIndex('--ro-bind', '/dev/null') >= 0);
+  for (const procPath of ['/proc/self/environ', '/proc/1/environ']) {
+    const index = args.indexOf(procPath);
+    assert.ok(index >= 2 && args[index - 2] === '--ro-bind' && args[index - 1] === '/dev/null',
+      `${procPath} must be masked by a /dev/null ro-bind triple`);
+  }
   assert.equal(args.includes('EVIL'), false);
 
   assert.ok(args.includes('--unshare-all'));
   assert.ok(args.includes('--die-with-parent'));
+});
+
+function proxyRequest(origin, path, method = 'POST', headers = {}, body) {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(`${origin}${path}`, {
+      method,
+      headers: { connection: 'close', ...headers },
+    }, (response) => {
+      let data = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { data += chunk; });
+      response.on('end', () => resolve({ status: response.statusCode, body: data }));
+    });
+    request.on('error', reject);
+    if (body !== undefined) request.write(body);
+    request.end();
+  });
+}
+
+test('credential proxy injects the real key only toward the fixed relay, never the nonce', async () => {
+  const received = [];
+  const upstream = createServer((request, response) => {
+    let body = '';
+    request.setEncoding('utf8');
+    request.on('data', (chunk) => { body += chunk; });
+    request.on('end', () => {
+      received.push({
+        path: request.url,
+        method: request.method,
+        key: request.headers['x-api-key'],
+        auth: request.headers.authorization,
+        body,
+      });
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ ok: true }));
+    });
+  });
+  await new Promise((resolve, reject) => {
+    upstream.once('error', reject);
+    upstream.listen(0, '127.0.0.1', resolve);
+  });
+  const upstreamPort = upstream.address().port;
+  const proxy = await createCredentialProxy({
+    ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
+    ANTHROPIC_API_KEY: 'real-provider-key',
+  });
+  try {
+    // The sandbox-facing credential is a worthless per-run nonce; the real key never crosses
+    // the boundary, and the base URL is the loopback proxy, not the relay.
+    assert.match(proxy.sandboxEnvironment.ANTHROPIC_API_KEY, /^claude-review-proxy-/);
+    assert.equal(proxy.sandboxEnvironment.ANTHROPIC_API_KEY.includes('real-provider-key'), false);
+    assert.match(proxy.sandboxEnvironment.ANTHROPIC_BASE_URL, /^http:\/\/127\.0\.0\.1:\d+$/);
+
+    // A bogus sandbox-side key and any leftover auth are replaced with the real key upstream.
+    const ok = await proxyRequest(proxy.origin, '/v1/messages', 'POST',
+      { 'x-api-key': 'nonce-key', authorization: 'Bearer nonce' }, '{"prompt":"x"}');
+    assert.equal(ok.status, 200);
+    assert.deepEqual(received, [{
+      path: '/v1/messages',
+      method: 'POST',
+      key: 'real-provider-key',
+      auth: undefined,
+      body: '{"prompt":"x"}',
+    }]);
+
+    // The CLI's startup probe against the bare base path is allowed through.
+    const head = await proxyRequest(proxy.origin, '/', 'HEAD');
+    assert.equal(head.status, 200);
+    assert.equal(received[1].method, 'HEAD');
+    assert.equal(received[1].path, '/');
+
+    // Paths outside the provider API surface are refused outright, and the upstream
+    // never sees them.
+    const forbidden = await proxyRequest(proxy.origin, '/v1/some-unrelated-endpoint', 'POST', {}, '{}');
+    assert.equal(forbidden.status, 403);
+    assert.equal(received.length, 2);
+
+    // No key or no base URL: no proxy at all.
+    assert.equal(await createCredentialProxy({ ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}` }), null);
+    assert.equal(await createCredentialProxy({ ANTHROPIC_API_KEY: 'k' }), null);
+    assert.equal(await createCredentialProxy({}), null);
+  } finally {
+    await proxy.close();
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
+test('runFreshClaude keeps the real API key out of the sandbox when a relay base URL is configured', async () => {
+  const realKey = 'sk-ant-real-provider-key';
+  let captured;
+  const result = await runFreshClaude(baseRun({
+    environment: { PATH: '/bin', ANTHROPIC_API_KEY: realKey, ANTHROPIC_BASE_URL: 'https://relay.example' },
+    spawn: fakeSpawn({ stdout: resultEvent({ verdict: 'PASS' }), capture: ({ args }) => { captured = args; } }),
+  }));
+  assert.equal(result.status, 'ok');
+  const setenvValue = (name) => {
+    const index = captured.findIndex((value, i) => value === '--setenv' && captured[i + 1] === name);
+    return index >= 0 ? captured[index + 2] : undefined;
+  };
+  // The sandbox points at the loopback credential proxy and authenticates with a nonce.
+  assert.match(setenvValue('ANTHROPIC_BASE_URL'), /^http:\/\/127\.0\.0\.1:\d+$/);
+  assert.match(setenvValue('ANTHROPIC_API_KEY'), /^claude-review-proxy-/);
+  // The real key and the real relay origin never appear anywhere in the sandbox argument list.
+  assert.equal(captured.includes(realKey), false);
+  assert.equal(captured.includes('https://relay.example'), false);
 });
 
 test('git works against a read-only checkout it does not own', () => {

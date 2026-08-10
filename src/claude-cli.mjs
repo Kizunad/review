@@ -1,5 +1,6 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { createCredentialProxy } from './credential-proxy.mjs';
 
 // THE SANDBOX IS THE BOUNDARY. There is no second fence inside it.
 //
@@ -16,6 +17,12 @@ import { readFile } from 'node:fs/promises';
 // by those mounts whether or not the CLI also refuses it - while the whitelist DID reliably block
 // useful work, because it had to enumerate capabilities in advance and no such list survives
 // contact with a real review.
+//
+// One thing those mounts cannot hide is the process environment block itself: `env` and getenv
+// still read it. The real relay credential therefore NEVER enters the sandbox. When a relay base
+// URL is configured, a host-side loopback proxy (credential-proxy.mjs) holds the real key and the
+// sandbox authenticates with a worthless per-run nonce; the proxy injects the real key only into
+// requests toward the fixed relay origin, restricted to the provider API surface.
 //
 // --safe-mode STAYS, and it is not a permission fence. It refuses CLAUDE.md, skills, hooks, MCP
 // servers and custom commands, which is what stops THE CODE UNDER REVIEW from reconfiguring the
@@ -385,6 +392,23 @@ export async function runFreshClaude({
   } catch (error) {
     return { status: 'infra_error', error: diagnostic(`schema load: ${error.message}`, sourceEnvironment) };
   }
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1) return { status: 'infra_error', error: 'timeoutMs must be positive' };
+  if (!Number.isInteger(killGraceMs) || killGraceMs < 0) return { status: 'infra_error', error: 'killGraceMs must be non-negative' };
+  if (!Number.isInteger(maxStdoutBytes) || maxStdoutBytes < 1 || !Number.isInteger(maxStderrBytes) || maxStderrBytes < 1) {
+    return { status: 'infra_error', error: 'output limits must be positive' };
+  }
+
+  let credentialProxy;
+  try {
+    credentialProxy = await createCredentialProxy(sourceEnvironment);
+  } catch (error) {
+    return { status: 'infra_error', error: diagnostic(`credential proxy: ${error.message}`, sourceEnvironment) };
+  }
+  // With a relay base URL configured the sandbox points at the loopback credential
+  // proxy and authenticates with a per-run nonce; the real key stays host-side.
+  const sandboxEnvironment = credentialProxy
+    ? { ...sourceEnvironment, ...credentialProxy.sandboxEnvironment }
+    : sourceEnvironment;
 
   let claudeArgs;
   let sandboxArgs;
@@ -394,16 +418,12 @@ export async function runFreshClaude({
       executable,
       ripgrepExecutable,
       repositoryRoot: cwd,
-      environment: sourceEnvironment,
+      environment: sandboxEnvironment,
       claudeArgs,
     });
   } catch (error) {
+    credentialProxy?.close().catch(() => {});
     return { status: 'infra_error', error: diagnostic(`claude arguments: ${error.message}`, sourceEnvironment) };
-  }
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1) return { status: 'infra_error', error: 'timeoutMs must be positive' };
-  if (!Number.isInteger(killGraceMs) || killGraceMs < 0) return { status: 'infra_error', error: 'killGraceMs must be non-negative' };
-  if (!Number.isInteger(maxStdoutBytes) || maxStdoutBytes < 1 || !Number.isInteger(maxStderrBytes) || maxStderrBytes < 1) {
-    return { status: 'infra_error', error: 'output limits must be positive' };
   }
 
   return new Promise((resolve) => {
@@ -415,6 +435,7 @@ export async function runFreshClaude({
         detached: process.platform !== 'win32',
       });
     } catch (error) {
+      credentialProxy?.close().catch(() => {});
       resolve({ status: 'infra_error', error: diagnostic(`spawn: ${error.message}`, sourceEnvironment) });
       return;
     }
@@ -438,6 +459,7 @@ export async function runFreshClaude({
       settled = true;
       clearTimeout(timeoutTimer);
       clearTimeout(graceTimer);
+      credentialProxy?.close().catch(() => {});
       resolve(result);
     };
     const terminate = (result) => {
