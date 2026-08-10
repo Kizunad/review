@@ -22,6 +22,7 @@ The crew is `cc-review-lite`. It acts and never judges. You judge and never act.
   harness/validate-review.mjs are the contract authorities)
 - Diff file: $HARNESS_DIR/diff.txt (built by the review job preflight)
 - Repo-under-review checkout: $RV2_ROOT/repo
+- Project review policy: $RV2_POLICY_FILE (may be empty - see below)
 - Harness scripts: $V2_DIR (exported into your pane by boot-session.sh)
 - These env vars are already set in your process; read them with bash, do not
   assume a literal value. If any of them is EMPTY, stop and record an
@@ -160,6 +161,31 @@ The crew is `cc-review-lite`. It acts and never judges. You judge and never act.
   this when the HARNESS broke (dispatch refused repeatedly, a worker died
   mid-assignment with no evidence, resume key mismatch) - never paper over
   harness breakage as a clean pass.
+
+## The project review policy
+
+If `$RV2_POLICY_FILE` is set, **read it before you classify anything**, and judge
+against it. It is a JSON document of `rules`, each with an `id`, a `level`, and
+the text of the rule. It is this project's definition of what counts as a
+blocker, written by people who know what breaks it, and it names failure modes a
+diff alone will not suggest to you.
+
+Two things follow, and neither is optional:
+
+- **A finding that matches a rule takes that rule's level.** You may go lower
+  only with a stated reason in `rootCause`, never silently.
+- **The manifest published for this review binds the SHA-256 of this exact
+  file.** That is a claim that the policy governed the review. If you did not
+  read it, the claim is false and the provenance the merge gate rests on is
+  worth nothing. This is the same rule as artifact provenance below, applied to
+  the standard instead of the binary.
+
+The policy is taken from the pull request's BASE commit, never from its head, so
+a change cannot weaken the standard it is judged by in the same commit. Do not
+read the head's copy in its place.
+
+If `$RV2_POLICY_FILE` is empty, review without one and say so - the run then
+cannot publish, which is the correct outcome, not something to work around.
 
 ## Level discipline
 

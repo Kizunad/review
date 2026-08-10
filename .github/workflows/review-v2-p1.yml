@@ -68,6 +68,16 @@ on:
         required: false
         type: string
         default: ''
+      # Same input name and meaning as v1, so a caller switching engines changes the `uses:`
+      # line and nothing else. It is not decoration here either: the trunk READS this file and
+      # judges against its rules, and the manifest binds its SHA-256. Without it the review
+      # still runs but cannot be published, because a manifest that names a policy the reviewer
+      # never saw would make the gate's strongest guarantee meaningless.
+      policy_path:
+        description: 'project review policy, read from the BASE commit (empty = review runs but cannot publish)'
+        required: false
+        type: string
+        default: ''
     secrets:
       review_api_key:
         required: true
@@ -102,6 +112,11 @@ on:
         type: string
       build_artifact_path:
         description: 'path to the built binary, relative to the repo root'
+        required: false
+        default: ''
+        type: string
+      policy_path:
+        description: 'project review policy, read from the BASE commit (empty = review runs but cannot publish)'
         required: false
         default: ''
         type: string
@@ -257,6 +272,51 @@ jobs:
             echo "the trunk must not assign probe mode; static and test only"
           fi
 
+      # The merge gate's two anchors, resolved from the API rather than trusted from the inputs.
+      #
+      # baseOid is needed for the manifest and the policy hash; headOid is asserted against the
+      # input because a PR that moved between dispatch and review must not be reviewed as though
+      # it had not. The build job already asserts the same thing about its checkout - this is the
+      # review side of the same rule.
+      #
+      # The POLICY IS READ FROM THE BASE, never from the head. It is the file that decides what
+      # counts as a blocker, so taking it from the pull request would let a change weaken the
+      # standard it is judged by in the same commit. v1 does this by checking out the base; here
+      # the repo under review is already cloned, so the base object is fetched into it and read
+      # with `git show` - one fetch instead of a second checkout, same source of truth.
+      - name: Resolve PR anchors and hash the review policy
+        id: anchors
+        env:
+          GH_TOKEN: ${{ github.token }}
+          POLICY_PATH: ${{ inputs.policy_path }}
+        run: |
+          set -euo pipefail
+          response="$(curl --fail-with-body --silent --show-error \
+            -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/repos/${{ inputs.repository }}/pulls/${{ inputs.pull_number }}")"
+          base_oid="$(jq -er '.base.sha | select(test("^[0-9a-f]{40}$"))' <<<"$response")"
+          head_oid="$(jq -er '.head.sha | select(test("^[0-9a-f]{40}$"))' <<<"$response")"
+          if [ "$head_oid" != "${{ inputs.head_oid }}" ]; then
+            echo "anchors: the pull request head is $head_oid, not ${{ inputs.head_oid }}" >&2
+            echo "anchors: it moved after this run was requested - refusing to review a stale head" >&2
+            exit 1
+          fi
+          printf 'BASE_OID=%s\n' "$base_oid" >>"$GITHUB_ENV"
+          echo "anchors: base $base_oid, head $head_oid"
+
+          if [ -z "$POLICY_PATH" ]; then
+            echo "anchors: no policy_path - the trunk reviews without a project policy and the"
+            echo "anchors: run CANNOT publish, because the manifest binds a policy hash."
+            exit 0
+          fi
+          git -C "$RV2_ROOT/repo" fetch --depth 1 origin "$base_oid"
+          policy_file="$RV2_ROOT/policy.json"
+          git -C "$RV2_ROOT/repo" show "$base_oid:$POLICY_PATH" >"$policy_file"
+          jq -e . "$policy_file" >/dev/null || { echo "anchors: policy is not valid JSON" >&2; exit 1; }
+          printf 'POLICY_SHA256=%s\n' "$(sha256sum "$policy_file" | cut -d' ' -f1)" >>"$GITHUB_ENV"
+          printf 'RV2_POLICY_FILE=%s\n' "$policy_file" >>"$GITHUB_ENV"
+          echo "anchors: policy $POLICY_PATH from base, $(jq '.rules | length' "$policy_file") rules"
+
       - name: Build PR diff
         run: v2/build-diff.sh
 
@@ -284,6 +344,37 @@ jobs:
       - name: Wrapper validate / synthesize
         run: v2/wrapper.sh
         if: always()
+
+      # The runner's verdict, converted into the three files the merge gate publishes.
+      #
+      # Skipped without a policy hash rather than published with a placeholder: the manifest
+      # binds policySha256, and a manifest that names a policy the review did not have is the
+      # kind of lie the gate exists to make impossible. "Cannot publish" is a legitimate outcome
+      # for a trial run; a manifest with an invented binding is not.
+      - name: Build the publishable artifact
+        id: publish
+        if: always() && env.POLICY_SHA256 != ''
+        env:
+          REPOSITORY: ${{ inputs.repository }}
+          PULL_NUMBER: ${{ inputs.pull_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          # The engine commit this run executed. Under workflow_call the caller's finalize job
+          # binds its own referenced_workflows SHA and will reject a mismatch, which is the
+          # check that makes the binding mean anything.
+          WORKFLOW_REF: ${{ inputs.engine_ref || github.sha }}
+        run: |
+          set -euo pipefail
+          node harness/publish-artifact.mjs "$RV2_ROOT/output/review.json" "$GITHUB_WORKSPACE/_publish"
+          ls -l "$GITHUB_WORKSPACE/_publish"
+
+      - name: Upload the publishable artifact
+        if: always() && steps.publish.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rv2-publish
+          path: _publish
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

@@ -171,6 +171,10 @@ PANE_ENV="$PANE_ENV RV2_ROOT='$ROOT' HARNESS_DIR='$ROOT'"
 PANE_ENV="$PANE_ENV RV2_REPOSITORY='${RV2_REPOSITORY:-}' PR_NUMBER='${PR_NUMBER:-}'"
 PANE_ENV="$PANE_ENV HEAD_OID='$(rv2_head_oid)' RV2_BINARY_PATH='${RV2_BINARY_PATH:-}'"
 PANE_ENV="$PANE_ENV RV2_BUILD_RUN_ID='${RV2_BUILD_RUN_ID:-}'"
+# The project review policy, taken from the BASE commit by the workflow. The trunk is required
+# to read it: the manifest binds its SHA-256, so a review that ignored it would ship a
+# provenance claim it did not earn.
+PANE_ENV="$PANE_ENV RV2_POLICY_FILE='${RV2_POLICY_FILE:-}'"
 
 if [ "${RV2_FAKE:-0}" = "1" ]; then
   tmux send-keys -t "$SESSION:$TRUNK_INDEX" \
