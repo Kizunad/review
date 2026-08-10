@@ -7,6 +7,8 @@ set -euo pipefail
 V2_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=v2/lib.sh
 . "$V2_DIR/lib.sh"
+# shellcheck source=v2/gate-probe.sh
+. "$V2_DIR/gate-probe.sh"
 
 OUT="$(rv2_output)"
 mkdir -p "$OUT"
@@ -82,6 +84,37 @@ record_pane_error() {
   printf '%s\n' "$seen" >"$ERROR_FILE"
 }
 
+# DO NOT SPEND A NUDGE ON A CLOSED DOOR.
+#
+# Run 31391454369, read line by line afterwards: the loop below worked exactly as designed and
+# lost anyway. It nudged 21 times over 40 minutes, and the pane's answer to every single one was
+# the gate - 98.0%, 95.7%, 99.3%, 99.4%, 99.4%, 99.4%, then 524 after 524. The host was pinned
+# for the whole window. Every nudge was spent against a relay that was never going to answer,
+# and MAX_NUDGES is a budget: by the time a gate like that reopens, a fixed-cadence loop has
+# nothing left to nudge WITH. The one moment a nudge could have worked is the moment it could
+# no longer afford one.
+#
+# So a nudge is now spent only when the gate is open, and time under a closed gate costs nothing
+# but time. The probe is free (unauthenticated, refused on arrival, reaches no channel) and it
+# reads the same gauge the trunk is about to hit.
+#
+# It is deliberately NOT a reason to extend the deadline. The job is capped at 60 minutes by
+# GitHub, and a step that runs past it produces no synthesized review.json and no artifact at
+# all - a worse outcome than an honest INFRA that names the gate.
+sheds=0
+gate_unknown=0
+gate_is_open() {
+  rv2_gate_probe
+  case $? in
+    0) return 0 ;;
+    1) sheds=$((sheds + 1));       return 1 ;;
+    # Cannot tell is not the same as closed. A probe that fails to reach anything must not
+    # silence the nudge loop, because an unreachable PROBE and an unreachable RELAY look
+    # identical from here and only one of them is a reason to stop trying.
+    *) gate_unknown=$((gate_unknown + 1)); return 0 ;;
+  esac
+}
+
 nudge_trunk() {
   local line
   line="review.json is still not written and you are idle. If a request failed, RETRY it -"
@@ -113,6 +146,20 @@ give_up() {
   if [ "$nudges" -gt 0 ]; then
     echo "wait-review: the trunk was nudged $nudges time(s) and still produced nothing"
   fi
+  # SAY WHETHER THE DOOR WAS SHUT, WITH A NUMBER. "trunk produced no review.json" sends the next
+  # person to read the harness; "the relay refused 47 of 52 probes at 99.4%" sends them to the
+  # relay, which is where the problem was on the run this line was written for. An INFRA that
+  # cannot distinguish "the reviewer failed" from "the reviewer was never served" is the same
+  # one-bit answer as a run conclusion, and it is the reason the merge gate keeps getting blamed
+  # for its transport.
+  if [ "$sheds" -gt 0 ] || [ "$gate_unknown" -gt 0 ]; then
+    echo "wait-review: relay gate was SHEDDING on $sheds idle poll(s)${RV2_GATE_CURRENT:+, last reading $RV2_GATE_CURRENT}; unreadable on $gate_unknown"
+    echo "wait-review: those polls did NOT spend a nudge - the budget was held for a moment the gate was open"
+    mkdir -p "$(dirname "$ERROR_FILE")"
+    printf 'gate_shed_polls=%s\ngate_unknown_polls=%s\ngate_last=%s\nnudges_spent=%s\n' \
+      "$sheds" "$gate_unknown" "${RV2_GATE_CURRENT:-none}" "$nudges" \
+      >"$(dirname "$ERROR_FILE")/gate-during-review.txt"
+  fi
   rv2_dump_panes "$2" || true
   tmux kill-session -t "$(rv2_session)" 2>/dev/null || true
   "$V2_DIR/checkpoint.sh" >/dev/null 2>&1 || true
@@ -139,7 +186,14 @@ while [ ! -f "$REVIEW" ]; do
       idle_polls=$((idle_polls + 1))
       if [ "$idle_polls" -ge "$NUDGE_AFTER_POLLS" ]; then
         record_pane_error
-        if [ "$nudges" -lt "$MAX_NUDGES" ]; then
+        if ! gate_is_open; then
+          # Say it once per shed run, not once per poll: at 20s polls a sustained shed would
+          # otherwise write a hundred identical lines over the one that matters.
+          if [ "$sheds" = 1 ] || [ $((sheds % 15)) = 0 ]; then
+            echo "wait-review: trunk idle at ${elapsed}s but the relay is SHEDDING${RV2_GATE_CURRENT:+ ($RV2_GATE_CURRENT)} - holding the nudge budget (shed polls: $sheds)"
+          fi
+          idle_polls=0
+        elif [ "$nudges" -lt "$MAX_NUDGES" ]; then
           nudge_trunk
         elif [ "$nudges" = "$MAX_NUDGES" ]; then
           # Say it once. An idle trunk that has ignored twenty nudges is not going

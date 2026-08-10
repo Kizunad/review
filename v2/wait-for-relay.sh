@@ -32,6 +32,8 @@ set -uo pipefail
 V2_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=v2/lib.sh
 . "$V2_DIR/lib.sh"
+# shellcheck source=v2/gate-probe.sh
+. "$V2_DIR/gate-probe.sh"
 
 BUDGET_S="${RV2_RELAY_WAIT_S:-600}"
 # Slow on purpose. Each probe is one more arrival-side request against the very
@@ -46,31 +48,21 @@ if [ -z "$BASE_URL" ]; then
   exit 0
 fi
 
-# 0 = past the CPU gate, 1 = shedding, 2 = no usable answer.
-probe() {
-  local body code
-  body="$(curl -s -m 10 -o /tmp/rv2-relay-probe.$$ -w '%{http_code}' \
-    -X POST "${BASE_URL%/}/v1/messages" \
-    -H 'content-type: application/json' \
-    -d '{"model":"cc-review","max_tokens":1,"messages":[{"role":"user","content":"x"}]}' 2>/dev/null)"
-  code="$body"
-  body="$(cat "/tmp/rv2-relay-probe.$$" 2>/dev/null || true)"
-  rm -f "/tmp/rv2-relay-probe.$$"
-  case "$code" in
-    000|'') return 2 ;;
-  esac
-  # Read the BODY, not the status. A 503 can mean many things and only one of
-  # them is worth waiting for; treating every 503 as the CPU gate would make the
-  # harness wait ten minutes on an outage it cannot wait out.
-  if [ "$code" = 503 ] && grep -q 'cpu overloaded' <<<"$body"; then
-    CURRENT="$(grep -oE 'current: [0-9.]+%' <<<"$body" | head -1)"
-    return 1
-  fi
-  return 0
-}
+# The probe itself lives in v2/gate-probe.sh, shared with wait-review.sh and covered by
+# v2/test-gate-probe.sh. Two callers asking "is the gate open" with two separately-written
+# probes is how they end up disagreeing: this one decides whether to BOOT, the other decides
+# whether a nudge is worth spending, and a difference in their answers would look like the
+# gate changing rather than like the harness asking two different questions.
+#
+# One behaviour changed in the move and it is deliberate: an edge block or an unparseable body
+# is now rc 2 (no usable answer) rather than rc 0. This script already treats rc 2 as "boot
+# anyway" - the same outcome - but it no longer records a non-observation as a passing gate,
+# which is the mistake that had a sibling tool reporting "the gate never refused" while the
+# host sat at 96%.
+probe() { rv2_gate_probe; }
 
 waited=0
-CURRENT=''
+CURRENT=""   # kept for the messages below; rv2_gate_probe publishes RV2_GATE_CURRENT
 while :; do
   probe
   case $? in
@@ -84,12 +76,12 @@ while :; do
       ;;
     1)
       if [ "$waited" -ge "$BUDGET_S" ]; then
-        echo "wait-for-relay: still shedding after ${waited}s (${CURRENT:-cpu over threshold})"
+        echo "wait-for-relay: still shedding after ${waited}s (${RV2_GATE_CURRENT:-cpu over threshold})"
         echo "wait-for-relay: booting anyway - the nudge loop can recover a review that starts"
         echo "wait-for-relay: during a shed, and giving up here throws away a run that may succeed."
         break
       fi
-      echo "wait-for-relay: relay is shedding (${CURRENT:-cpu over threshold}) - waited ${waited}s of ${BUDGET_S}s"
+      echo "wait-for-relay: relay is shedding (${RV2_GATE_CURRENT:-cpu over threshold}) - waited ${waited}s of ${BUDGET_S}s"
       ;;
     *)
       # Unreachable is not shedding. Waiting for a host that is not answering at
