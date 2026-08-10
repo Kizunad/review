@@ -84,6 +84,31 @@ rv2_require_relay() {
 rv2_trunk_model()  { printf '%s' "${RV2_TRUNK_MODEL:-cc-review}"; }
 rv2_worker_model() { printf '%s' "${RV2_WORKER_MODEL:-cc-review-lite}"; }
 
+# Probe mode is available only when THIS pipeline built a binary from the reviewed head.
+#
+# Both variables are required together and are set by one workflow step, so a half-set pair
+# means the plumbing broke rather than that probe is off. Reported as such instead of being
+# quietly downgraded to "unavailable": "we chose not to build" and "the build path is broken"
+# must not look identical to the trunk, because only one of them is a reason to review a
+# server change without ever running it.
+rv2_binary_path()  { printf '%s' "${RV2_BINARY_PATH:-}"; }
+rv2_build_run_id() { printf '%s' "${RV2_BUILD_RUN_ID:-}"; }
+
+rv2_probe_available() {
+  local p="${RV2_BINARY_PATH:-}" r="${RV2_BUILD_RUN_ID:-}"
+  if [ -z "$p" ] && [ -z "$r" ]; then return 1; fi          # not built - the normal case
+  if [ -z "$p" ] || [ -z "$r" ]; then
+    echo "rv2: RV2_BINARY_PATH and RV2_BUILD_RUN_ID must be set together (path='$p' runId='$r')" >&2
+    echo "rv2: half-set means the build plumbing is broken, not that probe is disabled" >&2
+    return 2
+  fi
+  [ -x "$p" ] || {
+    echo "rv2: RV2_BINARY_PATH=$p is not an executable file - probe cannot run" >&2
+    return 2
+  }
+  return 0
+}
+
 # Dump every pane into the run's logs (and stderr) so a boot failure carries the reason.
 #
 # Panes are the only place the trunk's and workers' own stderr exists; when boot gave up it

@@ -55,10 +55,24 @@ The crew is `cc-review-lite`. It acts and never judges. You judge and never act.
    - `test` - the crew writes a test that FAILS if the target regresses and
      passes on this head, then runs it. Correct for behavior changes in
      anything runnable.
-   - `probe` - the crew builds the server from this head, stands up a minimal
-     but functionally complete deployment, and drives it as a black-box client.
-     Correct for protocol, wire-format, and end-to-end behavior. The binary
-     MUST come from this pipeline's build of this head (see below).
+   - `probe` - the crew stands up a minimal but functionally complete
+     deployment of the binary THIS pipeline built from THIS head, and drives it
+     as a black-box client. Correct for protocol, wire-format, and end-to-end
+     behavior.
+
+     **Check availability before you assign it**: run
+     `. $V2_DIR/lib.sh && rv2_probe_available; echo $?`
+     - `0` - available. `$RV2_BINARY_PATH` is the binary and
+       `$RV2_BUILD_RUN_ID` is what the worker records as
+       `binaryProvenance.buildRunId`. Put both in the directive.
+     - `1` - not built for this run (the caller supplied no build command).
+       Do not assign probe. Use test or static, and say in the finding's
+       rootCause when a claim could only have been settled by probing - an
+       unprobed protocol change is a smaller claim, not a clean one.
+     - `2` - the build plumbing is BROKEN, which is not the same as off. Do not
+       silently fall back: record a failure. A server change reviewed without
+       ever running it, because a download step failed quietly, is the exact
+       shape of a review that looks complete and is not.
    - `skip` - genuinely nothing to establish (lockfiles, vendored trees,
      generated output). Write the skip verdict yourself; no worker, no evidence
      file. Be honest about this one: skipping because a shard looks tedious is

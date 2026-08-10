@@ -48,6 +48,28 @@ on:
         required: false
         type: string
         default: ''
+      # PROBE MODE. The build JOB lives here, in the reusable workflow, and only the build
+      # COMMAND comes from the caller. That split is forced by the provenance rule, it is not
+      # a preference: the rule says the binary under test may only be this pipeline's build of
+      # the reviewed head, and an engine that receives a finished artifact from its caller
+      # cannot verify that - it can only trust it, which is the thing the rule forbids. So the
+      # engine checks the head out itself, runs the caller's command in a job it owns, and
+      # stamps buildRunId with its OWN run id. The caller keeps the part that is genuinely
+      # caller-specific (cargo vs gradle vs npm) and none of the part that is a trust boundary.
+      #
+      # Leave build_command empty and probe mode is simply unavailable: the harness reports it,
+      # the trunk does not assign it, and a worker told to probe anyway returns verdict=blocked
+      # rather than inventing a binary.
+      build_command:
+        description: 'shell command that builds the binary under test, run at the reviewed head'
+        required: false
+        type: string
+        default: ''
+      build_artifact_path:
+        description: 'path to the built binary, relative to the repo root'
+        required: false
+        type: string
+        default: ''
     secrets:
       review_api_key:
         required: true
@@ -73,7 +95,61 @@ on:
         type: string
 
 jobs:
+  # The binary under probe is built HERE, from the reviewed head, in a job this workflow owns.
+  # Skipped entirely when the caller supplies no build_command, which is the normal case for a
+  # scripts-only PR - probe is then unavailable rather than faked.
+  build-server:
+    if: inputs.build_command != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout the reviewed head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.head_oid }}
+          persist-credentials: false
+
+      # The head is verified HERE rather than trusted from the input. checkout resolves a ref;
+      # this asserts that what landed on disk is the exact commit under review, so a binary can
+      # never be built from a head that moved between dispatch and build.
+      - name: Assert the checkout is at the reviewed head
+        run: |
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "${{ inputs.head_oid }}" ]; then
+            echo "build-server: checkout is at $actual, expected ${{ inputs.head_oid }}" >&2
+            echo "build-server: refusing to build - the binary must be the reviewed commit" >&2
+            exit 1
+          fi
+          echo "build-server: at ${{ inputs.head_oid }}"
+
+      - name: Build
+        run: ${{ inputs.build_command }}
+
+      - name: Assert the binary exists
+        run: |
+          [ -f "${{ inputs.build_artifact_path }}" ] || {
+            echo "build-server: build_command succeeded but ${{ inputs.build_artifact_path }} is missing" >&2
+            echo "build-server: a probe with no binary is verdict=blocked, not a silent static review" >&2
+            exit 1
+          }
+          ls -l "${{ inputs.build_artifact_path }}"
+
+      - name: Upload the binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rv2-binary
+          path: ${{ inputs.build_artifact_path }}
+          if-no-files-found: error
+          retention-days: 1
+
   review:
+    needs: [build-server]
+    # `needs` on a skipped job would skip this one too, so the review must run when the build
+    # was SKIPPED (no build_command) or SUCCEEDED, and only be blocked when it actually failed.
+    # Without this the common case - a scripts-only PR with no build - would silently review
+    # nothing at all.
+    if: always() && needs.build-server.result != 'failure' && needs.build-server.result != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -123,6 +199,34 @@ jobs:
 
       - name: Prepare repo under review
         run: v2/prepare-repo.sh
+
+      # Probe mode's binary. Downloaded into a path the crew can reach, and stamped with the
+      # build's provenance. buildRunId is THIS run's id because this run is what built it -
+      # that is the whole point of the build job living here.
+      - name: Fetch the binary under probe
+        if: needs.build-server.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: rv2-binary
+          path: ${{ env.HARNESS_DIR }}/bin
+
+      - name: Publish probe availability
+        run: |
+          if [ "${{ needs.build-server.result }}" = "success" ]; then
+            binary="$HARNESS_DIR/bin/$(basename '${{ inputs.build_artifact_path }}')"
+            chmod +x "$binary" 2>/dev/null || true
+            {
+              printf 'RV2_BINARY_PATH=%s\n' "$binary"
+              printf 'RV2_BUILD_RUN_ID=%s\n' "${{ github.run_id }}"
+            } >>"$GITHUB_ENV"
+            echo "probe available: $binary (buildRunId ${{ github.run_id }})"
+          else
+            # Said out loud rather than left as an unset variable. "probe is unavailable" and
+            # "someone forgot to plumb the path" look identical to a trunk reading an empty
+            # env var, and only one of them is a reason to skip probe.
+            echo "probe UNAVAILABLE: build-server result=${{ needs.build-server.result }}"
+            echo "the trunk must not assign probe mode; static and test only"
+          fi
 
       - name: Build PR diff
         run: v2/build-diff.sh
