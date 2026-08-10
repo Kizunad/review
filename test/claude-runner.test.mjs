@@ -315,14 +315,18 @@ test('consolidate never feeds malformed unknown-member fingerprints into the rep
   assert.doesNotMatch(calls[2].prompt, /Previous attempt referenced unknown fingerprint/);
 });
 
-test('schema repair: two failing outputs then a valid one recovers with field-level feedback', async () => {
+test('schema repair: two failing outputs then a valid one recovers with condition-level feedback', async () => {
   const driftedVote = { version: 'v2', vote_verdict: 'confirm' };
-  const firstError = 'schema validation failed: validate output must be a countable v2 vote for the supplied cluster fingerprint; got an object with top-level fields: version, vote_verdict';
-  const secondError = 'schema validation failed: validate output must be a countable v2 vote for the supplied cluster fingerprint; got an object with top-level fields: reachable, version, vote_verdict';
+  const firstError = 'schema validation failed: validate output is not a countable v2 vote: has the wrong field set: expected exactly candidateFingerprint, evidence, level, reachable, reason, verdict, version; missing candidateFingerprint, evidence, level, reachable, reason, verdict; unexpected "vote_verdict"; observed verdict=undefined, reachable=undefined, level=undefined';
+  const couplingVote = {
+    version: 'v2', candidateFingerprint: fingerprint, verdict: 'confirm', reachable: false,
+    level: 'major', evidence: 'independent evidence', reason: 'independent reason',
+  };
+  const secondError = 'schema validation failed: validate output is not a countable v2 vote: violates the reachable/level coupling: confirm requires reachable=true; observed verdict="confirm", reachable=false, level="major"';
   const { result, calls } = await runStubbedVote({
     responses: [
       { status: 'schema_error', error: firstError, rawOutput: driftedVote },
-      { status: 'schema_error', error: secondError, rawOutput: { ...driftedVote, reachable: true } },
+      { status: 'schema_error', error: secondError, rawOutput: couplingVote },
       { status: 'ok', data: { verdict: 'confirm' } },
     ],
   });
@@ -332,13 +336,47 @@ test('schema repair: two failing outputs then a valid one recovers with field-le
   assert.doesNotMatch(calls[0].prompt, /Repair attempt nonce:/);
   assert.ok(calls[1].prompt.startsWith(calls[0].prompt), 'feedback must append so the prompt prefix stays cache-hot');
   assert.ok(calls[2].prompt.startsWith(calls[1].prompt));
-  assert.match(calls[1].prompt, /Your previous output failed schema validation: .*top-level fields: version, vote_verdict/);
+  assert.match(calls[1].prompt, /Your previous output failed schema validation: .*unexpected "vote_verdict"/);
   assert.match(calls[1].prompt, /Your previous output was:\n\{"version":"v2","vote_verdict":"confirm"\}/);
   assert.match(calls[1].prompt, /Return ONLY the corrected JSON value that strictly matches the required schema\./);
-  assert.match(calls[2].prompt, /top-level fields: reachable, version, vote_verdict/);
+  assert.match(calls[2].prompt, /violates the reachable\/level coupling: confirm requires reachable=true/);
   const nonces = [...calls[2].prompt.matchAll(/Repair attempt nonce: ([0-9a-f-]{36})\./g)];
   assert.equal(nonces.length, 2);
   assert.notEqual(nonces[0][1], nonces[1][1]);
+});
+
+test('validate schema error names the broken rule, not the field shape', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'claude-runner-vote-'));
+  const callerRoot = path.join(root, 'repository');
+  await mkdir(callerRoot);
+  const runner = createClaudeRunner({
+    centralRoot,
+    callerRoot,
+    policy: { version: 'project-review-policy.v2' },
+    repository: 'org/repo',
+    environment: { PATH: process.env.PATH },
+    executable: '/trusted/claude',
+    ripgrepExecutable: '/trusted/rg',
+    transport: async ({ validate }) => {
+      try {
+        // A field-perfect reject vote with a real level: this used to be reported as a
+        // field-shape error, which is exactly what made the retry loop blind.
+        validate({ version: 'v2', candidateFingerprint: fingerprint, verdict: 'reject', reachable: false, level: 'minor', evidence: 'e', reason: 'r' });
+        return { status: 'ok', data: {} };
+      } catch (error) {
+        return { status: 'schema_error', error: `schema validation failed: ${error.message}` };
+      }
+    },
+  });
+  const result = await runner.run({
+    stage: 'validate', model: 'terra',
+    candidate: { fingerprint, validationCandidates: [{ fingerprint }] },
+    relatedDiff: 'diff --git a/src/a.mjs b/src/a.mjs\n',
+  });
+  assert.equal(result.status, 'schema_error');
+  assert.match(result.error, /reject and split require reachable=false and level "suggestion"/);
+  assert.match(result.error, /observed verdict="reject", reachable=false, level="minor"/);
+  assert.doesNotMatch(result.error, /wrong field set|top-level fields/);
 });
 
 test('schema repair: three failing outputs exhaust the budget and keep the last validation detail', async () => {
