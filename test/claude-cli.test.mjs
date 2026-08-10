@@ -723,6 +723,98 @@ test('structural error status is disclosable to reviewing callers while the exce
   assert.doesNotMatch(twoResults.diagnostic, /apiErrorStatus|terminalReason/);
 });
 
+test('the host cpu gate message surfaces as a structured apiErrorMessage for classification', async () => {
+  const stdout = resultEvent(undefined, {
+    is_error: true,
+    api_error_status: 503,
+    terminal_reason: 'api_error',
+    result: JSON.stringify({
+      type: 'error',
+      error: { type: 'overloaded_error', message: 'system cpu overloaded (current: 96.5%, threshold: 90%)' },
+    }),
+    structured_output: undefined,
+  });
+  const result = await runFreshClaude(baseRun({
+    environment: { ANTHROPIC_API_KEY: 'cpu-gate-secret-value' },
+    spawn: fakeSpawn({ code: 1, stdout }),
+  }));
+  assert.equal(result.status, 'infra_error');
+  assert.equal(result.apiErrorStatus, 503);
+  assert.equal(result.apiErrorMessage, 'system cpu overloaded (current: 96.5%, threshold: 90%)');
+  assert.equal(JSON.stringify(result).includes('cpu-gate-secret-value'), false);
+});
+
+test('a non-JSON error body stays private - no apiErrorMessage for free text', async () => {
+  const stdout = resultEvent(undefined, {
+    is_error: true,
+    api_error_status: 503,
+    terminal_reason: 'api_error',
+    result: 'API Error: 503 server_error PR_DIFF_MARKER',
+    structured_output: undefined,
+  });
+  const result = await runFreshClaude(baseRun({
+    environment: { ANTHROPIC_API_KEY: 'free-text-secret-value' },
+    spawn: fakeSpawn({ code: 1, stdout }),
+  }));
+  assert.equal(result.status, 'infra_error');
+  assert.equal(result.apiErrorStatus, 503);
+  assert.equal(result.apiErrorMessage, undefined, 'free text must not ride as a structured field');
+  assert.equal(JSON.stringify(result).includes('PR_DIFF_MARKER'), false);
+  assert.equal(JSON.stringify(result).includes('free-text-secret-value'), false);
+});
+
+test('a structured body without a message field yields the status but no apiErrorMessage', async () => {
+  const stdout = resultEvent(undefined, {
+    is_error: true,
+    api_error_status: 503,
+    terminal_reason: 'api_error',
+    result: JSON.stringify({ type: 'error', error: { type: 'overloaded_error' } }),
+    structured_output: undefined,
+  });
+  const result = await runFreshClaude(baseRun({ spawn: fakeSpawn({ code: 1, stdout }) }));
+  assert.equal(result.status, 'infra_error');
+  assert.equal(result.apiErrorStatus, 503);
+  assert.equal(result.apiErrorMessage, undefined);
+});
+
+test('a second result event withholds the envelope - the status could belong to either', async () => {
+  const stdout = resultEvent(undefined, {
+    is_error: true,
+    api_error_status: 503,
+    terminal_reason: 'api_error',
+    result: JSON.stringify({
+      type: 'error', error: { type: 'overloaded_error', message: 'system cpu overloaded (current: 96.5%, threshold: 90%)' },
+    }),
+    structured_output: undefined,
+  }) + resultEvent(undefined, {
+    is_error: true, api_error_status: 500, terminal_reason: 'api_error', structured_output: undefined,
+  });
+  const result = await runFreshClaude(baseRun({ spawn: fakeSpawn({ code: 1, stdout }) }));
+  assert.equal(result.status, 'infra_error');
+  assert.equal(result.apiErrorStatus, undefined);
+  assert.equal(result.apiErrorMessage, undefined, 'ambiguous result events must not read the restricted field');
+});
+
+test('a CLI-level error with JSON text stays private - only terminal_reason api_error confirms a gateway envelope', async () => {
+  const stdout = resultEvent(undefined, {
+    is_error: true,
+    api_error_status: 503,
+    terminal_reason: 'error',
+    result: JSON.stringify({
+      type: 'error', error: { type: 'overloaded_error', message: 'system cpu overloaded (current: 96.5%, threshold: 90%)' },
+    }),
+    structured_output: undefined,
+  });
+  const result = await runFreshClaude(baseRun({
+    environment: { ANTHROPIC_API_KEY: 'cli-error-secret-value' },
+    spawn: fakeSpawn({ code: 1, stdout }),
+  }));
+  assert.equal(result.status, 'infra_error');
+  assert.equal(result.apiErrorStatus, undefined);
+  assert.equal(result.apiErrorMessage, undefined);
+  assert.equal(JSON.stringify(result).includes('cli-error-secret-value'), false);
+});
+
 test('redacts quoted credential forms while keeping diagnostics valid JSON', async () => {
   const markers = [
     'JSON_TOKEN_LEAK_9f34c',

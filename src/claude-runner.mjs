@@ -241,6 +241,13 @@ function schemaFeedbackPrompt(prompt, error, rawOutput) {
 const STAGE_ATTEMPTS = 3;
 const SCHEMA_RETRIES = 2;
 const STAGE_BACKOFF_MS = [20_000, 40_000];
+// The gateway's own phrase for the New API host-CPU gate. Matching on the message
+// body (not on the 503 status) keeps this policy from touching genuine upstream
+// outages, which still run the normal retry schedule.
+const CPU_OVERLOAD_MARKER = /cpu overload/i;
+function isCpuOverloadGate(result) {
+  return typeof result?.apiErrorMessage === 'string' && CPU_OVERLOAD_MARKER.test(result.apiErrorMessage);
+}
 
 export function createClaudeRunner({
   centralRoot,
@@ -358,6 +365,16 @@ export function createClaudeRunner({
           continue;
         }
         if (result.status !== 'infra_error') return finish(result);
+        // The New API host-CPU gate rejects in ~10ms and closes on a timescale of
+        // minutes to tens of minutes (observed 30+ min). The stage's 20s/40s schedule
+        // is the worst possible shape against it: three fast bursts the gate cannot
+        // recover between, given up long before it would close - and the gate is not
+        // driven by our concurrency, so waiting in-run helps nobody while burning
+        // requests at an overloaded host. Fail fast with a nameable reason; the
+        // run-level retry owns the waiting.
+        if (isCpuOverloadGate(result)) {
+          return { ...result, error: `cpu overload gate rejected the call (${result.apiErrorMessage}); failing fast instead of retrying` };
+        }
         infraAttempts += 1;
         if (infraAttempts >= stageAttempts) {
           // Annotate so a verdict comment shows the failure survived every retry -
