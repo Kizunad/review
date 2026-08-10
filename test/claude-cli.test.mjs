@@ -777,6 +777,44 @@ test('a structured body without a message field yields the status but no apiErro
   assert.equal(result.apiErrorMessage, undefined);
 });
 
+test('a second result event withholds the envelope - the status could belong to either', async () => {
+  const stdout = resultEvent(undefined, {
+    is_error: true,
+    api_error_status: 503,
+    terminal_reason: 'api_error',
+    result: JSON.stringify({
+      type: 'error', error: { type: 'overloaded_error', message: 'system cpu overloaded (current: 96.5%, threshold: 90%)' },
+    }),
+    structured_output: undefined,
+  }) + resultEvent(undefined, {
+    is_error: true, api_error_status: 500, terminal_reason: 'api_error', structured_output: undefined,
+  });
+  const result = await runFreshClaude(baseRun({ spawn: fakeSpawn({ code: 1, stdout }) }));
+  assert.equal(result.status, 'infra_error');
+  assert.equal(result.apiErrorStatus, undefined);
+  assert.equal(result.apiErrorMessage, undefined, 'ambiguous result events must not read the restricted field');
+});
+
+test('a CLI-level error with JSON text stays private - only terminal_reason api_error confirms a gateway envelope', async () => {
+  const stdout = resultEvent(undefined, {
+    is_error: true,
+    api_error_status: 503,
+    terminal_reason: 'error',
+    result: JSON.stringify({
+      type: 'error', error: { type: 'overloaded_error', message: 'system cpu overloaded (current: 96.5%, threshold: 90%)' },
+    }),
+    structured_output: undefined,
+  });
+  const result = await runFreshClaude(baseRun({
+    environment: { ANTHROPIC_API_KEY: 'cli-error-secret-value' },
+    spawn: fakeSpawn({ code: 1, stdout }),
+  }));
+  assert.equal(result.status, 'infra_error');
+  assert.equal(result.apiErrorStatus, undefined);
+  assert.equal(result.apiErrorMessage, undefined);
+  assert.equal(JSON.stringify(result).includes('cli-error-secret-value'), false);
+});
+
 test('redacts quoted credential forms while keeping diagnostics valid JSON', async () => {
   const markers = [
     'JSON_TOKEN_LEAK_9f34c',

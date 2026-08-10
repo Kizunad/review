@@ -304,6 +304,7 @@ function streamDiagnostic(stdout, stderr, environment, {
 // gateway-controlled); any other shape returns nothing, so free model text stays off
 // the wire exactly as it does in streamDiagnostic.
 function extractApiError(stdout, environment) {
+  const resultEvents = [];
   for (const line of String(stdout ?? '').split('\n')) {
     let event;
     try {
@@ -311,24 +312,36 @@ function extractApiError(stdout, environment) {
     } catch {
       continue;
     }
-    if (event?.type !== 'result' || event?.is_error !== true) continue;
-    if (!Number.isInteger(event.api_error_status)) continue;
-    let body;
-    try {
-      body = JSON.parse(String(event.result ?? ''));
-    } catch {
-      return { apiErrorStatus: event.api_error_status };
-    }
-    const message = typeof body?.message === 'string' ? body.message
-      : typeof body?.error?.message === 'string' ? body.error.message
-      : undefined;
-    if (typeof message !== 'string' || message.length === 0) return { apiErrorStatus: event.api_error_status };
-    return {
-      apiErrorStatus: event.api_error_status,
-      apiErrorMessage: diagnostic(message, environment, 240),
-    };
+    if (event?.type === 'result') resultEvents.push(event);
   }
-  return {};
+  // The event.result field is the restricted disclosure tier - free text that CAN echo the
+  // reviewed diff - so reading it is gated on the same evidence streamDiagnostic requires:
+  // exactly one result event (a second makes it ambiguous which one the status belongs to),
+  // an error, a terminal_reason of api_error (a CLI-level error carries no gateway envelope),
+  // and a bounded HTTP status. Anything else reads nothing.
+  if (resultEvents.length !== 1) return {};
+  const event = resultEvents[0];
+  if (event?.is_error !== true
+    || event.terminal_reason !== 'api_error'
+    || !Number.isInteger(event.api_error_status)
+    || event.api_error_status < 100
+    || event.api_error_status > 599) {
+    return {};
+  }
+  let body;
+  try {
+    body = JSON.parse(String(event.result ?? ''));
+  } catch {
+    return { apiErrorStatus: event.api_error_status };
+  }
+  const message = typeof body?.message === 'string' ? body.message
+    : typeof body?.error?.message === 'string' ? body.error.message
+    : undefined;
+  if (typeof message !== 'string' || message.length === 0) return { apiErrorStatus: event.api_error_status };
+  return {
+    apiErrorStatus: event.api_error_status,
+    apiErrorMessage: diagnostic(message, environment, 240),
+  };
 }
 
 function signalChild(child, signal) {
