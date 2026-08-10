@@ -149,10 +149,15 @@ export function buildClaudeArgs({ model, prompt, jsonSchema }) {
   return [
     '--safe-mode', '--disable-slash-commands', '--no-chrome',
     '--strict-mcp-config', '--mcp-config', EMPTY_MCP_CONFIG,
-    // --json-schema is gone; everything else on this line is deliberately unchanged.
-    // Dropping -p and replacing the tool whitelist are separate arguments being made in
-    // #40, and mixing them in would slow down a fix that nineteen tasks are waiting on.
-    '-p', '--no-session-persistence', '--model', model,
+    // No -p, and no --json-schema. Replacing the tool whitelist is a separate argument
+    // being made in #40 and is deliberately left alone here.
+    //
+    // -p was carried over from when this was a one-shot extractor. It is not the headless
+    // entry point: with stdin piped and a streaming output format the CLI runs
+    // non-interactively and exits 0 without it. Treat the reviewer as a worker, not a
+    // question asked once. Measured in THIS configuration - the earlier measurement was
+    // taken with --dangerously-skip-permissions, which this branch does not have.
+    '--no-session-persistence', '--model', model,
     '--effort', 'max', '--tools', READ_ONLY_TOOLS, '--allowedTools', READ_ONLY_PERMISSIONS,
     '--permission-mode', 'dontAsk', '--output-format', 'stream-json', '--verbose',
   ];

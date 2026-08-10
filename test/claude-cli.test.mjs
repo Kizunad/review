@@ -255,9 +255,9 @@ test('builds the fixed fresh Claude command - neither prompt nor schema rides in
   assert.deepEqual(args, [
     '--safe-mode', '--disable-slash-commands', '--no-chrome',
     '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-    // Only the trailing --json-schema pair is gone. -p and the tool whitelist are
-    // untouched on purpose - changing them is #40's argument, not this fix's.
-    '-p', '--no-session-persistence', '--model', 'terra', '--effort', 'max',
+    // -p and the trailing --json-schema pair are both gone. The tool whitelist is
+    // untouched on purpose - changing that is #40's argument, not this fix's.
+    '--no-session-persistence', '--model', 'terra', '--effort', 'max',
     '--tools', 'Read,Glob,Grep', '--allowedTools', 'Read(//workspace/**),Glob(//workspace/**),Grep(//workspace/**)', '--permission-mode', 'dontAsk',
     '--output-format', 'stream-json', '--verbose',
   ]);
