@@ -37,6 +37,16 @@ function exactFields(value, fields) {
   return actual.length === fields.length && actual.every((field, index) => field === fields[index]);
 }
 
+// 单位是码点不是字节,这是刻意的:finalize 的 jq 门槛用 `length` 量这些字段,而 jq 的
+// 字符串 length 数的就是码点(`jq -n '"<astral char>" | length'` == 1)。改成字节会让
+// 本地校验比真正的门槛更严,把门槛本会放行的中文判词拦在这里。
+//
+// 字节上限是「整个文件」的属性,单字段校验表达不了:write-finalize 用 `wc -c` 卡
+// review.json ≤ 1048576、review.md ≤ 65536。实测过一次:本校验器判为 ok 的 128 条
+// finding(纯 ASCII,每条 6000 码点 evidence + 2000 rootCause + 180 title)会被
+// publish-artifact 序列化成 1132849 字节,超限被拒 —— 而产物已下载成功,
+// missing-artifact 兜底不触发,PR 上就是一个红叉零评论。
+// 那道边界因此在 harness/publish-artifact.mjs 的 fitPublishedReview 里守,不在这里。
 function boundedText(value, maxLength, minLength = 1) {
   return typeof value === 'string' && [...value].length >= minLength && [...value].length <= maxLength;
 }

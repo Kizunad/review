@@ -46,6 +46,14 @@ rv2_max_active() { printf '%s' "${RV2_MAX_ACTIVE:-2}"; }
 # Under the state root on purpose: scan-leaks.sh sweeps the root (minus repo/),
 # so a credential a crew member echoes into a transcript is caught by the same
 # pass that sweeps evidence.
+#
+# DO NOT ADD THIS DIRECTORY TO THE SCANNER'S EXCLUSION LIST. It holds Claude
+# Code's session transcripts, which quote the files the crew read, so a PR that
+# merely contains an SDK fixture key made the scanner alarm on every single run
+# until the alarm meant nothing. The fix is NOT to stop scanning transcripts -
+# they are precisely where a leaked credential lands - it is the provenance rule
+# in scan-leaks.sh: a shape that is also present in repo/ is the pull request's
+# own text and is recorded quietly; anything else is loud wherever it was found.
 rv2_pane_home() { printf '%s' "${RV2_PANE_HOME:-$(rv2_root)/home}"; }
 
 # Node identity env, with RV2_* fallbacks so both spellings work.
@@ -134,11 +142,89 @@ rv2_probe_available() {
   return 0
 }
 
+# THE CREDENTIAL VOCABULARY - ONE list, because there were nearly two.
+#
+# scan-leaks.sh DETECTS with these names and patterns; rv2_redact_stream below
+# REDACTS with them. When the list lived only in scan-leaks.sh, the redactor did
+# not exist at all and rv2_dump_panes copied pane text to stderr unfiltered - so
+# the scanner swept the state root before a 7-day artifact upload while the same
+# bytes went into the CI log, which GitHub keeps for 90 DAYS. scan-leaks.sh's own
+# header says the thing it must never do is move a secret somewhere with longer
+# retention than the artifact it was protecting; the pane dump was doing exactly
+# that, out of the other side of the harness.
+#
+# A second copy of this list is how that comes back, so consumers call these.
+rv2_credential_env_names() {
+  printf '%s\n' ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY GITHUB_TOKEN GH_TOKEN
+}
+
+# ERE, one per line, deliberately unanchored - a token is a substring of a log
+# line, not a whole line. ah- is the AxonHub relay's own prefix; the rest are the
+# common vendors, for tokens that came from somewhere else and whose value we do
+# not know.
+rv2_credential_patterns() {
+  printf '%s\n' \
+    'sk-[A-Za-z0-9_-]{16,}' \
+    'ah-[A-Za-z0-9]{24,}' \
+    'gh[pousr]_[A-Za-z0-9]{20,}' \
+    'github_pat_[A-Za-z0-9_]{20,}' \
+    'AKIA[0-9A-Z]{16}' \
+    'Bearer [A-Za-z0-9._-]{24,}'
+}
+
+# The replacement text. Contains no quote, backslash or & so it is safe as a sed
+# replacement AND inside a JSON string - review.json is redacted with this filter
+# and has to stay parseable afterwards.
+rv2_redaction_marker() { printf '%s' '[redacted-credential]'; }
+
+# stdin -> stdout, with every live credential VALUE and every credential SHAPE
+# replaced by the marker. A TEXT filter: it reads lines, so it is for logs and
+# JSON, not for binaries.
+#
+# Exact values are replaced in bash rather than with sed because the value is
+# arbitrary bytes and building a sed program out of it means escaping it
+# correctly every time; `${line//"$v"/...}` is literal by construction. The shape
+# pass is one sed because those patterns are ours.
+rv2_redact_stream() {
+  local mark v val line p
+  local vals=() seds=()
+  mark="$(rv2_redaction_marker)"
+  while IFS= read -r v; do
+    val="${!v:-}"
+    # Short values are not credentials and would match everywhere; an empty one
+    # would match every position of every line.
+    [ "${#val}" -ge 12 ] && vals+=("$val")
+  done < <(rv2_credential_env_names)
+  while IFS= read -r p; do
+    seds+=(-e "s/$p/$mark/g")
+  done < <(rv2_credential_patterns)
+  {
+    if [ "${#vals[@]}" -gt 0 ]; then
+      # `|| [ -n "$line" ]` so a final line with no newline is not dropped.
+      while IFS= read -r line || [ -n "$line" ]; do
+        for v in "${vals[@]}"; do line="${line//"$v"/"$mark"}"; done
+        printf '%s\n' "$line"
+      done
+    else
+      cat
+    fi
+  } | sed -E "${seds[@]}"
+}
+
 # Dump every pane into the run's logs (and stderr) so a boot failure carries the reason.
 #
 # Panes are the only place the trunk's and workers' own stderr exists; when boot gave up it
 # killed the session and that output was gone for good, which is why the first two failed
 # trials had to be re-run to learn anything at all.
+#
+# THE TWO COPIES HAVE DIFFERENT RETENTION, so they get different treatment.
+#
+# logs/panes-*.log is uploaded as the run artifact: 7 days, and scan-leaks.sh sweeps it, so a
+# credential a worker echoed into a pane is preserved there for forensics AND alarmed on. The
+# stderr copy lands in the GitHub Actions log, which is kept for 90 days, is visible to anyone
+# who can read the run, and is swept by nothing - so it gets the redacted copy. The pane text a
+# human needs in order to see WHY boot failed ("Select login method", a stack trace, a theme
+# picker) survives redaction untouched; only the token shapes do not.
 rv2_dump_panes() {
   local tag="${1:-failure}" session dir w
   session="$(rv2_session)"
@@ -147,7 +233,7 @@ rv2_dump_panes() {
     {
       echo "=== window $w ($tag) ==="
       tmux capture-pane -p -S -200 -t "$session:$w" 2>&1
-    } | tee -a "$dir/panes-$tag.log" >&2
+    } | tee -a "$dir/panes-$tag.log" | rv2_redact_stream >&2
   done
 }
 

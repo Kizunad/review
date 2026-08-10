@@ -29,6 +29,26 @@ export HARNESS_DIR="$ROOT"
 # cannot fail the step - a hit is an alarm, not a block (operator, 2026-08-10).
 "$V2_DIR/scan-leaks.sh" "$ROOT" || true
 
+# ...and then a SECOND pass over the one file that does not stay in the artifact.
+#
+# The sweep above alarms. That ruling was made about the 7-day run artifact. This
+# file is different: harness/publish-artifact.mjs renders review.md from it and
+# the privileged write job posts that markdown VERBATIM as a pull request
+# comment - permanent, possibly public, no retention limit, readable by anyone
+# who can see the PR. A crew worker that recorded
+# `curl -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" ...` as an evidence
+# command had that command rendered into review.md and published, and nothing on
+# this path ever looked at it: the sweep ran before _publish existed, and would
+# only have warned anyway.
+#
+# So the payload is redacted, not alarmed and not discarded - the review still
+# publishes, minus the value. It runs BEFORE validation on purpose: if a
+# redaction ever produced something that is not valid v2r1, the branch below
+# parks it as review.invalid.json instead of publishing it.
+if [ -f "$REVIEW" ]; then
+  "$V2_DIR/scan-leaks.sh" --redact "$REVIEW" || true
+fi
+
 synth() { # stage error
   local stage="$1" err="$2"
   echo "wrapper: $stage - $err"
