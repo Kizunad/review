@@ -73,12 +73,13 @@ function budgetExceededFailure(stage, failed, total, allowance, budget = FINDER_
 
 // paths names what the dropped batch was covering, so a gap can be read against
 // the diff instead of being an opaque batch number.
-function coverageGap(stage, batch, paths, error) {
+function coverageGap(stage, batch, paths, error, diagnostic) {
   return {
     stage,
     batch,
     paths: Array.isArray(paths) ? [...paths] : [],
     error: boundedFailureText(error),
+    ...(typeof diagnostic === 'string' && diagnostic.length > 0 ? { diagnostic } : {}),
   };
 }
 
@@ -413,7 +414,7 @@ export async function runReview({
     return { findings: [], failures, coverageGaps };
   }
   for (const record of finderFailureRecords) {
-    coverageGaps.push(coverageGap(`find:${record.dimensionId}`, record.batchIndex, record.batchPaths, record.error));
+    coverageGaps.push(coverageGap(`find:${record.dimensionId}`, record.batchIndex, record.batchPaths, record.error, record.diagnostic));
   }
 
   const exactCandidates = dedupeFindings(candidates);

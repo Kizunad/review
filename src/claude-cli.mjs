@@ -295,6 +295,42 @@ function streamDiagnostic(stdout, stderr, environment, {
   return truncateDiagnostic(JSON.stringify(value));
 }
 
+// The New API host gate rejects with a 503 whose body names the cause ("system cpu
+// overloaded (current: 96.5%, threshold: 90%)"). The CLI's own stream collapses that
+// body into the structural api_error_status/terminal_reason pair, so the engine would
+// otherwise only ever see "claude exited 1" + 503 - which is how a host-CPU gate
+// masqueraded as a generic upstream outage for hours. This digs the gateway message
+// out of the error result only when it is a structured JSON envelope (bounded,
+// gateway-controlled); any other shape returns nothing, so free model text stays off
+// the wire exactly as it does in streamDiagnostic.
+function extractApiError(stdout, environment) {
+  for (const line of String(stdout ?? '').split('\n')) {
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (event?.type !== 'result' || event?.is_error !== true) continue;
+    if (!Number.isInteger(event.api_error_status)) continue;
+    let body;
+    try {
+      body = JSON.parse(String(event.result ?? ''));
+    } catch {
+      return { apiErrorStatus: event.api_error_status };
+    }
+    const message = typeof body?.message === 'string' ? body.message
+      : typeof body?.error?.message === 'string' ? body.error.message
+      : undefined;
+    if (typeof message !== 'string' || message.length === 0) return { apiErrorStatus: event.api_error_status };
+    return {
+      apiErrorStatus: event.api_error_status,
+      apiErrorMessage: diagnostic(message, environment, 240),
+    };
+  }
+  return {};
+}
+
 function signalChild(child, signal) {
   if (process.platform !== 'win32' && Number.isInteger(child.pid) && child.pid > 0) {
     try {
@@ -463,10 +499,13 @@ export async function runFreshClaude({
       const stderr = Buffer.concat(stderrChunks).toString('utf8');
       if (code !== 0) {
         const stderrDiagnostic = diagnostic(stderr, sourceEnvironment);
+        const apiError = extractApiError(stdout, sourceEnvironment);
         finish({
           status: 'infra_error',
           error: stderrDiagnostic ? `claude exited ${code ?? signal}: ${stderrDiagnostic}` : `claude exited ${code ?? signal}`,
           diagnostic: outputDiagnostic(),
+          ...(apiError.apiErrorStatus === undefined ? {} : { apiErrorStatus: apiError.apiErrorStatus }),
+          ...(apiError.apiErrorMessage === undefined ? {} : { apiErrorMessage: apiError.apiErrorMessage }),
         });
         return;
       }

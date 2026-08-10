@@ -258,6 +258,29 @@ test('books finder batch losses inside the budget as coverage gaps and still dec
   }]);
 });
 
+test('coverage gaps carry the stage diagnostic so a gapped lens is nameable', async () => {
+  const result = await budgetedFinderRun((request) => {
+    if (request.taxonomy === 'dimension-3') {
+      return {
+        status: 'infra_error',
+        error: 'cpu overload gate rejected the call (system cpu overloaded (current: 96.5%, threshold: 90%)); failing fast instead of retrying',
+        diagnostic: '{"events":[{"type":"result","subtype":"success","isError":true,"apiErrorStatus":503,"terminalReason":"api_error"}]}',
+      };
+    }
+    if (request.taxonomy === 'dimension-0') {
+      return { status: 'ok', data: [{ ...finding, taxonomy: 'dimension-0' }] };
+    }
+    return { status: 'ok', data: [] };
+  });
+
+  assert.deepEqual(result.failures, []);
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.coverageGaps.length, 1);
+  assert.equal(result.coverageGaps[0].stage, 'find:dimension-3');
+  assert.match(result.coverageGaps[0].error, /cpu overload gate/);
+  assert.match(result.coverageGaps[0].diagnostic, /"apiErrorStatus":503/);
+});
+
 test('fails closed once finder batch losses pass the budget and publishes no surviving finding', async () => {
   const result = await budgetedFinderRun((request) => {
     if (request.taxonomy === 'dimension-3' || request.taxonomy === 'dimension-9') {
