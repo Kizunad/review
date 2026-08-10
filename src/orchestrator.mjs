@@ -47,9 +47,12 @@ const FAILURE_STATUSES = ['infra_error', 'schema_error'];
 //
 // Every other stage stays strict, and not only the single-call ones (plan,
 // consolidate, adjudicate) that have no second batch to carry the review:
-// summary is fanned out per assignment but is an INPUT to every finder batch,
-// not a slice of the corpus, so silently dropping one narrows what all 112
-// finder calls can see instead of leaving one nameable hole.
+// summary is budgeted too (see the summary allowance in runReview), but a
+// summary loss is only a nameable hole when the dropped shards are excluded
+// from the finder corpus and booked in coverageGaps - a finder batch that
+// still read an unsummarised shard's paths would degrade the whole corpus
+// silently, which is exactly the all-or-nothing failure this budget exists to
+// replace.
 export const FINDER_BATCH_FAILURE_BUDGET = 0.08;
 
 // Floor, so the tolerated share never exceeds the budget itself: 112 batches
@@ -332,20 +335,47 @@ export async function runReview({
       return { assignment, summary };
     },
   );
+  const summaryFailures = [];
   const summaries = [];
+  const summarisedShardIndexes = new Set();
   for (const { assignment, summary } of summaryResults) {
     if (!stageOk(summary)) {
-      failures.push(stageFailure(`summary:${assignment.id}`, summary));
+      summaryFailures.push({ assignment, summary });
       continue;
     }
     summaries.push({ assignment: assignment.id, data: summary.data });
+    for (const index of assignment.shardIndexes) summarisedShardIndexes.add(index);
   }
-  // No budget: every finder batch reads every summary, so a missing one degrades
-  // the whole corpus rather than one nameable slice of it.
-  if (summaries.length !== assignments.length) return { findings: [], failures, coverageGaps };
 
-  const finderBatches = shards.length > 0
-    ? groupShards(shards, { maxChars: maxFinderChars })
+  // Summary is fanned out per assignment but is an INPUT to every finder batch,
+  // so a missing one used to be all-or-nothing: with N assignments and per-call
+  // success p, a review survived with probability p^N. That is an outage at
+  // fleet scale - with N >= 12 and p around 0.5, reviews die at summary while
+  // the pool measures healthy per call. The runner already retries each call
+  // (STAGE_ATTEMPTS=3 with 20s/40s backoff, plus the schema-repair budget), so
+  // the multiplier was the gate, not the transport.
+  //
+  // A missing summary is now a NAMED hole instead of a fatal one, under the
+  // same budget mechanism the finder stage already uses: within budget, the
+  // failed assignment's shards are dropped from the finder corpus and their
+  // paths are booked in coverageGaps, so a shipped review honestly admits
+  // which files nobody summarised. Lose more than the budget and the stage
+  // still fails closed - past that point the surviving corpus is no longer a
+  // fair sample of the diff.
+  const summaryAllowance = batchFailureAllowance(assignments.length);
+  if (summaryFailures.length > summaryAllowance) {
+    failures.push(
+      budgetExceededFailure('summary', summaryFailures.length, assignments.length, summaryAllowance),
+      ...summaryFailures.map(({ assignment, summary }) => stageFailure(`summary:${assignment.id}`, summary)),
+    );
+    return { findings: [], failures, coverageGaps };
+  }
+  for (const { assignment, summary } of summaryFailures) {
+    coverageGaps.push(coverageGap('summary', assignment.id, assignment.paths, summary?.error ?? 'runner returned no result'));
+  }
+  const finderShards = shards.filter((shard) => summarisedShardIndexes.has(shard.index));
+  const finderBatches = finderShards.length > 0
+    ? groupShards(finderShards, { maxChars: maxFinderChars })
     : [{ index: 0, shardIndexes: [], text: '', paths: [] }];
   const finderResults = (await mapBounded(
     taxonomy,
