@@ -435,6 +435,55 @@ test('ships a full review with one lost summary, booking the uncovered shard pat
   assert.equal(requests.filter((request) => request.stage === 'validate').length, 5);
 });
 
+test('claims overlapping plan shard ranges once each, keeping summary gaps exact', async () => {
+  const requests = [];
+  const diff = Array.from({ length: 3 }, (_, index) => `diff --git a/f${index}.mjs b/f${index}.mjs\n+a\n`).join('');
+  const result = await runReview({
+    diff,
+    taxonomy: ['security'],
+    maxShardChars: 40,
+    maxFinderChars: 40,
+    runner: runnerFor((request) => {
+      requests.push(request);
+      if (request.stage === 'plan') {
+        return plan([{ id: 'alpha', shardIndexes: [0, 1] }, { id: 'beta', shardIndexes: [1, 2] }]);
+      }
+      if (request.stage === 'summary') {
+        return request.assignment.id === 'beta'
+          ? { status: 'infra_error', error: 'claude exited 1' }
+          : { status: 'ok', data: { summary: request.assignment.id, files: request.assignment.paths } };
+      }
+      if (request.stage === 'find') return { status: 'ok', data: [] };
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+  // Overlap is claimed first-wins at normalization: alpha takes shards 0 and
+  // 1, beta is reduced to what alpha did not take. Shard 1 is therefore
+  // summarised exactly once (by alpha, possibly split into parts) and stays
+  // in the finder corpus, so the failed beta books a gap that names only the
+  // truly uncovered shard.
+  const betaRequest = requests.find((request) => request.stage === 'summary' && request.assignment.id === 'beta');
+  assert.deepEqual(betaRequest.assignment.shardIndexes, [2]);
+  const claimedByAlpha = requests
+    .filter((request) => request.stage === 'summary' && request.assignment.id.startsWith('alpha'))
+    .flatMap((request) => request.assignment.shardIndexes)
+    .sort();
+  assert.deepEqual(claimedByAlpha, [0, 1]);
+  assert.deepEqual(result.failures, []);
+  assert.deepEqual(result.coverageGaps, [{
+    stage: 'summary',
+    batch: 'beta',
+    paths: ['f2.mjs'],
+    error: 'claude exited 1',
+  }]);
+  const finderRequests = requests.filter((request) => request.stage === 'find');
+  const finderPaths = finderRequests.flatMap((request) => request.paths);
+  assert.ok(finderRequests.length > 0);
+  assert.equal(finderPaths.includes('f2.mjs'), false, 'the unsummarised shard stays out of the finder corpus');
+  assert.equal(finderPaths.includes('f1.mjs'), true, 'a shard summarised via another assignment is not lost');
+  assert.ok(finderRequests.every((request) => request.summaries.length === 2));
+});
+
 test('fails closed when the single-call consolidate stage fails', async () => {
   const consolidateFailure = await runReview({
     diff: 'diff --git a/a.mjs b/a.mjs\n',

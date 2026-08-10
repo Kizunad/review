@@ -205,11 +205,18 @@ function stageOk(result) {
 function normalizeAssignments(plan, shards, maxChars) {
   const byIndex = new Map(shards.map((shard) => [shard.index, shard]));
   const requested = Array.isArray(plan?.assignments) ? plan.assignments : [];
+  // The plan is a work-splitting suggestion, not a contract: the engine owns
+  // the partition. First-wins claiming keeps each shard in exactly one
+  // assignment - an overlapping plan would otherwise summarize the same shard
+  // twice (wasted calls, inflated summary budget N) and let a failed
+  // assignment book a gap whose paths the finder corpus still contains.
+  const claimed = new Set();
   const assignments = requested
     .map((assignment) => {
       const indexes = Array.isArray(assignment?.shardIndexes)
-        ? [...new Set(assignment.shardIndexes.filter((index) => Number.isInteger(index) && byIndex.has(index)))]
+        ? [...new Set(assignment.shardIndexes.filter((index) => Number.isInteger(index) && byIndex.has(index) && !claimed.has(index)))]
         : [];
+      for (const index of indexes) claimed.add(index);
       return indexes.length ? { id: String(assignment.id || `summary-${indexes.join('-')}`), shardIndexes: indexes } : null;
     })
     .filter(Boolean);
