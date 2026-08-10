@@ -12,6 +12,25 @@ outputs:
 runs:
   using: composite
   steps:
+    # BEFORE YOU BUMP THIS PIN: re-run the three-way --tools comparison.
+    #
+    # 2.1.220's own --help says `--tools default` means "use all tools". It does not. Measured
+    # 2026-08-10, same harness, same model, same relay, one variable:
+    #
+    #   no --tools flag                          -> HAS TOOLS  (read the file, answered)
+    #   --tools default                          -> nothing, timed out
+    #   --tools Read,Write,Edit,Bash,Glob,Grep   -> HAS TOOLS  (read the file, answered)
+    #
+    # v2 shipped `--tools default` as the FIX for "the trunk has no tools", so the remedy
+    # re-created the condition it was named after, and the symptom read as confirmation for
+    # three runs. boot-session.sh therefore passes an explicit list, which bends the operator's
+    # no-whitelist rule and is a workaround, not a policy.
+    #
+    # Documented behaviour disagreeing with actual behaviour is a trap with a delay on it: the
+    # next person to read the help text, or the next version bump, walks straight into it. If a
+    # newer CLI makes `default` work, the explicit list in boot-session.sh should go away - but
+    # only after the comparison above is re-run against the new binary, never on the strength of
+    # the help text.
     - name: Install hash-pinned native binary
       id: install
       shell: bash
