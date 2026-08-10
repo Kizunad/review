@@ -17,6 +17,39 @@ V2_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$V2_DIR/lib.sh"
 
 ROOT="$(rv2_root)"
+
+# RESUME IS OFF, DELIBERATELY, AND THIS IS THE STATED REASON RATHER THAN AN ACCIDENT.
+#
+# It had been off by accident twice over, which is how it was found: the selector matched the
+# artifact name exactly (`=="rv2-p1"`) while the upload became rv2-p1-<run_id>-<run_attempt>,
+# and the workflow step sets no GH_TOKEN, so every `gh api` here fell through its `|| echo ""`
+# into "no resume". Silent dead code that reported a normal outcome. The selector is fixed
+# above so that turning this on is a one-line decision rather than a debugging session.
+#
+# But an independent review of the self-approval design showed that REPAIRING resume opens an
+# approve path, so it must not come back by default:
+#
+#   1. shard-diff.sh derives assignment ids POSITIONALLY from the PR's own diff, so the pull
+#      request knows every id before the run starts;
+#   2. the crew is REQUIRED to write evidence/<id>.json, and completion is tested by existence
+#      (`rv2_assignment_complete` is `[ -f ... ]`);
+#   3. so a test in the PR pre-writes evidence for every shard, checkpoint.sh faithfully records
+#      them all as completedAssignments, and that checkpoint is uploaded;
+#   4. the next run at the same head restores it - the key {pullNumber, headOid, enginePin} is
+#      entirely attacker-known and matches - the trunk skips every assignment, dispatches
+#      nothing, finds nothing, and `approve` is satisfied VACUOUSLY, because approve requires
+#      zero failures and all findings minor, which zero findings meets by construction.
+#
+# The fix is not here. It is a deterministic precondition on the privileged side: a resumed
+# assignment must be backed by a DISPATCHED ledger row in the checkpointed ledger snapshot, not
+# by the existence of an evidence file the reviewed code was invited to write. Until that
+# exists, resume stays off, and the saving it buys is not worth an approve nobody reviewed.
+if [ "${RV2_ALLOW_RESUME:-0}" != "1" ]; then
+  echo "restore: resume is DISABLED (RV2_ALLOW_RESUME != 1) - checkpoint poisoning is unfixed."
+  echo "restore: see the comment in v2/restore-checkpoint.sh; this is a decision, not a failure."
+  exit 0
+fi
+
 repo="${RV2_REPOSITORY:?RV2_REPOSITORY required}"
 pr="$(rv2_pr_number)"
 head_oid="$(rv2_head_oid)"
@@ -50,7 +83,7 @@ runs="$(gh api "repos/$repo/actions/workflows/$wf_id/runs?per_page=50" \
 
 for run_id in $runs; do
   art_ids="$(gh api "repos/$repo/actions/runs/$run_id/artifacts" \
-    --jq '.artifacts[] | select(.name=="rv2-p1") | .id' 2>/dev/null || echo "")"
+    --jq '.artifacts[] | select(.name | startswith("rv2-p1")) | .id' 2>/dev/null || echo "")"
   [ -n "$art_ids" ] || continue
   art_id="$(printf '%s\n' "$art_ids" | head -1)"
 

@@ -347,6 +347,17 @@ jobs:
 
   review:
     needs: [preflight, build-server]
+    # THE JOB THAT EXECUTES THE PULL REQUEST'S CODE GETS NO TOKEN SCOPE AT ALL.
+    #
+    # This was absent while preflight and write-finalize both declared theirs, so this job -
+    # the only one that runs code from the PR under review, in panes launched with
+    # --dangerously-skip-permissions - inherited whatever default GITHUB_TOKEN scope the CALLER
+    # repository happens to grant. On a caller whose default is read-write, the reviewed code
+    # had a writable token for the whole run.
+    #
+    # It needs nothing: the diff comes from git, the artifacts go out through upload-artifact's
+    # own runtime token, and every privileged action happens in write-finalize.
+    permissions: {}
     # The review runs whether or not the build did, and ONLY a cancellation or an open
     # infrastructure circuit stops it.
     #
