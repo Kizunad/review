@@ -314,6 +314,17 @@ export function createClaudeRunner({
           if (cached?.status === 'ok') return cached;
         } catch { /* miss or corrupt entry - run the stage */ }
       }
+      // Stage provenance on every terminal record: which model was called, how many
+      // attempts were consumed, and whether the failure is deterministic (schema
+      // errors have already exhausted the repair budget - the same input fails
+      // identically on re-dispatch). Consumers use these to classify a failure
+      // without substring-matching the error string.
+      const annotate = (finalResult, retryable = finalResult.status !== 'schema_error') => ({
+        ...finalResult,
+        model: request.model,
+        attempts,
+        retryable,
+      });
       const finish = async (finalResult) => {
         if (cacheFile && finalResult.status === 'ok') {
           try {
@@ -321,7 +332,7 @@ export function createClaudeRunner({
             await writeFile(cacheFile, `${JSON.stringify(finalResult)}\n`);
           } catch { /* resume is best-effort; never fail a passed stage over persistence */ }
         }
-        return finalResult;
+        return annotate(finalResult);
       };
       let result;
       let attempts = 0;
@@ -353,7 +364,7 @@ export function createClaudeRunner({
           // comments are built from these).
           const { rawOutput, ...surfaced } = result;
           if (schemaRetries >= SCHEMA_RETRIES) {
-            return { ...surfaced, error: `after ${attempts} attempts: ${result.error}` };
+            return annotate({ ...surfaced, error: `after ${attempts} attempts: ${result.error}` });
           }
           schemaRetries += 1;
           const unknownMembers = request.stage === 'consolidate'
@@ -373,13 +384,13 @@ export function createClaudeRunner({
         // requests at an overloaded host. Fail fast with a nameable reason; the
         // run-level retry owns the waiting.
         if (isCpuOverloadGate(result)) {
-          return { ...result, error: `cpu overload gate rejected the call (${result.apiErrorMessage}); failing fast instead of retrying` };
+          return annotate({ ...result, error: `cpu overload gate rejected the call (${result.apiErrorMessage}); failing fast instead of retrying` });
         }
         infraAttempts += 1;
         if (infraAttempts >= stageAttempts) {
           // Annotate so a verdict comment shows the failure survived every retry -
           // "one 524" and "524 through three spaced attempts" are different diagnoses.
-          return { ...result, error: `after ${attempts} attempts: ${result.error}` };
+          return annotate({ ...result, error: `after ${attempts} attempts: ${result.error}` });
         }
         const backoff = stageBackoffMs[Math.min(infraAttempts - 1, stageBackoffMs.length - 1)] ?? 0;
         await new Promise((resolve) => { setTimeout(resolve, backoff); });

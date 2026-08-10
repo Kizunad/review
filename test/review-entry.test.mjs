@@ -439,6 +439,11 @@ test('renders infrastructure failures with collision-free code spans and no code
       status: 'infra_error',
       error: 'five ``votes`` unavailable',
       diagnostic: '{"events":[{"detail":"```api_retry```","errorStatus":524}]}',
+      apiErrorStatus: 503,
+      terminalReason: 'api_error',
+      model: 'cc-review',
+      attempts: 3,
+      retryable: true,
     }],
   }, { headOid: 'b'.repeat(40), policyVersion: 'project-review-policy.v2', policySha256 });
   assert.match(markdown, /infrastructure_failure/);
@@ -447,6 +452,7 @@ test('renders infrastructure failures with collision-free code spans and no code
   assert.ok(markdown.includes('`` validate:`x` ``'));
   assert.ok(markdown.includes('``` five ``votes`` unavailable ```'));
   assert.ok(markdown.includes('```` {"events":[{"detail":"```api_retry```","errorStatus":524}]} ````'));
+  assert.ok(markdown.includes('  - api: ` status 503 api_error model cc-review attempts 3 `'));
 });
 
 test('bounds public failure artifacts without changing the fail-closed decision', () => {
@@ -599,6 +605,74 @@ test('bounds published coverage gaps without ever emitting an unpublishable path
   assert.equal([...wide.error].length, 1_000);
   assert.deepEqual(publicCoverageGaps([]), []);
   assert.throws(() => publicCoverageGaps(undefined), /coverageGaps must be an array/);
+});
+
+test('publishes structured failure fields at the boundary and drops malformed ones', () => {
+  const [failure] = compactReviewFailures([{
+    stage: 'find:dimension-0',
+    status: 'infra_error',
+    error: 'cpu overload gate rejected the call (system cpu overloaded (current: 96.5%, threshold: 90%)); failing fast instead of retrying',
+    diagnostic: '{"events":[{"isError":true,"apiErrorStatus":503}]}',
+    apiErrorStatus: 503,
+    apiErrorMessage: 'Service Unavailable',
+    terminalReason: 'api_error',
+    model: 'cc-review',
+    attempts: 1,
+    retryable: true,
+  }]);
+  assert.equal(failure.apiErrorStatus, 503);
+  assert.equal(failure.apiErrorMessage, 'Service Unavailable');
+  assert.equal(failure.terminalReason, 'api_error');
+  assert.equal(failure.model, 'cc-review');
+  assert.equal(failure.attempts, 1);
+  assert.equal(failure.retryable, true);
+
+  const [junked] = compactReviewFailures([{
+    stage: 'find',
+    status: 'infra_error',
+    error: 'boom',
+    apiErrorStatus: 9999,
+    apiErrorMessage: 'm'.repeat(500),
+    terminalReason: 'API error',
+    model: 'CC REVIEW',
+    attempts: -1,
+    retryable: 'yes',
+  }]);
+  assert.equal(junked.apiErrorStatus, undefined, 'an out-of-range status is dropped, not published');
+  assert.equal([...junked.apiErrorMessage].length, 240, 'an oversized api message is bounded');
+  assert.equal(junked.terminalReason, undefined, 'an uppercase reason fails the closed enum shape');
+  assert.equal(junked.model, undefined, 'a model with whitespace fails the name shape');
+  assert.equal(junked.attempts, undefined, 'a negative attempt count is dropped');
+  assert.equal(junked.retryable, undefined, 'a non-boolean retryable is dropped');
+});
+
+test('publishes coverage gap diagnostics and structured fields so a gapped lens stays nameable', () => {
+  const [gap] = publicCoverageGaps([{
+    stage: 'find:dimension-0',
+    batch: 2,
+    paths: ['src/a.mjs'],
+    error: 'cpu overload gate rejected the call (system cpu overloaded (current: 96.5%, threshold: 90%)); failing fast instead of retrying',
+    diagnostic: '{"events":[{"isError":true,"apiErrorStatus":503}]}',
+    apiErrorStatus: 503,
+    apiErrorMessage: 'Service Unavailable',
+    terminalReason: 'api_error',
+    model: 'cc-lite',
+    attempts: 1,
+    retryable: true,
+  }]);
+  assert.deepEqual(gap, {
+    stage: 'find:dimension-0',
+    batch: 2,
+    paths: ['src/a.mjs'],
+    error: 'cpu overload gate rejected the call (system cpu overloaded (current: 96.5%, threshold: 90%)); failing fast instead of retrying',
+    diagnostic: '{"events":[{"isError":true,"apiErrorStatus":503}]}',
+    apiErrorStatus: 503,
+    apiErrorMessage: 'Service Unavailable',
+    terminalReason: 'api_error',
+    model: 'cc-lite',
+    attempts: 1,
+    retryable: true,
+  });
 });
 
 test('fails closed on contradictory final review decisions', () => {

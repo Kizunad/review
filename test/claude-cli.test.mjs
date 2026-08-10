@@ -998,6 +998,7 @@ test('a CLI-level error with JSON text stays private - only terminal_reason api_
   assert.equal(result.status, 'infra_error');
   assert.equal(result.apiErrorStatus, undefined);
   assert.equal(result.apiErrorMessage, undefined);
+  assert.equal(result.terminalReason, 'error', 'the structural terminal reason surfaces even when the restricted envelope stays closed');
   assert.equal(JSON.stringify(result).includes('cli-error-secret-value'), false);
 });
 

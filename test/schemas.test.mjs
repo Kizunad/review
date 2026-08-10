@@ -34,7 +34,7 @@ test('all review schemas are strict JSON Schema containers', async () => {
   }
 });
 
-test('final review failures allow only bounded optional diagnostics', async () => {
+test('final review failures allow only bounded optional diagnostics and structured fields', async () => {
   const schema = JSON.parse(await readFile(path.join(schemasDirectory, 'final-review.schema.json'), 'utf8'));
   const failure = schema.properties.failures.items;
 
@@ -44,6 +44,22 @@ test('final review failures allow only bounded optional diagnostics', async () =
     type: 'string',
     minLength: 1,
     maxLength: 4000,
+  });
+  assert.deepEqual(failure.properties.apiErrorStatus, { type: 'integer', minimum: 100, maximum: 599 });
+  assert.deepEqual(failure.properties.apiErrorMessage, { type: 'string', minLength: 1, maxLength: 240 });
+  assert.equal(failure.properties.terminalReason.pattern, '^[a-z][a-z0-9_]{0,63}$');
+  assert.equal(failure.properties.model.pattern, '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$');
+  assert.deepEqual(failure.properties.attempts, { type: 'integer', minimum: 0 });
+  assert.deepEqual(failure.properties.retryable, { type: 'boolean' });
+  assert.deepEqual(failure.properties.apiErrorStatuses, {
+    type: 'array',
+    maxItems: 16,
+    items: { type: 'integer', minimum: 100, maximum: 599 },
+  });
+  assert.deepEqual(failure.properties.models, {
+    type: 'array',
+    maxItems: 8,
+    items: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$' },
   });
 });
 
@@ -119,9 +135,15 @@ test('v2 schemas separate validated defects from bounded suggestions', async () 
   assert.equal(gap.properties.batch.minimum, 0);
   assert.equal(gap.properties.paths.maxItems, MAX_PUBLIC_COVERAGE_GAP_PATHS);
   assert.equal(gap.properties.paths.items.pattern, review.properties.findings.items.properties.path.pattern);
-  for (const property of ['stage', 'error']) {
+  for (const property of ['stage', 'error', 'diagnostic', 'apiErrorMessage']) {
     assert.equal(gap.properties[property].maxLength, PUBLIC_COVERAGE_GAP_TEXT_LIMITS[property]);
   }
+  assert.deepEqual(gap.properties.diagnostic, { type: 'string', minLength: 1, maxLength: 1000 });
+  assert.deepEqual(gap.properties.apiErrorStatus, { type: 'integer', minimum: 100, maximum: 599 });
+  assert.equal(gap.properties.terminalReason.pattern, '^[a-z][a-z0-9_]{0,63}$');
+  assert.equal(gap.properties.model.pattern, '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$');
+  assert.deepEqual(gap.properties.attempts, { type: 'integer', minimum: 0 });
+  assert.deepEqual(gap.properties.retryable, { type: 'boolean' });
   assert.equal(gap.properties.paths.items.maxLength, PUBLIC_COVERAGE_GAP_TEXT_LIMITS.path);
   assert.equal(review.properties.omittedSuggestions.minimum, 0);
 });

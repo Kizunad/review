@@ -258,13 +258,19 @@ test('books finder batch losses inside the budget as coverage gaps and still dec
   }]);
 });
 
-test('coverage gaps carry the stage diagnostic so a gapped lens is nameable', async () => {
+test('coverage gaps carry the stage diagnostic and structured fields so a gapped lens is nameable', async () => {
   const result = await budgetedFinderRun((request) => {
     if (request.taxonomy === 'dimension-3') {
       return {
         status: 'infra_error',
         error: 'cpu overload gate rejected the call (system cpu overloaded (current: 96.5%, threshold: 90%)); failing fast instead of retrying',
         diagnostic: '{"events":[{"type":"result","subtype":"success","isError":true,"apiErrorStatus":503,"terminalReason":"api_error"}]}',
+        apiErrorStatus: 503,
+        apiErrorMessage: 'Service Unavailable',
+        terminalReason: 'api_error',
+        model: 'cc-review',
+        attempts: 1,
+        retryable: true,
       };
     }
     if (request.taxonomy === 'dimension-0') {
@@ -275,10 +281,75 @@ test('coverage gaps carry the stage diagnostic so a gapped lens is nameable', as
 
   assert.deepEqual(result.failures, []);
   assert.equal(result.findings.length, 1);
-  assert.equal(result.coverageGaps.length, 1);
-  assert.equal(result.coverageGaps[0].stage, 'find:dimension-3');
-  assert.match(result.coverageGaps[0].error, /cpu overload gate/);
-  assert.match(result.coverageGaps[0].diagnostic, /"apiErrorStatus":503/);
+  assert.deepEqual(result.coverageGaps, [{
+    stage: 'find:dimension-3',
+    batch: 0,
+    paths: ['a.mjs'],
+    error: 'cpu overload gate rejected the call (system cpu overloaded (current: 96.5%, threshold: 90%)); failing fast instead of retrying',
+    diagnostic: '{"events":[{"type":"result","subtype":"success","isError":true,"apiErrorStatus":503,"terminalReason":"api_error"}]}',
+    apiErrorStatus: 503,
+    apiErrorMessage: 'Service Unavailable',
+    terminalReason: 'api_error',
+    model: 'cc-review',
+    attempts: 1,
+    retryable: true,
+  }]);
+});
+
+test('aggregates collapsed finder batch failures into a status/model census', async () => {
+  const findCalls = [];
+  const result = await runReview({
+    diff: `diff --git a/large.js b/large.js\n${'x'.repeat(41)}`,
+    taxonomy: ['dimension-0'],
+    maxShardChars: 10,
+    maxFinderChars: 15,
+    runner: runnerFor((request) => {
+      if (request.stage === 'plan') return plan();
+      if (request.stage === 'summary') return { status: 'ok', data: { summary: 'bounded', files: request.assignment.paths } };
+      if (request.stage === 'find') {
+        const batchIndex = findCalls.length;
+        findCalls.push(batchIndex);
+        if (batchIndex === 0) return {
+          status: 'infra_error',
+          error: 'balance exhausted',
+          diagnostic: '{"events":[{"isError":true,"apiErrorStatus":402}]}',
+          apiErrorStatus: 402,
+          apiErrorMessage: 'Insufficient Balance',
+          terminalReason: 'api_error',
+          model: 'cc-review',
+          attempts: 2,
+          retryable: true,
+        };
+        if (batchIndex === 1) return {
+          status: 'infra_error',
+          error: 'cpu overload gate rejected the call (system cpu overloaded (current: 96.5%, threshold: 90%)); failing fast instead of retrying',
+          diagnostic: '{"events":[{"isError":true,"apiErrorStatus":503}]}',
+          apiErrorStatus: 503,
+          apiErrorMessage: 'Service Unavailable',
+          terminalReason: 'api_error',
+          model: 'cc-lite',
+          attempts: 1,
+          retryable: true,
+        };
+        return { status: 'ok', data: [] };
+      }
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+
+  assert.deepEqual(result.findings, []);
+  assert.deepEqual(result.coverageGaps, []);
+  assert.equal(result.failures.length, 2, 'the budget failure plus one per-dimension aggregate');
+  assert.equal(result.failures[0].stage, 'find');
+  assert.match(result.failures[0].error, /2\/\d+ failed batches exceeds budget 8%/);
+  const aggregate = result.failures[1];
+  assert.equal(aggregate.stage, 'find:dimension-0');
+  assert.equal(aggregate.status, 'infra_error');
+  assert.match(aggregate.error, /2 occurrence\(s\) in 2\/\d+ failed batch\(es\); samples: batch-0: balance exhausted \| batch-1: cpu overload gate rejected the call/);
+  assert.match(aggregate.diagnostic, /"apiErrorStatus":402/);
+  assert.match(aggregate.diagnostic, /"apiErrorStatus":503/);
+  assert.deepEqual(aggregate.apiErrorStatuses, [402, 503], 'distinct statuses survive the collapse, sorted');
+  assert.deepEqual(aggregate.models, ['cc-review', 'cc-lite'], 'both models are named so the outage is attributable');
 });
 
 test('fails closed once finder batch losses pass the budget and publishes no surviving finding', async () => {

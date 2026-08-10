@@ -57,7 +57,15 @@
           "stage": { "type": "string", "minLength": 1, "maxLength": 300 },
           "status": { "type": "string", "enum": ["infra_error", "schema_error"] },
           "error": { "type": "string", "minLength": 1, "maxLength": 4000 },
-          "diagnostic": { "type": "string", "minLength": 1, "maxLength": 4000 }
+          "diagnostic": { "type": "string", "minLength": 1, "maxLength": 4000 },
+          "apiErrorStatus": { "type": "integer", "minimum": 100, "maximum": 599 },
+          "apiErrorMessage": { "type": "string", "minLength": 1, "maxLength": 240 },
+          "terminalReason": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+          "model": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$" },
+          "attempts": { "type": "integer", "minimum": 0 },
+          "retryable": { "type": "boolean" },
+          "apiErrorStatuses": { "type": "array", "maxItems": 16, "items": { "type": "integer", "minimum": 100, "maximum": 599 } },
+          "models": { "type": "array", "maxItems": 8, "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$" } }
         }
       }
     },
@@ -76,7 +84,14 @@
             "maxItems": 32,
             "items": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]{1,500}$" }
           },
-          "error": { "type": "string", "minLength": 1, "maxLength": 1000 }
+          "error": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "diagnostic": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "apiErrorStatus": { "type": "integer", "minimum": 100, "maximum": 599 },
+          "apiErrorMessage": { "type": "string", "minLength": 1, "maxLength": 240 },
+          "terminalReason": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+          "model": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$" },
+          "attempts": { "type": "integer", "minimum": 0 },
+          "retryable": { "type": "boolean" }
         }
       }
     }
