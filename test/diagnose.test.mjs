@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
+  classifyFailure,
   classifyReview,
   formatReport,
   loadReview,
@@ -186,4 +187,35 @@ test('parseDiagnostic separates absent, non-JSON, eventless, and event shapes', 
 
 test('a missing review.json is an error, not a clean result', async () => {
   await assert.rejects(loadReview(fixtures('empty')), /no review.json found/);
+});
+
+test('symptom notes flag the failure that presents as something other than it is', async () => {
+  // The four historical misdirections the corpus taught: each fires a note that
+  // names the class and, where a change retired it, says the old reading no
+  // longer holds.
+  const reviews = {
+    toolchoice400: await loadFixture('old-400-toolchoice'),
+    cpuGate: await loadFixture('new-structured-cpu-gate'),
+    schema: await loadFixture('schema-exhausted'),
+    gapCollapsed: await loadFixture('old-gap-correctness'),
+  };
+  const [toolchoice] = classifyReview(reviews.toolchoice400).failures;
+  assert.ok(toolchoice.symptomNotes.some((note) => /NEW, uncharacterized cause/.test(note)),
+    'a post-#45 400 must be flagged as a retired class, not the old reading');
+  const [cpuGate] = classifyReview(reviews.cpuGate).failures;
+  assert.ok(cpuGate.symptomNotes.some((note) => /cpu overload is the host CPU gate/.test(note)));
+  const [schema] = classifyReview(reviews.schema).failures;
+  assert.ok(schema.symptomNotes.some((note) => /model misreading the contract/.test(note)));
+  const [gap] = classifyReview(reviews.gapCollapsed).coverageGaps;
+  assert.ok(gap.symptomNotes.some((note) => /collapses five distinct causes/.test(note)),
+    'the collapsed-string hiding five causes must be named, not silent');
+});
+
+test('symptom notes cover the balance and tunnel-timeout classes', () => {
+  const balance = classifyFailure({ stage: 'find', status: 'infra_error', apiErrorStatus: 402, error: 'balance exhausted' });
+  assert.ok(balance.symptomNotes.some((note) => /402 is the balance class/.test(note)));
+  const tunnel = classifyFailure({ stage: 'summary', status: 'infra_error', apiErrorStatus: 524, error: 'after 3 attempts: claude exited 1' });
+  assert.ok(tunnel.symptomNotes.some((note) => /524 is the relay origin timeout/.test(note)));
+  const clean = classifyFailure({ stage: 'plan', status: 'infra_error', apiErrorStatus: 503, error: 'upstream 503' });
+  assert.deepEqual(clean.symptomNotes, [], 'a plain 503 with no misdirection history fires nothing');
 });

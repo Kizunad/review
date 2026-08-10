@@ -60,6 +60,45 @@ export function classifyEvents(events) {
   };
 }
 
+// The failure that presents as something other than what it is. Each entry is
+// a symptom class whose historical reading pointed somewhere other than the
+// fault - the reading is advisory knowledge, versioned with the tool, so when
+// a change retires a class (the --json-schema removal in #45 ends the forced
+// tool_choice 400s) the tool says the old reading no longer holds instead of
+// silently carrying it forward.
+const SYMPTOM_KNOWLEDGE = [
+  {
+    match: (c) => c.apiErrorStatus === 400 && c.terminalReason === 'api_error',
+    note: () => 'status 400 + api_error historically meant forced tool_choice: --json-schema made the CLI build a second request carrying a thinking block the upstream rejected (one cause, two exits). #45 removes --json-schema and retires that class - a 400 seen now is a NEW, uncharacterized cause.',
+  },
+  {
+    match: (c) => c.apiErrorStatus === 503 && typeof c.error === 'string' && /cpu overload/i.test(c.error),
+    note: () => '503 + cpu overload is the host CPU gate (deterministic, self-closing), not an upstream outage - fail-fast is correct, a retry is not.',
+  },
+  {
+    match: (c) => c.status === 'schema_error',
+    note: () => 'schema_error is the model misreading the contract, deterministic (retryable=false) - an infra reading was never right.',
+  },
+  {
+    match: (c) => c.apiErrorStatus === 402,
+    note: () => '402 is the balance class; historically a lite-pool alias pointed at a drained pool. Re-point the alias, do not retry.',
+  },
+  {
+    match: (c) => c.apiErrorStatus === 524,
+    note: () => '524 is the relay origin timeout; historically summary fan-out overloading the cheap pool, not an upstream failure.',
+  },
+  {
+    match: (c) => !c.classified && typeof c.error === 'string' && /claude exited 1/.test(c.error),
+    note: () => '"after N attempts: claude exited 1" historically collapses five distinct causes into one string; no diagnostic here means the real cause is unrecoverable from this artifact.',
+  },
+];
+
+function symptomNotes(classified) {
+  return SYMPTOM_KNOWLEDGE
+    .filter((entry) => entry.match(classified))
+    .map((entry) => entry.note());
+}
+
 export function classifyFailure(failure = {}) {
   const diag = parseDiagnostic(failure.diagnostic);
   const events = diag.kind === 'events'
@@ -99,7 +138,7 @@ export function classifyFailure(failure = {}) {
   if (diag.kind === 'absent') evidence.push('no diagnostic recorded');
   if (diag.kind === 'events' && events.model === undefined && events.terminalReason === undefined
     && events.apiErrorStatus === undefined && events.retryStatuses.length === 0) {
-    evidence.push('diagnostic events carry no classification evidence');
+    evidence.push('no recognized event shapes (init/api_retry/result) - artifact shape may have changed');
   }
   if (diag.kind === 'noevents' && diag.stderr) {
     evidence.push(`stderr: ${diag.stderr.slice(0, 80)}`);
@@ -110,7 +149,7 @@ export function classifyFailure(failure = {}) {
     || model !== undefined
     || retryable !== undefined
     || failure.status === 'schema_error';
-  return {
+  const classifiedResult = {
     stage: failure.stage ?? 'unknown-stage',
     status: failure.status ?? 'unknown',
     terminalReason,
@@ -123,7 +162,15 @@ export function classifyFailure(failure = {}) {
     cliRetryCount: events.retryCount,
     evidence,
     classified,
+    symptomNotes: symptomNotes({
+      apiErrorStatus,
+      terminalReason,
+      status: failure.status,
+      error: failure.error,
+      classified,
+    }),
   };
+  return classifiedResult;
 }
 
 export function classifyCoverageGap(gap = {}) {
@@ -175,6 +222,9 @@ function factLines(classified) {
   if (facts.length > 0) lines.push(`      ${facts.join('  ')}`);
   if (classified.apiErrorMessage !== undefined) lines.push(`      api message: ${classified.apiErrorMessage}`);
   if (classified.evidence.length > 0) lines.push(`      ${classified.evidence.join('; ')}`);
+  if (classified.symptomNotes.length > 0) {
+    for (const note of classified.symptomNotes) lines.push(`      NOTE: ${note}`);
+  }
   return lines;
 }
 
