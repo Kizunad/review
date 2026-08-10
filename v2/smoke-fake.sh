@@ -253,6 +253,62 @@ else
   fail "H must capture panes before kill-session - that output exists nowhere else"
 fi
 
+echo "== leg I: leak scan warns without blocking, and never prints the value =="
+# Operator ruling 2026-08-10: the relay node is ours, so probe mode gets no key
+# isolation - detection on the output side is enough and a hit must NOT block.
+# The property that needs mechanizing is the one that is easy to get wrong in
+# the obvious direction: a scanner that reports the secret has leaked it into a
+# log with longer retention than the artifact it was guarding.
+I="$WORK/run-i"
+mkdir -p "$I/evidence" "$I/logs"
+LIVE_TOKEN='tok-smoke-live-value-0123456789'
+printf '{"notes":"clean enough","stray":"sk-abcdefghij0123456789XYZ"}\n' >"$I/evidence/s-0.json"
+printf 'worker echoed %s by mistake\n' "$LIVE_TOKEN" >"$I/logs/pane.log"
+i_out="$(ANTHROPIC_AUTH_TOKEN="$LIVE_TOKEN" RV2_ROOT="$I" HARNESS_DIR="$I" \
+         "$HERE/scan-leaks.sh" "$I" 2>&1)"
+i_rc=$?
+assert_eq "I leak scan never blocks (rc=0)" "$i_rc" "0"
+case "$i_out" in
+  *ALARM*) pass "I raises an alarm on a hit" ;;
+  *) fail "I must raise an alarm (got: $i_out)" ;;
+esac
+case "$i_out" in
+  *"exact match of \$ANTHROPIC_AUTH_TOKEN"*) pass "I catches the live token by exact match" ;;
+  *) fail "I must catch the live token exactly, not only by shape" ;;
+esac
+case "$i_out" in
+  *"credential-shaped"*) pass "I catches an unknown-value token by shape" ;;
+  *) fail "I must catch sk- by shape" ;;
+esac
+# The one that matters. Asserted against BOTH the report file and the stdout/
+# stderr the CI log captures - withholding it from one and not the other is the
+# same leak.
+if grep -q "$LIVE_TOKEN" "$I/logs/leak-scan.txt" 2>/dev/null; then
+  fail "I report file must never contain the secret value"
+else
+  pass "I report file withholds the value"
+fi
+case "$i_out" in
+  *"$LIVE_TOKEN"*) fail "I scanner output must never contain the secret value" ;;
+  *) pass "I scanner output withholds the value" ;;
+esac
+# Rerunning must not find its own report - otherwise the count grows every run
+# and the alarm becomes noise nobody reads.
+i2="$(ANTHROPIC_AUTH_TOKEN="$LIVE_TOKEN" RV2_ROOT="$I" HARNESS_DIR="$I" \
+      "$HERE/scan-leaks.sh" "$I" 2>&1 | grep -oE 'ALARM - [0-9]+' | grep -oE '[0-9]+')"
+i1="$(grep -oE 'ALARM - [0-9]+' <<<"$i_out" | grep -oE '[0-9]+')"
+assert_eq "I rerun does not scan its own report" "$i2" "$i1"
+# And a clean tree must say so rather than staying silent - silence reads the
+# same as "scanner never ran".
+J="$WORK/run-j"; mkdir -p "$J/evidence" "$J/logs"
+printf '{"notes":"nothing here"}\n' >"$J/evidence/s-0.json"
+j_out="$(env -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY RV2_ROOT="$J" \
+         "$HERE/scan-leaks.sh" "$J" 2>&1)"
+case "$j_out" in
+  *clean*) pass "I clean tree reports clean, not silence" ;;
+  *) fail "I clean tree must say so (got: $j_out)" ;;
+esac
+
 echo
 if [ "$FAILURES" -eq 0 ]; then
   echo "smoke-fake: ALL LEGS GREEN ($WORK)"

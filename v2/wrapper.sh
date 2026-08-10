@@ -23,6 +23,12 @@ export HARNESS_DIR="$ROOT"
 # A final checkpoint so the artifact set is never stale.
 "$V2_DIR/checkpoint.sh" >/dev/null 2>&1 || true
 
+# Leak scan BEFORE the review.json branches below, because every one of them
+# exits: a run whose trunk died still uploaded whatever the crew wrote, and that
+# is exactly the run nobody reads carefully. Never gated on the decision, and it
+# cannot fail the step - a hit is an alarm, not a block (operator, 2026-08-10).
+"$V2_DIR/scan-leaks.sh" "$ROOT" || true
+
 synth() { # stage error
   local stage="$1" err="$2"
   echo "wrapper: $stage - $err"

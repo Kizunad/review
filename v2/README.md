@@ -1,9 +1,26 @@
-# review engine v2 - P1 runner orchestration harness
+# review engine v2 - runner orchestration harness
 
-Prototype of the v2 runner design (design doc sections 5.5 + 5.7): a review
-that runs ON a GH Actions runner via a tmux session instead of inside the
-engine's own process. P1 = TEST MODE: only script/knowledge files are
-dispatched, nothing is built.
+The v2 runner design (design doc sections 5.5, 5.7, 5.9): a review that runs ON
+a GH Actions runner via a tmux session instead of inside the engine's own
+process, and that establishes its findings by DOING things rather than by
+reading the diff and reasoning.
+
+Two roles, both Claude Code on one relay:
+
+- **trunk = `cc-review` (sol)** - classifies the diff, decides what each part
+  needs in order to be believed, directs the crew, and judges what comes back.
+  Writes no code and runs no experiments.
+- **crew = `cc-review-lite`** - writes and runs tests, builds the server and
+  drives it as a black-box client, drops evidence. Judges nothing.
+
+Modes per assignment: `static` (read and reason - the cheapest, and what the
+whole v1 engine did for everything), `test` (a test that fails if the target
+regresses), `probe` (build from this head, stand up a minimal but functionally
+complete deployment, drive it over the wire). Building is allowed; the earlier
+"the pipeline builds nothing" freeze is gone.
+
+Evidence is an INPUT to the trunk's judgement and never a finding by itself -
+the final call is sol's and cannot be bypassed (operator, 2026-08-10).
 
 ## Architecture
 
@@ -16,7 +33,8 @@ workflow_dispatch / workflow_call
        ├─ restore-checkpoint.sh    -> resume from a prior rv2-checkpoint
        ├─ boot-session.sh          -> tmux session:
        │     pane 0: claude -p (trunk)  - orchestrates + judges ONLY
-       │     panes 1,2: pi (workers)    - write + run tests, drop evidence
+       │     panes 1,2: cc-review-lite  - write + run tests, build + probe,
+       │                                  drop evidence
        │     + checkpoint-watchdog.sh (immediate + every N min + trap)
        ├─ wait-review.sh            -> poll output/review.json (timeout -> kill)
        ├─ wrapper.sh                -> validate v2r1 + headOid + evidence
@@ -88,17 +106,25 @@ Set by the workflow (`review-v2-p1.yml`):
 | `RV2_CHECKPOINT_INTERVAL` | watchdog cadence (default 300s) |
 | `RV2_REVIEW_TIMEOUT_S` | wait-review timeout (default 1500s) |
 | `RV2_MAX_SHARD_CHARS` | shard size (default 12000, matches v1) |
-| `RV2_FAKE` | set to 1 -> boot fake/worker.mjs instead of pi (local smoke) |
-| `AXONHUB_BASE_URL` / `PI_AXONHUB_API_KEY` | relay for the trunk + pi workers |
-| `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL` | trunk |
-| `CLAUDE_EXECUTABLE` | set by setup-claude; boot-session uses it for the trunk |
+| `RV2_FAKE` | set to 1 -> boot the deterministic stubs instead of Claude Code (local smoke) |
+| `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` | the ONE relay, for both roles |
+| `RV2_TRUNK_MODEL` / `RV2_WORKER_MODEL` | default `cc-review` / `cc-review-lite` |
+| `CLAUDE_EXECUTABLE` | set by setup-claude; boot-session uses it for every pane |
 
-Those relay names are internal to the harness; the workflow fills them from the SAME place v1
-does - the `review_base_url` input (falling back to `vars.REVIEW_CLAUDE_BASE_URL`) and the
-`review_api_key` secret (falling back to `secrets.REVIEW_CLAUDE_API_KEY`). P1 first declared
-secrets named `AXONHUB_BASE_URL` / `PI_AXONHUB_API_KEY`, which exist in neither Kizunad/review
-nor Kizunad/Bong, so every early trial booted with an empty relay and died two minutes later as
-"trunk pane never came alive". `rv2_require_relay` now refuses that up front with EX_CONFIG.
+`ANTHROPIC_MODEL` is deliberately NOT set: it applies to every claude process in
+the job and would silently override the per-pane `--model` that keeps the two
+roles apart. Model policy lives in `rv2_trunk_model` / `rv2_worker_model`.
+
+The workflow fills those two from the SAME place v1 does - the `review_base_url` input (falling
+back to `vars.REVIEW_CLAUDE_BASE_URL`) and the `review_api_key` secret (falling back to
+`secrets.REVIEW_CLAUDE_API_KEY`).
+
+There used to be FOUR names, because pi needed its own `AXONHUB_BASE_URL` / `PI_AXONHUB_API_KEY`
+pair. Those were sourced from secrets that exist in neither Kizunad/review nor Kizunad/Bong, so
+every early trial booted with an empty relay and died two minutes later as "trunk pane never came
+alive" - three CI trials burned on a message that named nothing. Two names for one relay is how a
+pair goes empty unnoticed; there is one pair now, and `rv2_require_relay` refuses up front with
+EX_CONFIG and names the empty variable.
 
 A `workflow_dispatch` smoke trial only sees secrets defined on the repo that OWNS the workflow.
 Kizunad/review currently has none, so standalone trials need either a secret defined there or a
@@ -138,15 +164,24 @@ invalidates prior checkpoints). The trunk skips shards listed in
 
 ## Open items (probed)
 
-- **pi needs node 22** - pi 0.82.0 crashes with a webidl error on node 20
-  before parsing `--help` (probe 2026-08-08). The job pins node 22.
-- **pi ignores `ANTHROPIC_BASE_URL`** - its built-in anthropic provider always
-  dials api.anthropic.com (probe 2026-08-08: mock relay received zero requests
-  while pi returned a real Anthropic 401). Worker routing therefore uses the
-  vendored axonhub plugin (`v2/pi-axonhub-models/`), which registers an
-  `openai-completions` provider at `${AXONHUB_BASE_URL}/v1`.
-- **claude -p honors `ANTHROPIC_BASE_URL`** (probe 2026-08-08) - the trunk can
-  be pointed at the relay directly; the auth token is carried as Bearer.
+- ~~**pi needs node 22**~~, ~~**pi ignores `ANTHROPIC_BASE_URL`**~~ - both
+  RETIRED 2026-08-10 with pi itself (design 5.9). The crew is `cc-review-lite`,
+  so the global npm install, the node-22 pin, the vendored axonhub plugin, the
+  second pair of relay names, and `RV2_PI_CLI` are all gone. Every one of them
+  existed to work around pi.
+- **claude honors `ANTHROPIC_BASE_URL`** (probe 2026-08-08) - both roles dial
+  the relay directly; the auth token is carried as Bearer.
+- **the crew needs `--dangerously-skip-permissions`** - it exists to build,
+  run, and probe. A permission prompt in an unattended pane is a hang, and a
+  tool whitelist is what made v1 a read-only reasoner. The sandbox is the
+  ephemeral runner VM (design 5.5), not a flag list.
+- **leak detection is output-side only** (operator ruling 2026-08-10) - the
+  relay node is ours, so probe mode gets no key isolation or separate quota.
+  `v2/scan-leaks.sh` scans crew output for the live token and for
+  credential-shaped strings, reports file/line/6-char-prefix, and **warns
+  without blocking**. It must never print what it finds: a scanner that echoes
+  a secret into the CI log has moved it somewhere with longer retention than
+  the artifact it was protecting.
 - **claude CLI install on the runner** - reuses the repo's hash-pinned
   `.github/actions/setup-claude` (CLAUDE_EXECUTABLE absolute path). No separate
   install needed.
