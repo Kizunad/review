@@ -71,11 +71,37 @@ CLAUDE_BIN="${CLAUDE_EXECUTABLE:-claude}"
 # STILL NOT PROVEN: locally `--tools default` TIMED OUT rather than reporting missing tools, so
 # the local failure mode is not literally the CI one. What makes the comparison worth acting on
 # is A and C answering in the same harness minutes apart, not B's exact symptom.
+# NO MCP SERVERS. THIS IS VARIABLE REMOVAL, NOT A FIX - read the distinction before keeping it.
+#
+# v1 passes `--strict-mcp-config --mcp-config {"mcpServers":{}}` and produces real verdicts every
+# day through the SAME public endpoint, on the same models, declaring tools the same way
+# (`--tools Read,Glob,Grep`). v2 passed nothing about MCP - the word does not appear in any v2
+# script - so the two clients differ on a path only one of them works on.
+#
+# The trunk reported, six times, that its only available tool was IMAGE GENERATION, which is the
+# shape of an MCP-provided tool. That is a candidate, not a diagnosis, and it has a real
+# objection: the runner HOME is fresh and seeded by seed-claude-config.sh, so where would a
+# server come from? No answer. Also possible - and indistinguishable from a pane dump - is that
+# the model received NO tools and confabulated a plausible one when pressed to explain itself;
+# six consistent mentions are six turns of one session sharing one context and separate nothing.
+#
+# So this is not shipped as the cure. It removes a difference between v2 and a configuration
+# PROVEN to work on the path that matters, and it cannot make anything worse. If the next run
+# changes outcome, that tells us the variable mattered - it does NOT tell us the MCP mechanism
+# was right. If it does not change, the whole flag-shape class is eliminated in one run, which
+# is worth as much.
+# The JSON is SINGLE-QUOTED inside this string on purpose. These args are interpolated into a
+# command line that is typed into a pane and parsed by that pane's bash, which strips unquoted
+# double quotes - measured: `--mcp-config {"mcpServers":{}}` arrives at the CLI as
+# {mcpServers:{}}, which is not JSON. The flag would then fail, or worse, be ignored, and the
+# variable this whole change exists to remove would still be there while looking removed.
+MCP_ARGS="${RV2_MCP_ARGS:---strict-mcp-config --mcp-config '{\"mcpServers\":{}}'}"
+
 TOOLS_TRUNK="${RV2_TOOLS_TRUNK:-Read,Write,Edit,Bash,Glob,Grep}"
 TOOLS_CREW="${RV2_TOOLS_CREW:-Read,Write,Edit,Bash,Glob,Grep}"
 TOOLS_SPEC="${RV2_TOOLS:-$TOOLS_CREW}"
 
-WORKER_LAUNCH="'$CLAUDE_BIN' --model '$(rv2_worker_model)' --dangerously-skip-permissions --tools '$TOOLS_SPEC'"
+WORKER_LAUNCH="'$CLAUDE_BIN' --model '$(rv2_worker_model)' --dangerously-skip-permissions $MCP_ARGS --tools '$TOOLS_SPEC'"
 
 # Panes run a POSIX shell we name, NOT the user's login shell.
 #
@@ -221,7 +247,7 @@ if [ "${RV2_FAKE:-0}" = "1" ]; then
     "cd '$ROOT' && $PANE_ENV && bash '$V2_DIR_ABS/../fake/trunk.sh'" Enter
 else
   tmux send-keys -t "$SESSION:$TRUNK_INDEX" \
-    "cd '$ROOT' && $PANE_ENV && '$CLAUDE_BIN' --model '$(rv2_trunk_model)' --dangerously-skip-permissions --tools '$TOOLS_TRUNK'" Enter
+    "cd '$ROOT' && $PANE_ENV && '$CLAUDE_BIN' --model '$(rv2_trunk_model)' --dangerously-skip-permissions $MCP_ARGS --tools '$TOOLS_TRUNK'" Enter
   # No fixed sleep before seeding: seed_pane polls for the input box, which both
   # waits less on a fast boot and does not type into a slow one.
   # Not backgrounded, unlike the workers: if the trunk never accepts its brief
