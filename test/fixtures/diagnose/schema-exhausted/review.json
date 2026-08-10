@@ -1,0 +1,19 @@
+{
+  "version": "v2",
+  "decision": "infrastructure_failure",
+  "findings": [],
+  "suggestions": [],
+  "omittedSuggestions": 0,
+  "failures": [
+    {
+      "stage": "consolidate",
+      "status": "schema_error",
+      "error": "after 3 attempts: consolidation contains unknown member 0123456789abcdef",
+      "diagnostic": "{\"events\":[{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"cc-review\"}]}",
+      "model": "cc-review",
+      "attempts": 3,
+      "retryable": false
+    }
+  ],
+  "coverageGaps": []
+}

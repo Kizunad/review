@@ -1,0 +1,25 @@
+{
+  "version": "v2",
+  "decision": "infrastructure_failure",
+  "findings": [],
+  "suggestions": [],
+  "omittedSuggestions": 0,
+  "failures": [
+    {
+      "stage": "find",
+      "status": "infra_error",
+      "error": "2/16 failed batches exceeds budget 8% (at most 1 of 16 batch(es) may fail)"
+    },
+    {
+      "stage": "find:correctness",
+      "status": "schema_error",
+      "error": "1 occurrence(s) in 1/2 failed batch(es); samples: batch-0: after 3 attempts: schema validation failed: finder data must be an array"
+    },
+    {
+      "stage": "find:strict-maintainability",
+      "status": "schema_error",
+      "error": "1 occurrence(s) in 1/2 failed batch(es); samples: batch-0: after 3 attempts: schema validation failed: finder data must be an array"
+    }
+  ],
+  "coverageGaps": []
+}

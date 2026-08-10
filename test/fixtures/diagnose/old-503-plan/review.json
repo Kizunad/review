@@ -1,0 +1,16 @@
+{
+  "version": "v2",
+  "decision": "infrastructure_failure",
+  "findings": [],
+  "suggestions": [],
+  "omittedSuggestions": 0,
+  "failures": [
+    {
+      "stage": "plan",
+      "status": "infra_error",
+      "error": "after 3 attempts: claude exited 1",
+      "diagnostic": "{\"events\":[{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"cc-review\",\"apiKeySource\":\"ANTHROPIC_API_KEY\",\"claudeCodeVersion\":\"2.1.220\"},{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":1,\"maxRetries\":10,\"errorStatus\":503,\"error\":\"server_error\"},{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":2,\"maxRetries\":10,\"errorStatus\":503,\"error\":\"server_error\"},{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":3,\"maxRetries\":10,\"errorStatus\":503,\"error\":\"server_error\"},{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":4,\"maxRetries\":10,\"errorStatus\":503,\"error\":\"server_error\"},{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":5,\"maxRetries\":10,\"errorStatus\":503,\"error\":\"server_error\"},{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":6,\"maxRetries\":10,\"errorStatus\":503,\"error\":\"server_error\"},{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":7,\"maxRetries\":10,\"errorStatus\":503,\"error\":\"server_error\"},{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":8,\"maxRetries\":10,\"errorStatus\":503,\"error\":\"server_error\"},{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":9,\"maxRetries\":10,\"errorStatus\":503,\"error\":\"server_error\"},{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":10,\"maxRetries\":10,\"errorStatus\":503,\"error\":\"server_error\"},{\"type\":\"result\",\"subtype\":\"success\",\"isError\":true,\"apiErrorStatus\":503,\"terminalReason\":\"api_error\"}],\"stderr\":\"\"}"
+    }
+  ],
+  "coverageGaps": []
+}

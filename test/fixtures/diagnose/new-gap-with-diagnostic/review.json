@@ -1,0 +1,22 @@
+{
+  "version": "v2",
+  "decision": "request_changes",
+  "findings": [],
+  "suggestions": [],
+  "omittedSuggestions": 0,
+  "failures": [],
+  "coverageGaps": [
+    {
+      "stage": "find:correctness",
+      "batch": 0,
+      "paths": ["scripts/bot/scenarios/a.py"],
+      "error": "cpu overload gate rejected the call (system cpu overloaded (current: 96.5%, threshold: 90%)); failing fast instead of retrying",
+      "diagnostic": "{\"events\":[{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"cc-review-lite\"},{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":1,\"maxRetries\":10,\"errorStatus\":503,\"error\":\"server_error\"},{\"type\":\"result\",\"subtype\":\"success\",\"isError\":true,\"apiErrorStatus\":503,\"terminalReason\":\"api_error\"}]}",
+      "apiErrorStatus": 503,
+      "terminalReason": "api_error",
+      "model": "cc-review-lite",
+      "attempts": 1,
+      "retryable": true
+    }
+  ]
+}

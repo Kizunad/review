@@ -1,0 +1,84 @@
+{
+  "version": "v2",
+  "decision": "request_changes",
+  "findings": [
+    {
+      "taxonomy": "testing",
+      "path": "scripts/bot/scenarios/network_payload_oversized.py",
+      "line": 27,
+      "title": "The claimed 32767-byte acceptance boundary has no positive test",
+      "evidence": "The scenario states that 32767 bytes must be accepted and 32768 bytes rejected, but every boundary probe is larger than 32767 bytes; the only accepted request checked afterward is a small ordinary request. A decoder incorrectly changed to reject payloads at 32767 bytes, or to impose any lower limit still above the final small request, would pass this scenario while violating the documented protocol boundary. None of the added protocol unit tests supplies an exactly-32767-byte valid payload either.",
+      "rootCause": "the test covers only the rejection side of the off-by-one boundary and does not send a structurally valid request whose encoded payload is exactly max_payload_size.",
+      "level": "major",
+      "fingerprint": "17322963a53da8af98203442c8bf89dc737f614b6ddfeec4715c4e42fd76a35b"
+    },
+    {
+      "taxonomy": "security",
+      "path": "scripts/bot/scenarios/network_session_token_stale.py",
+      "line": 42,
+      "title": "Forged item ID masks failures in the session-token authorization boundary",
+      "evidence": "Every stale-token move built by `_move_request` uses the constant `FORGED_INSTANCE_ID`, so the request is invalid independently of its session token. A handler that incorrectly accepts an expired, replayed, or never-issued session but subsequently rejects the move because instance `0xDEAD_BEEF_CAFE_0001` does not exist can produce the expected unchanged inventory resync and no `loot_container_update`, passing `_assert_stale_move_rejected_zero_mutation` and the replay assertions. The closed-token leg uses the same forged instance, and its optional environment skip leaves only this ambiguous forged-token path. Thus the new scenario's claimed session-authority coverage does not distinguish authorization rejection from downstream item validation.",
+      "rootCause": "the security credential under test is combined with a second deliberately invalid field, rather than replaying a valid item move whose only invalid precondition is the stale or forged session token.",
+      "level": "major",
+      "fingerprint": "1b42af4de33ebae11ee67414cef808c09033abf79b458312e793886995bad0a7"
+    },
+    {
+      "taxonomy": "testing",
+      "path": "scripts/bot/scenarios/network_session_token_stale.py",
+      "line": 177,
+      "title": "Closed issued-session replay coverage can be skipped while the scenario passes",
+      "evidence": "The state-transition contract described by this scenario is that a token which was valid and then closed cannot be replayed. However, _open_real_session returns None when chunks or the marker are unavailable, and the entire open-close-replay branch is conditionally omitted. The mandatory forged-token branch only tests IDs that were never issued. An implementation that correctly rejects unknown IDs but fails to remove or invalidate a real session on close would therefore pass whenever the environment takes the allowed skip path.",
+      "rootCause": "the only test of the issued-to-closed session transition is optional, while the fallback exercises a different registry state and cannot detect failed session invalidation.",
+      "level": "major",
+      "fingerprint": "7812ee1b8d34b3cddb8e17e9d517d2ab8dd8f38fa6025a93d8e95cc8a8242860"
+    },
+    {
+      "taxonomy": "wiring",
+      "path": "scripts/bot/scenarios/_rejection_helpers.py",
+      "line": 102,
+      "title": "Pre-probe traffic masks request-triggered responses of the same payload type",
+      "evidence": "The helper classifies every server_data payload type observed before sent_at as ambient, then ignores later events of those types. Join traffic includes inventory_snapshot, so an invalid block_picker_give or use_quick_slot request that incorrectly reaches its production handler and emits an unchanged inventory_snapshot would pass assert_no_gameplay_side_effect_since. The separate inventory fingerprint would also remain equal because neither contents nor revision changed. The new test test_payload_type_seen_before_window_is_ambient explicitly preserves this masking behavior. Therefore these scenarios can pass even when an invalid request traverses the production request-to-handler-to-response chain and produces gameplay output, contradicting their clean-rejection contract.",
+      "rootCause": "ambient classification is based solely on whether a payload type appeared before the probe, rather than whether each post-probe event is independently known to be periodic or unrelated to the request. this discards request causality for payload types shared by connection synchronization and request handlers.",
+      "level": "major",
+      "fingerprint": "7af74daa2c48fc389c13342430f0ddeb8a14d58ad27707fcaf63a5fb3e5f6f38"
+    },
+    {
+      "taxonomy": "strict-maintainability",
+      "path": "scripts/bot/scenarios/_rejection_helpers.py",
+      "line": 203,
+      "title": "Heartbeat assertion can be satisfied by a keepalive received before the probes",
+      "evidence": "`sent_at` is taken from the last event before sending, but `wait_keepalive_after(bot, sent_at)` later searches all accumulated events. The asynchronous reader can append a keepalive after that timestamp but before the first probe is sent. If the probes then cause the server to forget the connection without closing the socket, `assert_alive` still succeeds and the pre-probe keepalive satisfies `wait_keepalive_after`, so the scenario passes despite observing no heartbeat after rejection. The new tests only model a pending keepalive consumed after probe execution and do not cover this interleaving.",
+      "rootCause": "the heartbeat boundary is anchored to an earlier event timestamp rather than to completion of the probe sends, so the helper does not establish the claimed post-rejection ordering.",
+      "level": "major",
+      "fingerprint": "93fb3db4b013b3d53d606a1515910012508f09e4d457a23143846ff40c113008"
+    },
+    {
+      "taxonomy": "strict-maintainability",
+      "path": "scripts/bot/scenarios/network_session_token_stale.py",
+      "line": 153,
+      "title": "Forged-token move checks omit the success-response rejection assertion",
+      "evidence": "`_assert_stale_move_rejected_zero_mutation` only waits for an inventory snapshot and compares its fingerprint. An incorrect forged-token handler that emits an unchanged resync snapshot and also emits `loot_container_update` would pass both forged-token calls, even though the scenario's stated clean-rejection contract says that successful-path response must not appear. The separately duplicated closed-token move path calls `assert_no_server_data_payload_since(..., \"loot_container_update\", ...)`, demonstrating the required observable check, but the shared helper used for the mandatory forged-token leg does not. Because the real-session leg may be skipped, a run can complete without applying this assertion to any stale move.",
+      "rootCause": "the stale-move contract is implemented twice, and the helper used by the mandatory forged-token path contains only the zero-mutation half of the canonical rejection assertions.",
+      "level": "major",
+      "fingerprint": "caf311308b8f8c1c4360c38e055cbb681c80c29b185273142c1910d56c757cb7"
+    }
+  ],
+  "suggestions": [],
+  "omittedSuggestions": 0,
+  "failures": [],
+  "coverageGaps": [
+    {
+      "stage": "find:correctness",
+      "batch": 0,
+      "paths": [
+        "scripts/bot/scenarios/_rejection_helpers.py",
+        "scripts/bot/scenarios/network_payload_oversized.py",
+        "scripts/bot/scenarios/network_request_out_of_range.py",
+        "scripts/bot/scenarios/network_request_unknown_type.py",
+        "scripts/bot/scenarios/network_session_token_stale.py",
+        "scripts/bot/test_protocol.py"
+      ],
+      "error": "after 3 attempts: claude exited 1"
+    }
+  ]
+}
