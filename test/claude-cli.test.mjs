@@ -1,3 +1,8 @@
+// The schema moved from argv into the prompt. These tests are about how the SCHEMA is
+// transformed - array wrapping, unsupported metadata, RE2 patterns - not about where it travels,
+// so they read it from its new home through one helper instead of each knowing the layout.
+const schemaFromPrompt = (prompt) => JSON.parse(prompt.slice(prompt.lastIndexOf('\n\n') + 2));
+
 import { spawn as nodeSpawn } from 'node:child_process';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -9,6 +14,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   buildClaudeArgs,
+  promptWithSchema,
   buildSandboxArgs,
   runFreshClaude,
   sanitizedEnv,
@@ -80,43 +86,73 @@ function writeSseEvent(response, event, data) {
   response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
-function writeToolUses(response, uses) {
+// The reply shape the new contract actually uses: ordinary assistant text carrying the JSON.
+// There is no StructuredOutput tool to answer with any more, so a mock that still answers with
+// one is answering with a tool the CLI never advertised - which is a 30s hang, not a failure.
+// A reply that carries a THINKING block before its text, which is what an
+// upstream in thinking mode actually returns. Needed to test the second 400
+// family: Console Go's deserialiser only accepts 'text' content blocks, so any
+// request body echoing a 'thinking' block back is rejected outright with
+// `messages[N] unknown variant 'thinking'`. A mock that returns plain text can
+// never exercise that - there would be nothing to echo, and the test would pass
+// for free.
+function writeThinkingThenText(response, thought, text) {
   response.writeHead(200, { 'content-type': 'text/event-stream' });
   writeSseEvent(response, 'message_start', {
     type: 'message_start',
     message: {
-      id: `message-${uses.map(({ id }) => id).join('-')}`,
-      type: 'message',
-      role: 'assistant',
-      model: 'luna',
-      content: [],
-      stop_reason: null,
-      stop_sequence: null,
+      id: 'message-thinking', type: 'message', role: 'assistant', model: 'luna',
+      content: [], stop_reason: null, stop_sequence: null,
       usage: { input_tokens: 1, output_tokens: 0 },
     },
   });
-  for (const [index, { id, name, input }] of uses.entries()) {
-    writeSseEvent(response, 'content_block_start', {
-      type: 'content_block_start', index,
-      content_block: { type: 'tool_use', id, name, input: {} },
-    });
-    writeSseEvent(response, 'content_block_delta', {
-      type: 'content_block_delta', index,
-      delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) },
-    });
-    writeSseEvent(response, 'content_block_stop', { type: 'content_block_stop', index });
-  }
+  writeSseEvent(response, 'content_block_start', {
+    type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' },
+  });
+  writeSseEvent(response, 'content_block_delta', {
+    type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: thought },
+  });
+  writeSseEvent(response, 'content_block_stop', { type: 'content_block_stop', index: 0 });
+  writeSseEvent(response, 'content_block_start', {
+    type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' },
+  });
+  writeSseEvent(response, 'content_block_delta', {
+    type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text },
+  });
+  writeSseEvent(response, 'content_block_stop', { type: 'content_block_stop', index: 1 });
   writeSseEvent(response, 'message_delta', {
     type: 'message_delta',
-    delta: { stop_reason: 'tool_use', stop_sequence: null },
-    usage: { output_tokens: uses.length },
+    delta: { stop_reason: 'end_turn', stop_sequence: null },
+    usage: { output_tokens: 2 },
   });
   writeSseEvent(response, 'message_stop', { type: 'message_stop' });
   response.end();
 }
 
-function writeToolUse(response, toolUse) {
-  writeToolUses(response, [toolUse]);
+function writeText(response, text) {
+  response.writeHead(200, { 'content-type': 'text/event-stream' });
+  writeSseEvent(response, 'message_start', {
+    type: 'message_start',
+    message: {
+      id: 'message-text', type: 'message', role: 'assistant', model: 'luna',
+      content: [], stop_reason: null, stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 0 },
+    },
+  });
+  writeSseEvent(response, 'content_block_start', {
+    type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' },
+  });
+  writeSseEvent(response, 'content_block_delta', {
+    type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text },
+  });
+  writeSseEvent(response, 'content_block_stop', { type: 'content_block_stop', index: 0 });
+  writeSseEvent(response, 'message_delta', {
+    type: 'message_delta',
+    delta: { stop_reason: 'end_turn', stop_sequence: null },
+    usage: { output_tokens: 1 },
+  });
+  writeSseEvent(response, 'message_stop', { type: 'message_stop' });
+  response.end();
 }
 
 async function withMockClaudeProvider(handler, run) {
@@ -167,30 +203,31 @@ async function runNativeClaude({ claude, ripgrep, bubblewrap, repository, baseUr
   });
 }
 
-function toolResultsFrom(message) {
-  if (message?.role !== 'user' || !Array.isArray(message.content)) return [];
-  return message.content.filter((block) => block?.type === 'tool_result');
-}
-
-function toolResultFrom(message) {
-  return toolResultsFrom(message)[0] ?? null;
-}
-
-test('builds the fixed fresh read-only Claude command with inline schema JSON', () => {
+test('builds the fixed fresh Claude command - neither prompt nor schema rides in argv', () => {
   const args = buildClaudeArgs({ model: 'terra', prompt: 'review', jsonSchema: schema });
   assert.deepEqual(args, [
     '--safe-mode', '--disable-slash-commands', '--no-chrome',
     '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-    '-p', '--no-session-persistence', '--model', 'terra', '--effort', 'max',
+    // -p and the trailing --json-schema pair are both gone (the schema rides in the
+    // prompt, #45). The tool whitelist is replaced here - that is this PR's argument:
+    // the sandbox is the boundary, so the whitelist that had to enumerate capabilities
+    // in advance is dropped for --dangerously-skip-permissions.
+    '--no-session-persistence', '--model', 'terra', '--effort', 'max',
     '--dangerously-skip-permissions',
-    '--output-format', 'stream-json', '--verbose', '--json-schema', JSON.stringify(schema),
+    '--output-format', 'stream-json', '--verbose',
   ]);
   assert.equal(args.includes('review'), false);
   assert.equal(args.some((arg) => /resume|Bash|Edit|Write|--bare/.test(arg)), false);
   assert.ok(args.includes('--safe-mode'));
   assert.ok(args.includes('--disable-slash-commands'));
   assert.ok(args.includes('--strict-mcp-config'));
-  assert.deepEqual(JSON.parse(args.at(-1)), schema);
+  // --json-schema is gone, so nothing in argv may name a schema any more. Asserting the flag is
+  // absent would pass even if the JSON were still being appended positionally; assert instead
+  // that no argument parses as the schema, and that the flag itself is nowhere.
+  assert.equal(args.includes('--json-schema'), false);
+  assert.equal(args.some((arg) => arg.includes('"verdict"')), false);
+  // Where it went instead. This is the only place the two halves are tied together.
+  assert.deepEqual(schemaFromPrompt(promptWithSchema('review', schema)), schema);
   // Shape gate, not membership: the relay owns the valid set, so an arbitrary
   // well-formed name passes; malformed or flag-shaped names must throw.
   assert.ok(buildClaudeArgs({ model: 'cc-review', prompt: 'x', jsonSchema: schema }).includes('cc-review'));
@@ -218,6 +255,18 @@ process.stdout.write(JSON.stringify({
 }) + '\\n');
 `);
   const prompt = `${promptSentinel}\n${'界'.repeat(75_000)}\nend`;
+  // What reaches stdin is the prompt PLUS the schema block, so the byte count and digest must be
+  // taken from the transmitted text. Hashing `prompt` here would have quietly asserted that the
+  // schema never arrives - the exact regression this change is trying not to introduce.
+  const largeSchema = {
+    type: 'object',
+    properties: { bytes: { type: 'integer' }, sha256: { type: 'string' }, argvHasPrompt: { type: 'boolean' } },
+    required: ['bytes', 'sha256', 'argvHasPrompt'],
+    additionalProperties: false,
+  };
+  const sent = promptWithSchema(prompt, largeSchema);
+  const sentBytes = Buffer.byteLength(sent);
+  const sentDigest = createHash('sha256').update(sent).digest('hex');
   const result = await runFreshClaude({
     ...baseRun(),
     prompt,
@@ -230,20 +279,18 @@ process.stdout.write(JSON.stringify({
       assert.equal(args[separator + 1], '/sandbox/claude');
       return nodeSpawn(process.execPath, [worker, ...args.slice(separator + 2)], options);
     },
-    jsonSchema: {
-      type: 'object',
-      properties: { bytes: { type: 'integer' }, sha256: { type: 'string' }, argvHasPrompt: { type: 'boolean' } },
-      required: ['bytes', 'sha256', 'argvHasPrompt'],
-      additionalProperties: false,
-    },
-    validate: (value) => value.bytes === Buffer.byteLength(prompt)
-      && value.sha256 === createHash('sha256').update(prompt).digest('hex')
+    jsonSchema: largeSchema,
+    validate: (value) => value.bytes === sentBytes
+      && value.sha256 === sentDigest
       && value.argvHasPrompt === false,
   });
   assert.equal(result.status, 'ok', result.error);
-  assert.equal(result.data.bytes, Buffer.byteLength(prompt));
-  assert.equal(result.data.sha256, createHash('sha256').update(prompt).digest('hex'));
+  assert.equal(result.data.bytes, sentBytes);
+  assert.equal(result.data.sha256, sentDigest);
   assert.equal(result.data.argvHasPrompt, false);
+  // The 300KB prompt still dominates: the schema block is a rounding error on top of it, and the
+  // whole point of the test is that neither half was truncated on the way through the pipe.
+  assert.ok(sentBytes > Buffer.byteLength(prompt), 'the schema must actually be appended');
 });
 
 test('reports prompt stdin write failures as infrastructure errors', async () => {
@@ -261,8 +308,7 @@ test('strips schema metadata unsupported by the Claude CLI validator', () => {
     $id: 'review-plan.schema.json',
     ...schema,
   };
-  const args = buildClaudeArgs({ model: 'sol', prompt: 'plan', jsonSchema: source });
-  const cliSchema = JSON.parse(args[args.indexOf('--json-schema') + 1]);
+  const cliSchema = schemaFromPrompt(promptWithSchema('plan', source));
 
   assert.deepEqual(cliSchema, schema);
   assert.equal('$schema' in cliSchema, false);
@@ -505,6 +551,56 @@ test('git works against a read-only checkout it does not own', () => {
 });
 
 
+test('a thinking reply is never echoed back into a follow-up request body', async (context) => {
+  // The SECOND 400 family, and the one that actually killed reviews tonight.
+  // W16 counted both signatures on 2026-08-10:
+  //   22x  deserialize: messages[1] unknown variant 'thinking'   <-- this test
+  //    2x  Thinking mode does not support this tool_choice       <-- the test below
+  // They are different defects and removing the forced tool_choice does not
+  // obviously fix the first one, so it gets its own pin rather than being
+  // assumed covered.
+  //
+  // The mechanism being asserted: with --json-schema the CLI HAD to obtain a
+  // tool call, so a model that answered with thinking + text instead forced a
+  // SECOND request - and that request carried the thinking block back, which
+  // Console Go's deserialiser rejects. With the schema in the prompt, the text
+  // IS the answer, the turn ends, and no second request is ever built.
+  if (process.platform !== 'linux') return context.skip('Linux Bubblewrap test');
+  const tools = nativeTestExecutables();
+  if (!tools) return context.skip('CLAUDE_EXECUTABLE and RIPGREP_EXECUTABLE are required');
+  const root = await mkdtemp(path.join(tmpdir(), 'claude-native-thinking-'));
+  const repository = path.join(root, 'repository');
+  await mkdir(repository);
+
+  const bodies = [];
+  const result = await withMockClaudeProvider((request, response) => {
+    bodies.push(request);
+    writeThinkingThenText(response, 'deliberating about done', '{"done":true}');
+  }, (baseUrl) => runNativeClaude({
+    ...tools, repository, baseUrl, secret: 'native-thinking-secret', prompt: 'Return done=true.',
+  }));
+
+  assert.equal(result.status, 'ok', result.error);
+  // Self-check first: if the mock never got a request, everything below passes
+  // vacuously - the exact shape of failure this file has been bitten by twice.
+  assert.ok(bodies.length >= 1, 'the mock must have received at least one request');
+
+  const echoed = bodies.flatMap((body, index) => (body.messages ?? [])
+    .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+    .filter((block) => block?.type === 'thinking')
+    .map(() => `request ${index}`));
+  assert.deepEqual(echoed, [],
+    `a thinking block was echoed back in ${echoed.join(', ')} - Console Go rejects that body with `
+    + "\"unknown variant 'thinking'\", which is 22 of tonight's 24 observed 400s");
+
+  // The structural reason it cannot happen: the turn ends on the text reply, so
+  // there is no follow-up request to carry anything. Asserted separately because
+  // "no thinking echoed" would also hold if the CLI simply stripped it, and a
+  // strip we do not control is not a guarantee we can rely on.
+  assert.equal(bodies.length, 1,
+    `expected the turn to end on the text reply; ${bodies.length} requests means a follow-up was built`);
+});
+
 test('native Claude is given the full toolset, with the sandbox as the only fence', async (context) => {
   if (process.platform !== 'linux') return context.skip('Linux Bubblewrap test');
   const tools = nativeTestExecutables();
@@ -514,9 +610,19 @@ test('native Claude is given the full toolset, with the sandbox as the only fenc
   await mkdir(repository);
   await writeFile(path.join(repository, 'visible.txt'), 'needle\n');
   let advertisedTools;
+  let toolChoice;
+  let firstPrompt;
   const result = await withMockClaudeProvider((request, response) => {
     advertisedTools ??= request.tools?.map((tool) => tool.name).sort();
-    writeToolUse(response, { id: 'done', name: 'StructuredOutput', input: { done: true } });
+    toolChoice ??= request.tool_choice ?? null;
+    // The text blocks themselves, not JSON.stringify of the envelope - stringify escapes every
+    // quote, so /"done"/ would never match and the assertion would only ever be testing itself.
+    firstPrompt ??= (request.messages ?? [])
+      .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+      .filter((block) => block?.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    writeText(response, '{"done":true}');
   }, (baseUrl) => runNativeClaude({
     ...tools, repository, baseUrl, secret: 'native-tool-contract-secret', prompt: 'Return done=true.',
   }));
@@ -527,9 +633,24 @@ test('native Claude is given the full toolset, with the sandbox as the only fenc
   // Bash and Read, not Glob and Grep. Granting the full toolset does not merely ADD Bash - the
   // CLI drops the Grep and Glob tools and tells the model to use `grep` through Bash instead, so
   // asserting them here would fail for a capability that is present by another route.
-  for (const required of ['Read', 'Bash', 'StructuredOutput']) {
+  for (const required of ['Read', 'Bash']) {
     assert.ok(advertisedTools.includes(required), `the reviewer needs ${required}`);
   }
+  assert.equal(advertisedTools.includes('Grep'), false,
+    'Grep and Glob are gone with the whitelist - the reviewer greps through Bash now');
+  assert.equal(advertisedTools.includes('Glob'), false);
+
+  // No StructuredOutput: --json-schema is gone (#45), so nothing forces a tool call. An
+  // upstream in thinking mode answers a FORCED tool_choice with a hard 400 - deterministic,
+  // routing-dependent, and invisible to every channel health check. So the wire must show no
+  // forcing at all: no StructuredOutput tool to force, and no tool_choice pinning one.
+  assert.equal(advertisedTools.includes('StructuredOutput'), false,
+    'a StructuredOutput tool means --json-schema came back and with it the forced tool_choice');
+  assert.ok(toolChoice === null || toolChoice.type === 'auto',
+    `tool_choice must not force a tool, got ${JSON.stringify(toolChoice)}`);
+  // And the schema still has to arrive, or "no forcing" would just mean "no contract".
+  assert.match(firstPrompt, /Return ONLY a JSON value matching this JSON Schema/);
+  assert.match(firstPrompt, /"required":\["done"\]/, 'the schema must reach the model in the prompt');
   // Bash specifically, because its absence is what forced the diff to be computed outside and
   // pushed in pre-sharded - the thing that made a whole review fail when one shard did.
   assert.ok(advertisedTools.length > 10, 'no curated whitelist should be back');
@@ -560,11 +681,15 @@ test('loads schema files before spawning and validates structured_output, not th
   assert.equal(captured.executable, process.env.BWRAP_EXECUTABLE ?? 'bwrap');
   assert.equal(captured.options.cwd, undefined);
   assert.deepEqual(captured.options.stdio, ['pipe', 'pipe', 'pipe']);
-  assert.equal(Buffer.concat(captured.child.stdin.writes).toString('utf8'), 'x');
   assert.equal(captured.options.detached, process.platform !== 'win32');
   const separator = captured.args.indexOf('--');
   assert.equal(captured.args[separator + 1], '/sandbox/claude');
-  assert.deepEqual(JSON.parse(captured.args.at(-1)), schema);
+  // The file is the only source of the schema here - jsonSchema is undefined. Reading it back out
+  // of the prompt is what proves loadJsonSchema ran BEFORE the spawn and its result travelled;
+  // the old argv assertion checked the same thing through a flag that no longer exists.
+  const stdin = Buffer.concat(captured.child.stdin.writes).toString('utf8');
+  assert.ok(stdin.startsWith('x'), 'the caller prompt leads, the schema block follows');
+  assert.deepEqual(schemaFromPrompt(stdin), schema);
 });
 
 test('passes only the minimal controlled child environment', () => {
@@ -790,6 +915,98 @@ test('structural error status is disclosable to reviewing callers while the exce
   assert.equal(twoResults.status, 'infra_error');
   assert.ok(typeof twoResults.diagnostic === 'string' && twoResults.diagnostic.length > 0);
   assert.doesNotMatch(twoResults.diagnostic, /apiErrorStatus|terminalReason/);
+});
+
+test('the host cpu gate message surfaces as a structured apiErrorMessage for classification', async () => {
+  const stdout = resultEvent(undefined, {
+    is_error: true,
+    api_error_status: 503,
+    terminal_reason: 'api_error',
+    result: JSON.stringify({
+      type: 'error',
+      error: { type: 'overloaded_error', message: 'system cpu overloaded (current: 96.5%, threshold: 90%)' },
+    }),
+    structured_output: undefined,
+  });
+  const result = await runFreshClaude(baseRun({
+    environment: { ANTHROPIC_API_KEY: 'cpu-gate-secret-value' },
+    spawn: fakeSpawn({ code: 1, stdout }),
+  }));
+  assert.equal(result.status, 'infra_error');
+  assert.equal(result.apiErrorStatus, 503);
+  assert.equal(result.apiErrorMessage, 'system cpu overloaded (current: 96.5%, threshold: 90%)');
+  assert.equal(JSON.stringify(result).includes('cpu-gate-secret-value'), false);
+});
+
+test('a non-JSON error body stays private - no apiErrorMessage for free text', async () => {
+  const stdout = resultEvent(undefined, {
+    is_error: true,
+    api_error_status: 503,
+    terminal_reason: 'api_error',
+    result: 'API Error: 503 server_error PR_DIFF_MARKER',
+    structured_output: undefined,
+  });
+  const result = await runFreshClaude(baseRun({
+    environment: { ANTHROPIC_API_KEY: 'free-text-secret-value' },
+    spawn: fakeSpawn({ code: 1, stdout }),
+  }));
+  assert.equal(result.status, 'infra_error');
+  assert.equal(result.apiErrorStatus, 503);
+  assert.equal(result.apiErrorMessage, undefined, 'free text must not ride as a structured field');
+  assert.equal(JSON.stringify(result).includes('PR_DIFF_MARKER'), false);
+  assert.equal(JSON.stringify(result).includes('free-text-secret-value'), false);
+});
+
+test('a structured body without a message field yields the status but no apiErrorMessage', async () => {
+  const stdout = resultEvent(undefined, {
+    is_error: true,
+    api_error_status: 503,
+    terminal_reason: 'api_error',
+    result: JSON.stringify({ type: 'error', error: { type: 'overloaded_error' } }),
+    structured_output: undefined,
+  });
+  const result = await runFreshClaude(baseRun({ spawn: fakeSpawn({ code: 1, stdout }) }));
+  assert.equal(result.status, 'infra_error');
+  assert.equal(result.apiErrorStatus, 503);
+  assert.equal(result.apiErrorMessage, undefined);
+});
+
+test('a second result event withholds the envelope - the status could belong to either', async () => {
+  const stdout = resultEvent(undefined, {
+    is_error: true,
+    api_error_status: 503,
+    terminal_reason: 'api_error',
+    result: JSON.stringify({
+      type: 'error', error: { type: 'overloaded_error', message: 'system cpu overloaded (current: 96.5%, threshold: 90%)' },
+    }),
+    structured_output: undefined,
+  }) + resultEvent(undefined, {
+    is_error: true, api_error_status: 500, terminal_reason: 'api_error', structured_output: undefined,
+  });
+  const result = await runFreshClaude(baseRun({ spawn: fakeSpawn({ code: 1, stdout }) }));
+  assert.equal(result.status, 'infra_error');
+  assert.equal(result.apiErrorStatus, undefined);
+  assert.equal(result.apiErrorMessage, undefined, 'ambiguous result events must not read the restricted field');
+});
+
+test('a CLI-level error with JSON text stays private - only terminal_reason api_error confirms a gateway envelope', async () => {
+  const stdout = resultEvent(undefined, {
+    is_error: true,
+    api_error_status: 503,
+    terminal_reason: 'error',
+    result: JSON.stringify({
+      type: 'error', error: { type: 'overloaded_error', message: 'system cpu overloaded (current: 96.5%, threshold: 90%)' },
+    }),
+    structured_output: undefined,
+  });
+  const result = await runFreshClaude(baseRun({
+    environment: { ANTHROPIC_API_KEY: 'cli-error-secret-value' },
+    spawn: fakeSpawn({ code: 1, stdout }),
+  }));
+  assert.equal(result.status, 'infra_error');
+  assert.equal(result.apiErrorStatus, undefined);
+  assert.equal(result.apiErrorMessage, undefined);
+  assert.equal(JSON.stringify(result).includes('cli-error-secret-value'), false);
 });
 
 test('redacts quoted credential forms while keeping diagnostics valid JSON', async () => {
@@ -1122,14 +1339,13 @@ process.stdout.write(JSON.stringify({ type: 'result', structured_output: results
 test('array-rooted schemas travel wrapped in an object envelope for the structured-output endpoint', () => {
   // The endpoint behind the relay 400s any root 'type: "array"'
   // (invalid_function_parameters), which is why the find stage could never run.
-  const args = buildClaudeArgs({ model: 'sol', prompt: 'find', jsonSchema: { type: 'array', items: { type: 'string' } } });
-  const cliSchema = JSON.parse(args[args.indexOf('--json-schema') + 1]);
+  const cliSchema = schemaFromPrompt(promptWithSchema('find', { type: 'array', items: { type: 'string' } }));
   assert.equal(cliSchema.type, 'object');
   assert.deepEqual(cliSchema.required, ['items']);
   assert.equal(cliSchema.additionalProperties, false);
   assert.deepEqual(cliSchema.properties.items, { type: 'array', items: { type: 'string' } });
   // Object-rooted schemas are untouched - no envelope, no items key.
-  const plain = JSON.parse(buildClaudeArgs({ model: 'sol', prompt: 'plan', jsonSchema: schema }).at(-1));
+  const plain = schemaFromPrompt(promptWithSchema('plan', schema));
   assert.deepEqual(plain, schema);
 });
 
@@ -1151,24 +1367,19 @@ test('unwraps the array envelope symmetrically and still accepts a raw array rep
 test('strips RE2-incompatible patterns for the CLI copy, keeps RE2-safe ones', () => {
   // Structured-output providers compile patterns with RE2: lookaround or a
   // backreference gets the whole schema rejected with 400 invalid_json_schema.
-  const args = buildClaudeArgs({
-    model: 'sol',
-    prompt: 'find',
-    jsonSchema: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', pattern: '^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]{1,500}$' },
-          fingerprint: { type: 'string', pattern: '^[a-f0-9]{64}$' },
-          echo: { type: 'string', pattern: '^(a)\\1$' },
-        },
-        required: ['path', 'fingerprint', 'echo'],
-        additionalProperties: false,
+  const cliSchema = schemaFromPrompt(promptWithSchema('find', {
+    type: 'array',
+    items: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', pattern: '^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]{1,500}$' },
+        fingerprint: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+        echo: { type: 'string', pattern: '^(a)\\1$' },
       },
+      required: ['path', 'fingerprint', 'echo'],
+      additionalProperties: false,
     },
-  });
-  const cliSchema = JSON.parse(args[args.indexOf('--json-schema') + 1]);
+  }));
   const properties = cliSchema.properties.items.items.properties;
   assert.equal('pattern' in properties.path, false, 'lookaround pattern must be dropped');
   assert.equal('pattern' in properties.echo, false, 'backreference pattern must be dropped');

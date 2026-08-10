@@ -147,16 +147,44 @@ export async function loadJsonSchema(jsonSchemaPath) {
   return JSON.parse(await readFile(jsonSchemaPath, 'utf8'));
 }
 
+// The schema travels in the PROMPT, not as --json-schema.
+//
+// --json-schema makes Claude Code force a tool call to get structured output. Forcing is a
+// request shape some upstreams reject outright - an upstream in thinking mode answers a forced
+// tool_choice with a hard 400, deterministically, and on 2026-08-10 that killed two of three
+// reviews while every channel measured healthy. Nothing about the review needed the force: with
+// the schema simply stated in the prompt the model returns the JSON as its result and the stage
+// parses it, which is how any ordinary Claude Code process is used.
+//
+// Validation is not lost with it. It never lived in the flag: the runner validates every stage
+// itself (validateStage) and has a schema-repair budget that feeds the exact validation error
+// back into the next attempt. The flag bought a guarantee the engine was already enforcing, and
+// charged for it in the one currency that fails closed - request shape.
+export function promptWithSchema(prompt, jsonSchema) {
+  if (typeof prompt !== 'string' || prompt.length === 0) throw new TypeError('prompt must be non-empty');
+  return [
+    prompt,
+    'Return ONLY a JSON value matching this JSON Schema. No prose, no explanation, no code fence.',
+    schemaJson(jsonSchema),   // already a JSON string; stringifying it again double-encodes
+  ].join('\n\n');
+}
+
 export function buildClaudeArgs({ model, prompt, jsonSchema }) {
   if (typeof model !== 'string' || !MODEL_NAME.test(model)) throw new TypeError('model must be a well-formed model name');
   if (typeof prompt !== 'string' || prompt.length === 0) throw new TypeError('prompt must be non-empty');
   return [
     '--safe-mode', '--disable-slash-commands', '--no-chrome',
     '--strict-mcp-config', '--mcp-config', EMPTY_MCP_CONFIG,
-    '-p', '--no-session-persistence', '--model', model,
+    // No -p, and no --json-schema: the schema travels in the PROMPT (promptWithSchema),
+    // because a forced tool_choice 400s some upstreams (measured in #45 - the flag bought
+    // a guarantee validateStage was already enforcing, at the cost of request shape).
+    //
+    // The tool whitelist #45 kept is replaced here by --dangerously-skip-permissions: the
+    // sandbox is the boundary (see the header), and a whitelist that must enumerate
+    // capabilities in advance cannot survive contact with a real review.
+    '--no-session-persistence', '--model', model,
     '--effort', 'max', '--dangerously-skip-permissions',
     '--output-format', 'stream-json', '--verbose',
-    '--json-schema', schemaJson(jsonSchema),
   ];
 }
 
@@ -232,6 +260,16 @@ export function buildSandboxArgs({ executable, ripgrepExecutable, repositoryRoot
   return [...args, '--', SANDBOX_EXECUTABLE, ...claudeArgs];
 }
 
+// A markdown fence around otherwise-valid JSON is a formatting slip, not a broken contract, and
+// it is the single most-observed drift - it accounted for the "finder data must be an array"
+// failures on pools that were provably serving the right model. Strip it before parsing rather
+// than spending a schema-repair attempt teaching the model not to be helpful.
+function parseJsonResult(text) {
+  const trimmed = text.trim();
+  const fenced = /^```(?:json)?\s*\n([\s\S]*?)\n?```$/.exec(trimmed);
+  return JSON.parse(fenced ? fenced[1] : trimmed);
+}
+
 function extractStructuredOutput(envelope) {
   if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
     throw new TypeError('Claude JSON envelope must be an object');
@@ -244,7 +282,7 @@ function extractStructuredOutput(envelope) {
     throw new TypeError(`Claude returned an error envelope${subtype}`);
   }
   if (envelope.structured_output !== undefined) return envelope.structured_output;
-  if (typeof envelope.result === 'string') return JSON.parse(envelope.result);
+  if (typeof envelope.result === 'string') return parseJsonResult(envelope.result);
   if (envelope.result && typeof envelope.result === 'object') return envelope.result;
   throw new TypeError('Claude envelope has no structured_output or JSON result');
 }
@@ -331,6 +369,55 @@ function streamDiagnostic(stdout, stderr, environment, {
   return truncateDiagnostic(JSON.stringify(value));
 }
 
+// The New API host gate rejects with a 503 whose body names the cause ("system cpu
+// overloaded (current: 96.5%, threshold: 90%)"). The CLI's own stream collapses that
+// body into the structural api_error_status/terminal_reason pair, so the engine would
+// otherwise only ever see "claude exited 1" + 503 - which is how a host-CPU gate
+// masqueraded as a generic upstream outage for hours. This digs the gateway message
+// out of the error result only when it is a structured JSON envelope (bounded,
+// gateway-controlled); any other shape returns nothing, so free model text stays off
+// the wire exactly as it does in streamDiagnostic.
+function extractApiError(stdout, environment) {
+  const resultEvents = [];
+  for (const line of String(stdout ?? '').split('\n')) {
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (event?.type === 'result') resultEvents.push(event);
+  }
+  // The event.result field is the restricted disclosure tier - free text that CAN echo the
+  // reviewed diff - so reading it is gated on the same evidence streamDiagnostic requires:
+  // exactly one result event (a second makes it ambiguous which one the status belongs to),
+  // an error, a terminal_reason of api_error (a CLI-level error carries no gateway envelope),
+  // and a bounded HTTP status. Anything else reads nothing.
+  if (resultEvents.length !== 1) return {};
+  const event = resultEvents[0];
+  if (event?.is_error !== true
+    || event.terminal_reason !== 'api_error'
+    || !Number.isInteger(event.api_error_status)
+    || event.api_error_status < 100
+    || event.api_error_status > 599) {
+    return {};
+  }
+  let body;
+  try {
+    body = JSON.parse(String(event.result ?? ''));
+  } catch {
+    return { apiErrorStatus: event.api_error_status };
+  }
+  const message = typeof body?.message === 'string' ? body.message
+    : typeof body?.error?.message === 'string' ? body.error.message
+    : undefined;
+  if (typeof message !== 'string' || message.length === 0) return { apiErrorStatus: event.api_error_status };
+  return {
+    apiErrorStatus: event.api_error_status,
+    apiErrorMessage: diagnostic(message, environment, 240),
+  };
+}
+
 function signalChild(child, signal) {
   if (process.platform !== 'win32' && Number.isInteger(child.pid) && child.pid > 0) {
     try {
@@ -387,6 +474,7 @@ export async function runFreshClaude({
 }) {
   const sourceEnvironment = environment ?? process.env;
   let schema;
+  let promptText;
   try {
     schema = jsonSchema ?? await loadJsonSchema(jsonSchemaPath);
   } catch (error) {
@@ -413,6 +501,9 @@ export async function runFreshClaude({
   let claudeArgs;
   let sandboxArgs;
   try {
+    // The schema rides in the prompt now, so the text written to stdin is not the caller's
+    // prompt verbatim. Built once, here, so the args and the stdin content cannot disagree.
+    promptText = promptWithSchema(prompt, schema);
     claudeArgs = buildClaudeArgs({ model, prompt, jsonSchema: schema });
     sandboxArgs = buildSandboxArgs({
       executable,
@@ -514,10 +605,13 @@ export async function runFreshClaude({
       const stderr = Buffer.concat(stderrChunks).toString('utf8');
       if (code !== 0) {
         const stderrDiagnostic = diagnostic(stderr, sourceEnvironment);
+        const apiError = extractApiError(stdout, sourceEnvironment);
         finish({
           status: 'infra_error',
           error: stderrDiagnostic ? `claude exited ${code ?? signal}: ${stderrDiagnostic}` : `claude exited ${code ?? signal}`,
           diagnostic: outputDiagnostic(),
+          ...(apiError.apiErrorStatus === undefined ? {} : { apiErrorStatus: apiError.apiErrorStatus }),
+          ...(apiError.apiErrorMessage === undefined ? {} : { apiErrorMessage: apiError.apiErrorMessage }),
         });
         return;
       }
@@ -572,7 +666,7 @@ export async function runFreshClaude({
       failPromptWrite(new TypeError('child stdin is unavailable'));
     } else {
       try {
-        child.stdin.end(prompt);
+        child.stdin.end(promptText);
       } catch (error) {
         failPromptWrite(error);
       }

@@ -414,6 +414,39 @@ test('transport retry: gives up after the attempt budget and annotates the survi
   assert.equal(calls.length, 3, 'the attempt budget is a hard stop');
 });
 
+test('transport retry: a cpu-overload gate fails fast with a named reason instead of retrying', async () => {
+  const { result, calls } = await runStubbedVote({
+    responses: [{
+      status: 'infra_error',
+      error: 'claude exited 1',
+      apiErrorMessage: 'system cpu overloaded (current: 96.5%, threshold: 90%)',
+    }],
+  });
+  assert.equal(result.status, 'infra_error');
+  assert.equal(calls.length, 1, 'the cpu gate must not spend the stage retry budget');
+  assert.match(result.error, /cpu overload gate rejected the call/);
+  assert.match(result.error, /96\.5%/);
+  assert.doesNotMatch(result.error, /after 3 attempts/, 'a fail-fast is one attempt, not an exhausted budget');
+});
+
+test('transport retry: a plain 503 without the cpu marker keeps the existing retry schedule', async () => {
+  const { result, calls } = await runStubbedVote({
+    responses: [{ status: 'infra_error', error: 'claude exited 1', apiErrorStatus: 503 }],
+  });
+  assert.equal(result.status, 'infra_error');
+  assert.equal(calls.length, 3, 'a genuine upstream 503 still gets the full retry budget');
+  assert.match(result.error, /^after 3 attempts: claude exited 1$/);
+});
+
+test('transport retry: a 400 without the cpu marker keeps the existing retry schedule', async () => {
+  const { result, calls } = await runStubbedVote({
+    responses: [{ status: 'infra_error', error: 'claude exited 1', apiErrorStatus: 400 }],
+  });
+  assert.equal(result.status, 'infra_error');
+  assert.equal(calls.length, 3, 'a 400 still gets the full retry budget');
+  assert.match(result.error, /^after 3 attempts: claude exited 1$/);
+});
+
 test('transport retry: schema repairs and infra retries spend separate budgets', async () => {
   const { result, calls } = await runStubbedVote({
     responses: [

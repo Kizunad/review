@@ -258,6 +258,29 @@ test('books finder batch losses inside the budget as coverage gaps and still dec
   }]);
 });
 
+test('coverage gaps carry the stage diagnostic so a gapped lens is nameable', async () => {
+  const result = await budgetedFinderRun((request) => {
+    if (request.taxonomy === 'dimension-3') {
+      return {
+        status: 'infra_error',
+        error: 'cpu overload gate rejected the call (system cpu overloaded (current: 96.5%, threshold: 90%)); failing fast instead of retrying',
+        diagnostic: '{"events":[{"type":"result","subtype":"success","isError":true,"apiErrorStatus":503,"terminalReason":"api_error"}]}',
+      };
+    }
+    if (request.taxonomy === 'dimension-0') {
+      return { status: 'ok', data: [{ ...finding, taxonomy: 'dimension-0' }] };
+    }
+    return { status: 'ok', data: [] };
+  });
+
+  assert.deepEqual(result.failures, []);
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.coverageGaps.length, 1);
+  assert.equal(result.coverageGaps[0].stage, 'find:dimension-3');
+  assert.match(result.coverageGaps[0].error, /cpu overload gate/);
+  assert.match(result.coverageGaps[0].diagnostic, /"apiErrorStatus":503/);
+});
+
 test('fails closed once finder batch losses pass the budget and publishes no surviving finding', async () => {
   const result = await budgetedFinderRun((request) => {
     if (request.taxonomy === 'dimension-3' || request.taxonomy === 'dimension-9') {
@@ -322,19 +345,57 @@ test('tolerates a single failed finder batch at the standard eight-batch run', a
   }]);
 });
 
-test('gives single-point stages no budget however many batches would fund one', async () => {
-  // 14 shards produce 14 summary assignments, so an 8% budget would have funded
-  // exactly one loss had summary been budgeted at all.
+test('books a lost summary assignment as a coverage gap within the summary budget', async () => {
+  // 14 shards produce 14 summary assignments, so an 8% budget funds exactly
+  // one loss: summary-5 dies but the review proceeds without it.
   const diff = Array.from({ length: 14 }, (_, index) => `diff --git a/f${index}.mjs b/f${index}.mjs\n+a\n`).join('');
+  const requests = [];
   const summaryResult = await runReview({
     diff,
     taxonomy: ['security'],
     maxShardChars: 40,
     maxFinderChars: 40,
     runner: runnerFor((request) => {
+      requests.push(request);
       if (request.stage === 'plan') return plan();
       if (request.stage === 'summary') {
         return request.assignment.id === 'summary-5'
+          ? { status: 'infra_error', error: 'timeout after 120000ms' }
+          : { status: 'ok', data: { summary: 'one file', files: [request.assignment.paths[0]] } };
+      }
+      if (request.stage === 'find') return { status: 'ok', data: [] };
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+  assert.deepEqual(summaryResult.findings, []);
+  // The loss is booked, not fatal: the failure record stays out of `failures`
+  // (the review shipped) and the uncovered shard's paths are named in the gap.
+  assert.deepEqual(summaryResult.failures, []);
+  assert.deepEqual(summaryResult.coverageGaps, [{
+    stage: 'summary',
+    batch: 'summary-5',
+    paths: ['f5.mjs'],
+    error: 'timeout after 120000ms',
+  }]);
+  const finder = requests.find((request) => request.stage === 'find');
+  assert.ok(finder, 'the review proceeds past the lost summary');
+  assert.equal(finder.paths.includes('f5.mjs'), false, 'the unsummarised shard is dropped from the finder corpus');
+  assert.equal(finder.summaries.length, 13);
+});
+
+test('fails closed when summary losses exceed the summary budget', async () => {
+  const diff = Array.from({ length: 14 }, (_, index) => `diff --git a/f${index}.mjs b/f${index}.mjs\n+a\n`).join('');
+  const requests = [];
+  const summaryResult = await runReview({
+    diff,
+    taxonomy: ['security'],
+    maxShardChars: 40,
+    maxFinderChars: 40,
+    runner: runnerFor((request) => {
+      requests.push(request);
+      if (request.stage === 'plan') return plan();
+      if (request.stage === 'summary') {
+        return request.assignment.id === 'summary-5' || request.assignment.id === 'summary-6'
           ? { status: 'infra_error', error: 'timeout after 120000ms' }
           : { status: 'ok', data: { summary: 'one file', files: [request.assignment.paths[0]] } };
       }
@@ -344,11 +405,109 @@ test('gives single-point stages no budget however many batches would fund one', 
   assert.deepEqual(summaryResult.findings, []);
   assert.deepEqual(summaryResult.coverageGaps, []);
   assert.deepEqual(summaryResult.failures, [{
+    stage: 'summary',
+    status: 'infra_error',
+    error: '2/14 failed batches exceeds budget 8% (at most 1 of 14 batch(es) may fail)',
+  }, {
     stage: 'summary:summary-5',
     status: 'infra_error',
     error: 'timeout after 120000ms',
+  }, {
+    stage: 'summary:summary-6',
+    status: 'infra_error',
+    error: 'timeout after 120000ms',
   }]);
+  assert.equal(requests.some((request) => request.stage === 'find'), false, 'no finder work runs past a budget-exceeding loss');
+});
 
+test('ships a full review with one lost summary, booking the uncovered shard paths', async () => {
+  const requests = [];
+  const diff = Array.from({ length: 3 }, (_, index) => `diff --git a/f${index}.mjs b/f${index}.mjs\n+a\n`).join('');
+  const result = await runReview({
+    diff,
+    taxonomy: ['security'],
+    maxShardChars: 40,
+    maxFinderChars: 40,
+    runner: runnerFor((request) => {
+      requests.push(request);
+      if (request.stage === 'plan') return plan();
+      if (request.stage === 'summary') {
+        return request.assignment.id === 'summary-1'
+          ? { status: 'infra_error', error: 'claude exited 1' }
+          : { status: 'ok', data: { summary: request.assignment.id, files: request.assignment.paths } };
+      }
+      if (request.stage === 'find') return { status: 'ok', data: [finding] };
+      if (request.stage === 'consolidate') return consolidate(request);
+      if (request.stage === 'validate') return vote(request, 'confirm');
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.findings[0].voteSupport, 5);
+  assert.deepEqual(result.failures, []);
+  assert.deepEqual(result.coverageGaps, [{
+    stage: 'summary',
+    batch: 'summary-1',
+    paths: ['f1.mjs'],
+    error: 'claude exited 1',
+  }]);
+  const finder = requests.find((request) => request.stage === 'find');
+  assert.ok(finder, 'the review proceeds past the lost summary');
+  assert.equal(finder.paths.includes('f1.mjs'), false);
+  assert.equal(finder.summaries.length, 2);
+  assert.equal(requests.filter((request) => request.stage === 'validate').length, 5);
+});
+
+test('claims overlapping plan shard ranges once each, keeping summary gaps exact', async () => {
+  const requests = [];
+  const diff = Array.from({ length: 3 }, (_, index) => `diff --git a/f${index}.mjs b/f${index}.mjs\n+a\n`).join('');
+  const result = await runReview({
+    diff,
+    taxonomy: ['security'],
+    maxShardChars: 40,
+    maxFinderChars: 40,
+    runner: runnerFor((request) => {
+      requests.push(request);
+      if (request.stage === 'plan') {
+        return plan([{ id: 'alpha', shardIndexes: [0, 1] }, { id: 'beta', shardIndexes: [1, 2] }]);
+      }
+      if (request.stage === 'summary') {
+        return request.assignment.id === 'beta'
+          ? { status: 'infra_error', error: 'claude exited 1' }
+          : { status: 'ok', data: { summary: request.assignment.id, files: request.assignment.paths } };
+      }
+      if (request.stage === 'find') return { status: 'ok', data: [] };
+      throw new Error(`unexpected ${request.stage}`);
+    }),
+  });
+  // Overlap is claimed first-wins at normalization: alpha takes shards 0 and
+  // 1, beta is reduced to what alpha did not take. Shard 1 is therefore
+  // summarised exactly once (by alpha, possibly split into parts) and stays
+  // in the finder corpus, so the failed beta books a gap that names only the
+  // truly uncovered shard.
+  const betaRequest = requests.find((request) => request.stage === 'summary' && request.assignment.id === 'beta');
+  assert.deepEqual(betaRequest.assignment.shardIndexes, [2]);
+  const claimedByAlpha = requests
+    .filter((request) => request.stage === 'summary' && request.assignment.id.startsWith('alpha'))
+    .flatMap((request) => request.assignment.shardIndexes)
+    .sort();
+  assert.deepEqual(claimedByAlpha, [0, 1]);
+  assert.deepEqual(result.failures, []);
+  assert.deepEqual(result.coverageGaps, [{
+    stage: 'summary',
+    batch: 'beta',
+    paths: ['f2.mjs'],
+    error: 'claude exited 1',
+  }]);
+  const finderRequests = requests.filter((request) => request.stage === 'find');
+  const finderPaths = finderRequests.flatMap((request) => request.paths);
+  assert.ok(finderRequests.length > 0);
+  assert.equal(finderPaths.includes('f2.mjs'), false, 'the unsummarised shard stays out of the finder corpus');
+  assert.equal(finderPaths.includes('f1.mjs'), true, 'a shard summarised via another assignment is not lost');
+  assert.ok(finderRequests.every((request) => request.summaries.length === 2));
+});
+
+test('fails closed when the single-call consolidate stage fails', async () => {
   const consolidateFailure = await runReview({
     diff: 'diff --git a/a.mjs b/a.mjs\n',
     taxonomy: Array.from({ length: 13 }, (_, index) => `dimension-${index}`),
