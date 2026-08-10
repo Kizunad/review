@@ -7,13 +7,11 @@
 # output for leaked credentials, and converts trunk death/timeout into
 # decision=infrastructure_failure.
 #
-# NOT YET WIRED: probe mode. The prompts describe it and the evidence contract
-# enforces it (binaryProvenance must name this pipeline's build of this head),
-# but there is no build-server job here, so a worker asked to probe has no
-# pipeline binary to use and must correctly return verdict=blocked. Adding that
-# job is the remaining step before probe is real - and where it belongs (this
-# reusable workflow vs the caller) is still open, because the build is
-# caller-specific while the provenance rule is not.
+# PROBE MODE is wired: build-server builds the binary from the reviewed head in a
+# job this workflow owns, so binaryProvenance can name this pipeline's build. The
+# caller supplies only the build COMMAND - including its own prerequisites, since
+# those are caller-specific the same way the command is (Bong needs
+# protobuf-compiler; another caller will need something else).
 #
 # Smoke trials run via workflow_dispatch on this branch (gh workflow run
 # review-v2-p1.yml --ref <branch> -f repository=... -f pull_number=... -f head_oid=...).
@@ -159,11 +157,21 @@ jobs:
 
   review:
     needs: [build-server]
-    # `needs` on a skipped job would skip this one too, so the review must run when the build
-    # was SKIPPED (no build_command) or SUCCEEDED, and only be blocked when it actually failed.
-    # Without this the common case - a scripts-only PR with no build - would silently review
-    # nothing at all.
-    if: always() && needs.build-server.result != 'failure' && needs.build-server.result != 'cancelled'
+    # The review runs whether or not the build did, and ONLY a cancellation stops it.
+    #
+    # `needs` on a skipped job skips this one too, so the guard is required at all for the
+    # common case: a scripts-only PR with no build_command. It first also excluded 'failure',
+    # and that was wrong. A skipped job produces NOTHING - no review.json, no artifact, no
+    # infrastructure_failure - so a broken build meant the run vanished silently, which is
+    # strictly worse than a clean INFRA and is the same mistake as letting GitHub kill the job
+    # on wall-clock instead of reporting a timeout.
+    #
+    # A failed build does not mean no review; it means no PROBE. The harness already draws that
+    # distinction - rv2_probe_available returns 2 for "the build path is broken", separately
+    # from 1 for "we did not build" - and the trunk prompt requires a recorded failure on 2
+    # rather than a silent downgrade to static. Skipping the job threw that away before it could
+    # be used.
+    if: always() && needs.build-server.result != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -234,11 +242,18 @@ jobs:
               printf 'RV2_BUILD_RUN_ID=%s\n' "${{ github.run_id }}"
             } >>"$GITHUB_ENV"
             echo "probe available: $binary (buildRunId ${{ github.run_id }})"
+          elif [ "${{ needs.build-server.result }}" = "failure" ]; then
+            # A build that was ASKED FOR and BROKE is not the same as no build. The caller
+            # wanted probe; it is unavailable because something is wrong, and the review must
+            # say so instead of quietly reviewing a server change without ever running it.
+            printf 'RV2_BUILD_FAILED=1\n' >>"$GITHUB_ENV"
+            echo "probe BROKEN: build-server FAILED - the caller asked for a build and it did not"
+            echo "produce a binary. The trunk must record a failure, not fall back to static."
           else
             # Said out loud rather than left as an unset variable. "probe is unavailable" and
             # "someone forgot to plumb the path" look identical to a trunk reading an empty
             # env var, and only one of them is a reason to skip probe.
-            echo "probe UNAVAILABLE: build-server result=${{ needs.build-server.result }}"
+            echo "probe UNAVAILABLE: build-server result=${{ needs.build-server.result }} (no build requested)"
             echo "the trunk must not assign probe mode; static and test only"
           fi
 

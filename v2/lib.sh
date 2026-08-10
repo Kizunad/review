@@ -96,6 +96,14 @@ rv2_build_run_id() { printf '%s' "${RV2_BUILD_RUN_ID:-}"; }
 
 rv2_probe_available() {
   local p="${RV2_BINARY_PATH:-}" r="${RV2_BUILD_RUN_ID:-}"
+  # A build that was ASKED FOR and BROKE is state 2, not state 1. The caller wanted probe and
+  # cannot have it because something is wrong - reviewing a server change without ever running
+  # it, and calling that a clean review, is the outcome this distinction exists to prevent.
+  if [ "${RV2_BUILD_FAILED:-0}" = "1" ]; then
+    echo "rv2: the build job FAILED - probe was requested and the binary does not exist" >&2
+    echo "rv2: this is not 'probe is off'; record a failure rather than falling back to static" >&2
+    return 2
+  fi
   if [ -z "$p" ] && [ -z "$r" ]; then return 1; fi          # not built - the normal case
   if [ -z "$p" ] || [ -z "$r" ]; then
     echo "rv2: RV2_BINARY_PATH and RV2_BUILD_RUN_ID must be set together (path='$p' runId='$r')" >&2
