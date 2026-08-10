@@ -31,6 +31,23 @@ rv2_trunk_index() { printf '%s' "${RV2_TRUNK:-0}"; }
 rv2_worker_indexes() { printf '%s' "${RV2_WORKERS:-1 2}"; }
 rv2_max_active() { printf '%s' "${RV2_MAX_ACTIVE:-2}"; }
 
+# HOME for the panes - owned by the harness, never the ambient one.
+#
+# Interactive Claude Code has three first-run gates (theme picker, security
+# notes, trust-this-folder) and a fresh HOME hits all three before an input box
+# exists. The operator's box cleared them in June, so the local trial saw none
+# of them; every CI runner is a fresh HOME, so CI saw all three. That asymmetry
+# is exactly the one PANE_SHELL already documents in boot-session.sh, pointing
+# the other way, and it is why this is a harness-owned HOME rather than a patch
+# to whatever HOME happens to be there: seeding the ambient one would rewrite a
+# live config the operator's other sessions are using, AND would leave local and
+# CI on different paths again - which is the shape of bug that produced it.
+#
+# Under the state root on purpose: scan-leaks.sh sweeps the root (minus repo/),
+# so a credential a crew member echoes into a transcript is caught by the same
+# pass that sweeps evidence.
+rv2_pane_home() { printf '%s' "${RV2_PANE_HOME:-$(rv2_root)/home}"; }
+
 # Node identity env, with RV2_* fallbacks so both spellings work.
 rv2_pr_number()  { printf '%s' "${PR_NUMBER:-${RV2_PR_NUMBER:-}}"; }
 rv2_head_oid()   { printf '%s' "${HEAD_OID:-${RV2_HEAD_OID:-}}"; }
@@ -164,6 +181,51 @@ rv2_busy() {
 }
 
 rv2_trunk_busy() { rv2_busy "$(rv2_trunk_index)"; }
+
+# Wait for a pane to reach the Claude Code INPUT BOX, and refuse to type into it
+# until it has.
+#
+# boot used to sleep 12 and start typing. If the pane was on a first-run wizard
+# instead, the brief went into a SELECT LIST: measured 2026-08-10 against the
+# pinned 2.1.220 binary, the seed line's Enter picked a theme and advanced the
+# wizard to its next page. Boot then reported "trunk never accepted its brief",
+# which is true and says nothing about why - the screen holding the answer was
+# right there in the pane and no one read it before typing over it.
+#
+# So this waits for a POSITIVE readiness marker, and on timeout names the screen
+# it is actually looking at. Failing with "you are on the theme picker" instead
+# of "the seed was refused" is the entire point.
+rv2_wait_prompt_box() {
+  local i="$1" timeout_s="${2:-90}" t p
+  for t in $(seq 1 "$timeout_s"); do
+    p="$(rv2_pane "$i")"
+    case "$p" in
+      *"bypass permissions on"*|*"? for shortcuts"*) return 0 ;;
+    esac
+    sleep 1
+  done
+  p="$(rv2_pane "$i")"
+  local gate=''
+  case "$p" in
+    *"Choose the text style"*)
+      gate='the THEME PICKER (first-run onboarding)' ;;
+    *"Press Enter to continue"*)
+      gate='the SECURITY NOTES page (the bypass-permissions warning)' ;;
+    *"trust this folder"*|*"Is this a project you created"*)
+      gate='the TRUST-THIS-FOLDER dialog' ;;
+    *"Select login method"*|*"Log in with"*)
+      gate='the LOGIN screen - the relay credentials are not being honored' ;;
+  esac
+  if [ -n "$gate" ]; then
+    echo "rv2: pane $i is sitting on $gate, not the input box." >&2
+    echo "rv2: anything typed there is keystrokes into a wizard, not a prompt." >&2
+    echo "rv2: v2/seed-claude-config.sh clears these before boot - check that it ran," >&2
+    echo "rv2: and that the pane's HOME is $(rv2_pane_home)." >&2
+  else
+    echo "rv2: pane $i never reached the input box within ${timeout_s}s." >&2
+  fi
+  return 1
+}
 
 # Liveness from the process table, never the pane: after a host reboot tmux
 # restores each pane's last pre-crash frame, status bar and all, so a dead

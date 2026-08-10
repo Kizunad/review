@@ -51,6 +51,12 @@ WORKER_LAUNCH="'$CLAUDE_BIN' --model '$(rv2_worker_model)' --dangerously-skip-pe
 PANE_SHELL="${RV2_PANE_SHELL:-/bin/bash}"
 [ -x "$PANE_SHELL" ] || { echo "boot: pane shell $PANE_SHELL is not executable" >&2; exit 78; }
 
+# Every pane runs Claude Code in a HOME the harness owns, and that HOME has to
+# have its first-run gates cleared BEFORE the first pane launches - a pane that
+# comes up on the theme picker never becomes a reviewer.
+PANE_HOME="$(rv2_pane_home)"
+"$V2_DIR/seed-claude-config.sh"
+
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 tmux new-session -d -s "$SESSION" -x 220 -y 55 "$PANE_SHELL"
 tmux set-option -t "$SESSION" history-limit 5000
@@ -86,6 +92,10 @@ done
 # pane lifecycle, dispatch plumbing, and wrapper contract without any LLM.
 seed_pane() {
   local i="$1" line="$2" tries t
+  # Never type into a pane whose screen has not been read. A first-run wizard
+  # accepts keystrokes and Enter perfectly happily, and turns a brief into menu
+  # navigation; rv2_wait_prompt_box names the screen instead of guessing.
+  rv2_wait_prompt_box "$i" "${RV2_PROMPT_BOX_TIMEOUT_S:-90}" || return 1
   for tries in 1 2 3; do
     tmux send-keys -t "$SESSION:$i" -l "$line"
     tmux send-keys -t "$SESSION:$i" Enter
@@ -150,7 +160,13 @@ trap 'rm -f "$RELAY_ENV"' EXIT
 # sends you to look at the model list instead of at the credentials.
 PANE_ENV="if [ -r '$RELAY_ENV' ]; then set -a; . '$RELAY_ENV'; set +a;"
 PANE_ENV="$PANE_ENV else echo 'rv2: relay env file missing: $RELAY_ENV' >&2; false; fi"
-PANE_ENV="$PANE_ENV && export V2_DIR='$V2_DIR_ABS'"
+PANE_ENV="$PANE_ENV && export HOME='$PANE_HOME' V2_DIR='$V2_DIR_ABS'"
+# Keep the hash-pinned binary the only Claude Code on the box. See
+# seed-claude-config.sh: a fresh HOME staged an unpinned 2.1.226 and cloned the
+# plugin marketplace within seconds. The config flags say the same thing; this
+# says it in a form a config merge cannot drop.
+PANE_ENV="$PANE_ENV DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"
+PANE_ENV="$PANE_ENV CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1"
 PANE_ENV="$PANE_ENV RV2_ROOT='$ROOT' HARNESS_DIR='$ROOT'"
 PANE_ENV="$PANE_ENV RV2_REPOSITORY='${RV2_REPOSITORY:-}' PR_NUMBER='${PR_NUMBER:-}'"
 PANE_ENV="$PANE_ENV HEAD_OID='$(rv2_head_oid)' RV2_BINARY_PATH='${RV2_BINARY_PATH:-}'"
@@ -162,7 +178,8 @@ if [ "${RV2_FAKE:-0}" = "1" ]; then
 else
   tmux send-keys -t "$SESSION:$TRUNK_INDEX" \
     "cd '$ROOT' && $PANE_ENV && '$CLAUDE_BIN' --model '$(rv2_trunk_model)' --dangerously-skip-permissions" Enter
-  sleep 12
+  # No fixed sleep before seeding: seed_pane polls for the input box, which both
+  # waits less on a fast boot and does not type into a slow one.
   # Not backgrounded, unlike the workers: if the trunk never accepts its brief
   # there is no review to run, so failing here is better than booting a session
   # whose only agent is idle.
@@ -179,7 +196,6 @@ for i in $WORKERS; do
     tmux send-keys -t "$SESSION:$i" "cd '$ROOT' && $PANE_ENV && node '$V2_DIR_ABS/../fake/worker.mjs' W$i" Enter
   else
     tmux send-keys -t "$SESSION:$i" "cd '$ROOT' && $PANE_ENV && $WORKER_LAUNCH" Enter
-    sleep 12
     seed_pane "$i" "Read $V2_DIR_ABS/worker-brief.md; you are worker pane $i. Await the trunk's dispatch." &
   fi
 done
