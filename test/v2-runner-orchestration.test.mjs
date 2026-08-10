@@ -322,6 +322,38 @@ test('fake worker + checkpoint + wrapper run the full loop end to end', () => {
   }
 });
 
+test('every variable the agent prompts reference is actually provided to the panes', () => {
+  // The prompts are executable instructions, not prose: trunk-prompt.md tells the
+  // trunk to run "$V2_DIR/shard-diff.sh", ". $V2_DIR/lib.sh", "$V2_DIR/dispatch.sh".
+  // A referenced variable that nobody sets does not error - it expands to empty, so
+  // "$V2_DIR/shard-diff.sh" becomes "/shard-diff.sh" and the trunk simply achieves
+  // nothing. That is the least diagnosable failure this harness has, and V2_DIR was
+  // in exactly that state: known to boot-session.sh as a local, never exported, while
+  // five commands in the prompt depended on it.
+  //
+  // Three legitimate providers, because the values become known at three different
+  // times: the workflow job env (static), a step writing to $GITHUB_ENV (known after
+  // the build job), and boot-session.sh exporting into the pane (known only at
+  // runtime from $0). The test does not care which - only that there is one.
+  const wf = readFileSync(path.join(root, '.github/workflows/review-v2-p1.yml'), 'utf8');
+  const boot = readFileSync(path.join(root, 'v2/boot-session.sh'), 'utf8');
+  const prompts = ['v2/trunk-prompt.md', 'v2/worker-brief.md']
+    .map((p) => readFileSync(path.join(root, p), 'utf8')).join('\n');
+
+  const referenced = [...new Set([...prompts.matchAll(/\$([A-Z][A-Z0-9_]{2,})/g)].map((m) => m[1]))];
+  assert.ok(referenced.includes('V2_DIR'), 'guard self-check: the prompts must reference V2_DIR');
+  assert.ok(referenced.length >= 5, `guard self-check: expected several referenced vars, got ${referenced.length}`);
+
+  const unprovided = referenced.filter((name) => {
+    const inJobEnv = new RegExp(`^\\s{6}${name}:`, 'm').test(wf);
+    const viaGithubEnv = new RegExp(`${name}=`).test(wf) && /GITHUB_ENV/.test(wf);
+    const exportedToPane = new RegExp(`export\\s+${name}=`).test(boot);
+    return !inJobEnv && !viaGithubEnv && !exportedToPane;
+  });
+  assert.deepEqual(unprovided, [],
+    `these are referenced by the prompts but set by nobody, so they expand to empty: ${unprovided.join(', ')}`);
+});
+
 function waitFor(predicate, timeoutMs, label) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

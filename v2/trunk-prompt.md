@@ -22,8 +22,12 @@ The crew is `cc-review-lite`. It acts and never judges. You judge and never act.
   harness/validate-review.mjs are the contract authorities)
 - Diff file: $HARNESS_DIR/diff.txt (built by the review job preflight)
 - Repo-under-review checkout: $RV2_ROOT/repo
+- Harness scripts: $V2_DIR (exported into your pane by boot-session.sh)
 - These env vars are already set in your process; read them with bash, do not
-  assume a literal value.
+  assume a literal value. If any of them is EMPTY, stop and record an
+  infrastructure failure naming it - an empty $V2_DIR turns every command below
+  into a path starting at /, which fails quietly and looks like a trunk that
+  simply did nothing.
 
 ## Loop
 

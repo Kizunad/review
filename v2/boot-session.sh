@@ -82,12 +82,27 @@ seed_pane() {
   return 1
 }
 
+# V2_DIR must be EXPORTED into every pane, not just known to this script.
+#
+# trunk-prompt.md tells the trunk to run "$V2_DIR/shard-diff.sh",
+# ". $V2_DIR/lib.sh", "$V2_DIR/dispatch.sh", "$V2_DIR/checkpoint.sh" and to point
+# workers at "$V2_DIR/worker-brief.md" - five commands. A pane is its own login
+# shell, so without this every one of them expands to /shard-diff.sh and the
+# trunk can do nothing at all. The workflow's job-level env cannot carry it
+# because the value is only known here, at runtime, from $0.
+#
+# It has been surviving on the seed line quoting an ABSOLUTE path to the prompt
+# file, leaving the trunk to infer its directory. That is asking a model to
+# reconstruct a path we already have, and it fails silently into "the trunk did
+# nothing" - the least diagnosable failure this harness has.
+PANE_ENV="export V2_DIR='$V2_DIR_ABS'"
+
 if [ "${RV2_FAKE:-0}" = "1" ]; then
   tmux send-keys -t "$SESSION:$TRUNK_INDEX" \
-    "cd '$ROOT' && bash '$V2_DIR_ABS/../fake/trunk.sh'" Enter
+    "cd '$ROOT' && $PANE_ENV && bash '$V2_DIR_ABS/../fake/trunk.sh'" Enter
 else
   tmux send-keys -t "$SESSION:$TRUNK_INDEX" \
-    "cd '$ROOT' && '$CLAUDE_BIN' --model '$(rv2_trunk_model)' --dangerously-skip-permissions" Enter
+    "cd '$ROOT' && $PANE_ENV && '$CLAUDE_BIN' --model '$(rv2_trunk_model)' --dangerously-skip-permissions" Enter
   sleep 12
   # Not backgrounded, unlike the workers: if the trunk never accepts its brief
   # there is no review to run, so failing here is better than booting a session
@@ -102,9 +117,9 @@ fi
 # slow boot is recoverable.
 for i in $WORKERS; do
   if [ "${RV2_FAKE:-0}" = "1" ]; then
-    tmux send-keys -t "$SESSION:$i" "cd '$ROOT' && node '$V2_DIR_ABS/../fake/worker.mjs' W$i" Enter
+    tmux send-keys -t "$SESSION:$i" "cd '$ROOT' && $PANE_ENV && node '$V2_DIR_ABS/../fake/worker.mjs' W$i" Enter
   else
-    tmux send-keys -t "$SESSION:$i" "cd '$ROOT' && $WORKER_LAUNCH" Enter
+    tmux send-keys -t "$SESSION:$i" "cd '$ROOT' && $PANE_ENV && $WORKER_LAUNCH" Enter
     sleep 12
     seed_pane "$i" "Read $V2_DIR_ABS/worker-brief.md; you are worker pane $i. Await the trunk's dispatch." &
   fi
