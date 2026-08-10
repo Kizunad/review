@@ -205,14 +205,22 @@ rv2_wait_prompt_box() {
     sleep 1
   done
   p="$(rv2_pane "$i")"
+  # The four first-run screens, in the order a fresh HOME hits them. The fourth
+  # is the one CI actually died on (run 31372272415, 2026-08-10) and it was the
+  # one missing from this table on the first pass - so the failure fell through
+  # to the generic message, which is exactly the defect being fixed here. Its
+  # default option is "No, exit": one more blind Enter and the trunk would have
+  # shut itself down instead of stalling.
   local gate=''
   case "$p" in
     *"Choose the text style"*)
-      gate='the THEME PICKER (first-run onboarding)' ;;
+      gate='the THEME PICKER (first-run screen 1 of 4)' ;;
     *"Press Enter to continue"*)
-      gate='the SECURITY NOTES page (the bypass-permissions warning)' ;;
+      gate='the SECURITY NOTES page (first-run screen 2 of 4)' ;;
     *"trust this folder"*|*"Is this a project you created"*)
-      gate='the TRUST-THIS-FOLDER dialog' ;;
+      gate='the TRUST-THIS-FOLDER dialog (first-run screen 3 of 4)' ;;
+    *"Bypass Permissions mode"*|*"Yes, I accept"*)
+      gate='the BYPASS PERMISSIONS consent dialog (first-run screen 4 of 4)' ;;
     *"Select login method"*|*"Log in with"*)
       gate='the LOGIN screen - the relay credentials are not being honored' ;;
   esac

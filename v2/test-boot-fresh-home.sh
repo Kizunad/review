@@ -114,6 +114,16 @@ else
   ok "no plugin marketplace clone"
 fi
 
+# The screen CI actually stalled on. Named separately from "reached the input
+# box" because its default option is "No, exit": a harness that blind-Entered
+# through it would not stall, it would shut the trunk down, and the two failures
+# look nothing alike from the outside.
+if rv2_pane 0 | grep -q 'Bypass Permissions mode'; then
+  bad "the bypass-permissions consent dialog is up - screen 4 is not cleared"
+else
+  ok "the bypass-permissions consent dialog never appeared"
+fi
+
 tmux kill-session -t "$RV2_SESSION" 2>/dev/null
 pkill -f 'checkpoint-watchdog.sh' 2>/dev/null
 
