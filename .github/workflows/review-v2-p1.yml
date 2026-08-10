@@ -189,6 +189,15 @@ jobs:
     if: always() && needs.build-server.result != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # Handed to write-finalize, which runs with write permissions and must not re-derive any of
+    # them from a job that executed the pull request's code. It re-fetches the PR from the API
+    # and re-hashes the policy from a trusted checkout; these are only used to ADDRESS the work,
+    # never to authorise it.
+    outputs:
+      engine_ref: ${{ steps.engine.outputs.ref }}
+      engine_repo: ${{ steps.engine.outputs.repo }}
+      base_oid: ${{ steps.anchors.outputs.base_oid }}
+      published: ${{ steps.publish.outcome }}
     env:
       HARNESS_DIR: ${{ github.workspace }}/_rv2
       RV2_ROOT: ${{ github.workspace }}/_rv2
@@ -368,6 +377,7 @@ jobs:
             exit 1
           fi
           printf 'BASE_OID=%s\n' "$base_oid" >>"$GITHUB_ENV"
+          printf 'base_oid=%s\n' "$base_oid" >>"$GITHUB_OUTPUT"
           echo "anchors: base $base_oid, head $head_oid"
 
           if [ -z "$POLICY_PATH" ]; then
@@ -477,3 +487,159 @@ jobs:
             _rv2/assignments
             _rv2/ledger.tsv
           if-no-files-found: warn
+
+  # The only job with write access, and it trusts nothing the review job said.
+  #
+  # THE TRUST BOUNDARY IS THE POINT. The review job executes the pull request's code - in probe
+  # mode it builds a server from the head and drives it - so everything it produces is a CLAIM.
+  # This job re-fetches the pull request from the API, re-hashes the policy from a checkout of
+  # the BASE it made itself, and hands both to verifyManifest, which refuses any artifact whose
+  # manifest disagrees. v1 draws the same line for a reviewer that was only ever read-only; v2
+  # needs it more, not less.
+  #
+  # Copied from review.yml's write-finalize deliberately rather than reinvented. That envelope
+  # is proven in production against the merge gate, and the only thing v2 changes is who wrote
+  # the artifact.
+  write-finalize:
+    needs: review
+    if: always() && needs.review.result != 'skipped' && inputs.policy_path != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout the engine at the commit that produced the verdict
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ needs.review.outputs.engine_repo }}
+          ref: ${{ needs.review.outputs.engine_ref }}
+          path: _central
+          persist-credentials: false
+          fetch-depth: 1
+
+      # The policy comes from the BASE, checked out HERE, by the job with write access. Hashing
+      # it in the review job would mean the process that ran the pull request's code got to
+      # choose what the manifest is compared against.
+      - name: Checkout the trusted base for the policy binding
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ needs.review.outputs.base_oid }}
+          path: _base
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Download the publishable artifact
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: rv2-publish
+          path: _review
+
+      - name: Refetch the PR, verify the artifact, and publish
+        id: publish
+        continue-on-error: true
+        if: steps.download.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pull_number }}
+          REPO_UNDER_REVIEW: ${{ inputs.repository }}
+          EXPECTED_BASE: ${{ needs.review.outputs.base_oid }}
+          EXPECTED_HEAD: ${{ inputs.head_oid }}
+          POLICY_PATH: ${{ inputs.policy_path }}
+          EXPECTED_RUN_ID: ${{ github.run_id }}
+          EXPECTED_RUN_ATTEMPT: ${{ github.run_attempt }}
+          EXPECTED_WORKFLOW_REF: ${{ needs.review.outputs.engine_ref }}
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find _review -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
+          [[ "${files[*]}" == 'manifest.json review.json review.md' ]] || {
+            echo "finalize: unexpected artifact file set: ${files[*]}" >&2; exit 1; }
+          [[ "$(find _review -mindepth 1 -maxdepth 1 ! -type f -print -quit)" == '' ]] || {
+            echo 'finalize: artifact contains a non-regular file.' >&2; exit 1; }
+
+          response="$(curl --fail-with-body --silent --show-error \
+            -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/repos/$REPO_UNDER_REVIEW/pulls/$PR_NUMBER")"
+          base_oid="$(jq -er '.base.sha | select(test("^[0-9a-f]{40}$"))' <<<"$response")"
+          head_oid="$(jq -er '.head.sha | select(test("^[0-9a-f]{40}$"))' <<<"$response")"
+          # The PR must not have moved. A verdict about a commit that is no longer the head is
+          # not a stale opinion, it is a merge decision about code nobody reviewed.
+          [[ "$base_oid" == "$EXPECTED_BASE" && "$head_oid" == "$EXPECTED_HEAD" ]] || {
+            echo 'finalize: the PR changed after the review; refusing to publish stale artifacts.' >&2; exit 1; }
+
+          [[ "$(wc -c < _review/review.json)" -le 1048576 ]] || { echo 'review.json too large.' >&2; exit 1; }
+          [[ "$(wc -c < _review/review.md)" -le 65536 ]] || { echo 'review.md too large.' >&2; exit 1; }
+          [[ "$(wc -c < _review/manifest.json)" -le 16384 ]] || { echo 'manifest.json too large.' >&2; exit 1; }
+
+          POLICY_SHA256="$(sha256sum "_base/$POLICY_PATH" | cut -d' ' -f1)"
+          BASE_OID="$base_oid" HEAD_OID="$head_oid" REPOSITORY="$REPO_UNDER_REVIEW" \
+          POLICY_SHA256="$POLICY_SHA256" node --input-type=module -e '
+            import { readFile } from "node:fs/promises";
+            import { canFinalize } from "./_central/src/finalizer.mjs";
+            const manifest = JSON.parse(await readFile("_review/manifest.json", "utf8"));
+            canFinalize({
+              manifest,
+              currentPullRequest: {
+                repository: process.env.REPOSITORY,
+                pullNumber: Number(process.env.PR_NUMBER),
+                baseOid: process.env.BASE_OID,
+                headOid: process.env.HEAD_OID,
+              },
+              artifacts: {
+                "review.json": await readFile("_review/review.json", "utf8"),
+                "review.md": await readFile("_review/review.md", "utf8"),
+              },
+              binding: {
+                runId: process.env.EXPECTED_RUN_ID,
+                runAttempt: process.env.EXPECTED_RUN_ATTEMPT,
+                workflowRef: process.env.EXPECTED_WORKFLOW_REF,
+                policySha256: process.env.POLICY_SHA256,
+              },
+            });
+          '
+          decision="$(jq -er '.decision' _review/review.json)"
+          printf 'decision=%s\n' "$decision" >> "$GITHUB_OUTPUT"
+          jq -n --rawfile body _review/review.md '{body:$body}' \
+            | curl --fail-with-body --silent --show-error -X POST \
+              -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Content-Type: application/json' \
+              "$GITHUB_API_URL/repos/$REPO_UNDER_REVIEW/issues/$PR_NUMBER/comments" --data-binary @-
+          echo "finalize: published decision=$decision"
+
+      # No artifact means no verdict, and that must be SAID on the pull request rather than left
+      # as a red run somebody has to go and interpret.
+      - name: Publish a missing-artifact infrastructure handoff
+        if: steps.download.outcome != 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # printf, not a multi-line literal: an unindented line inside a `run: |` block breaks
+          # out of the YAML scalar, and `**Decision:**` at column 0 parses as a YAML alias.
+          body="$(printf '%s\n' \
+            '## Central review (v2)' '' \
+            '**Decision:** `infrastructure_failure`' '' \
+            'The review job produced no verifiable artifact. No code verdict was inferred.')"
+          jq -n --arg body "$body" '{body:$body}' \
+            | curl --fail-with-body --silent --show-error -X POST \
+              -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Content-Type: application/json' \
+              "$GITHUB_API_URL/repos/${{ inputs.repository }}/issues/${{ inputs.pull_number }}/comments" --data-binary @-
+
+      # Red for anything that is not an approve, the same five ways v1 does it. The run
+      # conclusion carries ONE bit and it is "this did not approve" - it never distinguishes an
+      # INFRA from a request_changes from a broken pipeline, and anything reading it as a cause
+      # is reading a bit that does not carry one. Read publish.outputs.decision.
+      - name: Fail the run unless the verdict was approve
+        if: >-
+          steps.download.outcome != 'success' ||
+          steps.publish.outcome != 'success' ||
+          steps.publish.outputs.decision != 'approve'
+        run: |
+          echo "finalize: decision=${{ steps.publish.outputs.decision || 'none' }} download=${{ steps.download.outcome }} publish=${{ steps.publish.outcome }}"
+          echo "finalize: red means NOT-APPROVE, which is five different situations. Read the decision above."
+          exit 1
