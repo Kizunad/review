@@ -37,9 +37,25 @@ CLAUDE_BIN="${CLAUDE_EXECUTABLE:-claude}"
 # 5.5: "跑 PR 代码的沙箱就是 VM"), not a flag list.
 WORKER_LAUNCH="'$CLAUDE_BIN' --model '$(rv2_worker_model)' --dangerously-skip-permissions"
 
+# Panes run a POSIX shell we name, NOT the user's login shell.
+#
+# tmux starts default-shell in every pane, and everything this script types into
+# a pane is sh/bash syntax - `set -a`, `.`, `if [ ]; then ... fi`. Measured
+# 2026-08-10: on a host whose login shell is fish, every launch line failed
+# silently, the panes sat at a fish prompt, and claude never started. The boot
+# still reported success because it only checks that a process is alive, and a
+# fish prompt is a live process.
+#
+# CI would not have caught this - GitHub runners default to bash - so the harness
+# only worked there by accident of the host's shell.
+PANE_SHELL="${RV2_PANE_SHELL:-/bin/bash}"
+[ -x "$PANE_SHELL" ] || { echo "boot: pane shell $PANE_SHELL is not executable" >&2; exit 78; }
+
 tmux kill-session -t "$SESSION" 2>/dev/null || true
-tmux new-session -d -s "$SESSION" -x 220 -y 55
+tmux new-session -d -s "$SESSION" -x 220 -y 55 "$PANE_SHELL"
 tmux set-option -t "$SESSION" history-limit 5000
+# Belt and braces for any window created later by another code path.
+tmux set-option -t "$SESSION" default-shell "$PANE_SHELL" 2>/dev/null || true
 
 # The session starts with exactly one window; the worker windows must be
 # created explicitly (send-keys to a nonexistent window aborts the boot).
@@ -50,7 +66,7 @@ if [ "$first_window" != "$TRUNK_INDEX" ]; then
   tmux move-window -s "$SESSION:$first_window" -t "$SESSION:$TRUNK_INDEX"
 fi
 for i in $WORKERS; do
-  tmux new-window -d -t "$SESSION:$i"
+  tmux new-window -d -t "$SESSION:$i" "$PANE_SHELL"
 done
 
 # EVERY pane is an interactive Claude Code process - trunk included.
@@ -95,7 +111,50 @@ seed_pane() {
 # file, leaving the trunk to infer its directory. That is asking a model to
 # reconstruct a path we already have, and it fails silently into "the trunk did
 # nothing" - the least diagnosable failure this harness has.
-PANE_ENV="export V2_DIR='$V2_DIR_ABS'"
+# EVERY variable a pane needs is passed EXPLICITLY. Nothing is inherited.
+#
+# tmux panes inherit the environment of the tmux SERVER, not of the process that
+# ran send-keys. When boot-session.sh starts the server itself - the CI case -
+# that happens to be the same thing, so the harness appeared to work. Attach to
+# a server someone else started and the panes get that server's environment
+# instead: measured on 2026-08-10, the trunk came up with no ANTHROPIC_BASE_URL,
+# dialled the public API, and reported "the selected model (cc-review) may not
+# exist" - a credential/routing failure wearing a model-name error's clothes.
+# It also inherited an UNRELATED token that happened to be in the other server.
+#
+# The relay pair goes through a mode-600 file rather than onto the command line.
+# A send-keys line is visible in the pane, and rv2_dump_panes captures panes into
+# logs/ on failure, and logs/ is uploaded as an artifact - so a token typed into
+# a pane is a token in an artifact. The file lives OUTSIDE the state root for the
+# same reason, and is removed once the panes are seeded.
+RELAY_ENV="$(mktemp -t rv2-relay-XXXXXX)"
+chmod 600 "$RELAY_ENV"
+trap 'rm -f "$RELAY_ENV"' EXIT
+{
+  printf 'ANTHROPIC_BASE_URL=%s\n' "${ANTHROPIC_BASE_URL:-}"
+  printf 'ANTHROPIC_AUTH_TOKEN=%s\n' "${ANTHROPIC_AUTH_TOKEN:-}"
+} >"$RELAY_ENV"
+
+# An `if`, not a brace group, and &&-chained rather than semicolon-separated.
+#
+# Two ways this silently half-works if written the obvious way. `cd X && set -a;
+# . f; set +a` parses as four separate commands, so a failed cd does not stop the
+# rest. And `{ set -a; . f; set +a; }` returns the status of its LAST command -
+# `set +a`, always 0 - so a MISSING relay file is swallowed and the pane launches
+# claude with no credentials anyway. Verified both: the brace form printed
+# "REACHED CLAUDE" with the file absent.
+#
+# That is the same defect as reading a pipeline's exit status, and the failure it
+# produces is the one measured today: a pane with no ANTHROPIC_BASE_URL dials the
+# public API and reports "the selected model (cc-review) may not exist", which
+# sends you to look at the model list instead of at the credentials.
+PANE_ENV="if [ -r '$RELAY_ENV' ]; then set -a; . '$RELAY_ENV'; set +a;"
+PANE_ENV="$PANE_ENV else echo 'rv2: relay env file missing: $RELAY_ENV' >&2; false; fi"
+PANE_ENV="$PANE_ENV && export V2_DIR='$V2_DIR_ABS'"
+PANE_ENV="$PANE_ENV RV2_ROOT='$ROOT' HARNESS_DIR='$ROOT'"
+PANE_ENV="$PANE_ENV RV2_REPOSITORY='${RV2_REPOSITORY:-}' PR_NUMBER='${PR_NUMBER:-}'"
+PANE_ENV="$PANE_ENV HEAD_OID='$(rv2_head_oid)' RV2_BINARY_PATH='${RV2_BINARY_PATH:-}'"
+PANE_ENV="$PANE_ENV RV2_BUILD_RUN_ID='${RV2_BUILD_RUN_ID:-}'"
 
 if [ "${RV2_FAKE:-0}" = "1" ]; then
   tmux send-keys -t "$SESSION:$TRUNK_INDEX" \
