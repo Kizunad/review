@@ -1,8 +1,34 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { createCredentialProxy } from './credential-proxy.mjs';
 
-export const READ_ONLY_TOOLS = 'Read,Glob,Grep';
-export const READ_ONLY_PERMISSIONS = 'Read(//workspace/**),Glob(//workspace/**),Grep(//workspace/**)';
+// THE SANDBOX IS THE BOUNDARY. There is no second fence inside it.
+//
+// This used to hand the reviewer Read, Glob and Grep and nothing else, so it could see the code
+// but never what CHANGED - computing that needs git, and it had no way to run anything. The diff
+// therefore had to be produced outside and pushed in, truncated at MAX_DIFF_CHARS and split at
+// MAX_SHARD_CHARS. That spoon-feeding is what made reviews fragile: one summary call per shard,
+// every one of which must succeed, so a path that fails a single call some of the time fails a
+// twelve-shard review most of the time.
+//
+// A permission whitelist here was redundant with bwrap and strictly weaker than it. The workspace
+// is mounted READ-ONLY, the environment is cleared and rebuilt, /proc/self/environ is masked, and
+// the process is unshared from everything but the network. Anything the reviewer runs is confined
+// by those mounts whether or not the CLI also refuses it - while the whitelist DID reliably block
+// useful work, because it had to enumerate capabilities in advance and no such list survives
+// contact with a real review.
+//
+// One thing those mounts cannot hide is the process environment block itself: `env` and getenv
+// still read it. The real relay credential therefore NEVER enters the sandbox. When a relay base
+// URL is configured, a host-side loopback proxy (credential-proxy.mjs) holds the real key and the
+// sandbox authenticates with a worthless per-run nonce; the proxy injects the real key only into
+// requests toward the fixed relay origin, restricted to the provider API surface.
+//
+// --safe-mode STAYS, and it is not a permission fence. It refuses CLAUDE.md, skills, hooks, MCP
+// servers and custom commands, which is what stops THE CODE UNDER REVIEW from reconfiguring the
+// reviewer that is judging it. That is an integrity property of the gate, not a restriction on
+// what the reviewer may do with its own tools.
+
 const SANDBOX_REPOSITORY = '/workspace';
 const SANDBOX_HOME = '/home/claude';
 const SANDBOX_EXECUTABLE = '/sandbox/claude';
@@ -149,17 +175,16 @@ export function buildClaudeArgs({ model, prompt, jsonSchema }) {
   return [
     '--safe-mode', '--disable-slash-commands', '--no-chrome',
     '--strict-mcp-config', '--mcp-config', EMPTY_MCP_CONFIG,
-    // No -p, and no --json-schema. Replacing the tool whitelist is a separate argument
-    // being made in #40 and is deliberately left alone here.
+    // No -p, and no --json-schema: the schema travels in the PROMPT (promptWithSchema),
+    // because a forced tool_choice 400s some upstreams (measured in #45 - the flag bought
+    // a guarantee validateStage was already enforcing, at the cost of request shape).
     //
-    // -p was carried over from when this was a one-shot extractor. It is not the headless
-    // entry point: with stdin piped and a streaming output format the CLI runs
-    // non-interactively and exits 0 without it. Treat the reviewer as a worker, not a
-    // question asked once. Measured in THIS configuration - the earlier measurement was
-    // taken with --dangerously-skip-permissions, which this branch does not have.
+    // The tool whitelist #45 kept is replaced here by --dangerously-skip-permissions: the
+    // sandbox is the boundary (see the header), and a whitelist that must enumerate
+    // capabilities in advance cannot survive contact with a real review.
     '--no-session-persistence', '--model', model,
-    '--effort', 'max', '--tools', READ_ONLY_TOOLS, '--allowedTools', READ_ONLY_PERMISSIONS,
-    '--permission-mode', 'dontAsk', '--output-format', 'stream-json', '--verbose',
+    '--effort', 'max', '--dangerously-skip-permissions',
+    '--output-format', 'stream-json', '--verbose',
   ];
 }
 
@@ -218,6 +243,16 @@ export function buildSandboxArgs({ executable, ripgrepExecutable, repositoryRoot
     HOME: SANDBOX_HOME,
     PATH: SANDBOX_PATH,
     USE_BUILTIN_RIPGREP: '0',
+    // git has to work against a REPOSITORY MOUNTED READ-ONLY and owned by whoever checked it
+    // out. Without these it fails in two ways that both look like "git is broken" rather than
+    // like a mount decision: it tries to take an index lock, and it refuses a directory whose
+    // owner differs from the caller. Set after safeEnvironment so a caller cannot unset them.
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'safe.directory',
+    GIT_CONFIG_VALUE_0: SANDBOX_REPOSITORY,
   };
   for (const [key, value] of Object.entries(sandboxEnvironment)) {
     args.push('--setenv', key, value);
@@ -445,6 +480,23 @@ export async function runFreshClaude({
   } catch (error) {
     return { status: 'infra_error', error: diagnostic(`schema load: ${error.message}`, sourceEnvironment) };
   }
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1) return { status: 'infra_error', error: 'timeoutMs must be positive' };
+  if (!Number.isInteger(killGraceMs) || killGraceMs < 0) return { status: 'infra_error', error: 'killGraceMs must be non-negative' };
+  if (!Number.isInteger(maxStdoutBytes) || maxStdoutBytes < 1 || !Number.isInteger(maxStderrBytes) || maxStderrBytes < 1) {
+    return { status: 'infra_error', error: 'output limits must be positive' };
+  }
+
+  let credentialProxy;
+  try {
+    credentialProxy = await createCredentialProxy(sourceEnvironment);
+  } catch (error) {
+    return { status: 'infra_error', error: diagnostic(`credential proxy: ${error.message}`, sourceEnvironment) };
+  }
+  // With a relay base URL configured the sandbox points at the loopback credential
+  // proxy and authenticates with a per-run nonce; the real key stays host-side.
+  const sandboxEnvironment = credentialProxy
+    ? { ...sourceEnvironment, ...credentialProxy.sandboxEnvironment }
+    : sourceEnvironment;
 
   let claudeArgs;
   let sandboxArgs;
@@ -457,16 +509,12 @@ export async function runFreshClaude({
       executable,
       ripgrepExecutable,
       repositoryRoot: cwd,
-      environment: sourceEnvironment,
+      environment: sandboxEnvironment,
       claudeArgs,
     });
   } catch (error) {
+    credentialProxy?.close().catch(() => {});
     return { status: 'infra_error', error: diagnostic(`claude arguments: ${error.message}`, sourceEnvironment) };
-  }
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1) return { status: 'infra_error', error: 'timeoutMs must be positive' };
-  if (!Number.isInteger(killGraceMs) || killGraceMs < 0) return { status: 'infra_error', error: 'killGraceMs must be non-negative' };
-  if (!Number.isInteger(maxStdoutBytes) || maxStdoutBytes < 1 || !Number.isInteger(maxStderrBytes) || maxStderrBytes < 1) {
-    return { status: 'infra_error', error: 'output limits must be positive' };
   }
 
   return new Promise((resolve) => {
@@ -478,6 +526,7 @@ export async function runFreshClaude({
         detached: process.platform !== 'win32',
       });
     } catch (error) {
+      credentialProxy?.close().catch(() => {});
       resolve({ status: 'infra_error', error: diagnostic(`spawn: ${error.message}`, sourceEnvironment) });
       return;
     }
@@ -501,6 +550,7 @@ export async function runFreshClaude({
       settled = true;
       clearTimeout(timeoutTimer);
       clearTimeout(graceTimer);
+      credentialProxy?.close().catch(() => {});
       resolve(result);
     };
     const terminate = (result) => {

@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { chmod, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -19,6 +19,7 @@ import {
   runFreshClaude,
   sanitizedEnv,
 } from '../src/claude-cli.mjs';
+import { createCredentialProxy } from '../src/credential-proxy.mjs';
 
 const schema = { type: 'object', properties: { verdict: { type: 'string' } }, required: ['verdict'], additionalProperties: false };
 const executable = '/trusted/claude';
@@ -83,45 +84,6 @@ function nativeTestExecutables() {
 
 function writeSseEvent(response, event, data) {
   response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-}
-
-function writeToolUses(response, uses) {
-  response.writeHead(200, { 'content-type': 'text/event-stream' });
-  writeSseEvent(response, 'message_start', {
-    type: 'message_start',
-    message: {
-      id: `message-${uses.map(({ id }) => id).join('-')}`,
-      type: 'message',
-      role: 'assistant',
-      model: 'luna',
-      content: [],
-      stop_reason: null,
-      stop_sequence: null,
-      usage: { input_tokens: 1, output_tokens: 0 },
-    },
-  });
-  for (const [index, { id, name, input }] of uses.entries()) {
-    writeSseEvent(response, 'content_block_start', {
-      type: 'content_block_start', index,
-      content_block: { type: 'tool_use', id, name, input: {} },
-    });
-    writeSseEvent(response, 'content_block_delta', {
-      type: 'content_block_delta', index,
-      delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) },
-    });
-    writeSseEvent(response, 'content_block_stop', { type: 'content_block_stop', index });
-  }
-  writeSseEvent(response, 'message_delta', {
-    type: 'message_delta',
-    delta: { stop_reason: 'tool_use', stop_sequence: null },
-    usage: { output_tokens: uses.length },
-  });
-  writeSseEvent(response, 'message_stop', { type: 'message_stop' });
-  response.end();
-}
-
-function writeToolUse(response, toolUse) {
-  writeToolUses(response, [toolUse]);
 }
 
 // The reply shape the new contract actually uses: ordinary assistant text carrying the JSON.
@@ -241,24 +203,17 @@ async function runNativeClaude({ claude, ripgrep, bubblewrap, repository, baseUr
   });
 }
 
-function toolResultsFrom(message) {
-  if (message?.role !== 'user' || !Array.isArray(message.content)) return [];
-  return message.content.filter((block) => block?.type === 'tool_result');
-}
-
-function toolResultFrom(message) {
-  return toolResultsFrom(message)[0] ?? null;
-}
-
 test('builds the fixed fresh Claude command - neither prompt nor schema rides in argv', () => {
   const args = buildClaudeArgs({ model: 'terra', prompt: 'review', jsonSchema: schema });
   assert.deepEqual(args, [
     '--safe-mode', '--disable-slash-commands', '--no-chrome',
     '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-    // -p and the trailing --json-schema pair are both gone. The tool whitelist is
-    // untouched on purpose - changing that is #40's argument, not this fix's.
+    // -p and the trailing --json-schema pair are both gone (the schema rides in the
+    // prompt, #45). The tool whitelist is replaced here - that is this PR's argument:
+    // the sandbox is the boundary, so the whitelist that had to enumerate capabilities
+    // in advance is dropped for --dangerously-skip-permissions.
     '--no-session-persistence', '--model', 'terra', '--effort', 'max',
-    '--tools', 'Read,Glob,Grep', '--allowedTools', 'Read(//workspace/**),Glob(//workspace/**),Grep(//workspace/**)', '--permission-mode', 'dontAsk',
+    '--dangerously-skip-permissions',
     '--output-format', 'stream-json', '--verbose',
   ]);
   assert.equal(args.includes('review'), false);
@@ -404,15 +359,196 @@ test('builds a mount namespace exposing only the read-only repository and fixed 
   assert.deepEqual(args.slice(-claudeArgs.length), claudeArgs);
 });
 
-test('path-scopes every repository tool to the sanitized workspace', () => {
+test('imposes no tool fence, because the sandbox is the boundary', () => {
   const args = buildClaudeArgs({ model: 'terra', prompt: 'review', jsonSchema: schema });
-  const allowed = args[args.indexOf('--allowedTools') + 1];
-  assert.equal(allowed, 'Read(//workspace/**),Glob(//workspace/**),Grep(//workspace/**)');
-  assert.equal(/(?:^|,)Glob(?:,|$)|(?:^|,)Grep(?:,|$)/.test(allowed), false);
-  for (const tool of ['Read', 'Glob', 'Grep']) assert.match(allowed, new RegExp(`${tool}\\(//workspace/\\*\\*\\)`));
+
+  // The reviewer needs git to see what changed, and enumerating capabilities in advance is how
+  // it ended up unable to. Confinement is the mount table's job - asserted in the sandbox tests
+  // below - not a second list here that is weaker than bwrap and blocks real work.
+  assert.equal(args.includes('--tools'), false);
+  assert.equal(args.includes('--allowedTools'), false);
+  assert.ok(args.includes('--dangerously-skip-permissions'));
+
+  // --safe-mode is NOT part of that fence and must not be removed with it. It refuses CLAUDE.md,
+  // skills, hooks and MCP servers, which is what stops the code under review from reconfiguring
+  // the reviewer judging it. Integrity of the gate, not a limit on the reviewer.
+  assert.ok(args.includes('--safe-mode'));
+  assert.ok(args.includes('--strict-mcp-config'));
+  assert.equal(args[args.indexOf("--mcp-config") + 1], JSON.stringify({ mcpServers: {} }));
 });
 
+// The three tests that used to live here asserted GREP-TOOL permission behaviour: that Grep was
+// refused outside /workspace and worked inside it. Granting the full toolset removes the Grep
+// tool entirely - the CLI tells the model to "search file contents with `grep` via the Bash tool
+// instead" - so those tests were asserting the behaviour of a tool that is no longer registered.
+// Deleting them rather than porting them, because the property they protected is not gone, it
+// MOVED: confinement is the mount table's now, and it is asserted directly below.
+//
+// MEASURED, NOT ASSUMED, and recorded here so nobody re-derives it later as a surprise: inside
+// the sandbox `env` reads ANTHROPIC_API_KEY, a child process reads the environment it inherits,
+// and outbound DNS resolves. That is inherent to a reviewer that runs code and must authenticate
+// to a model API - no arrangement of tool permissions changes it. What DOES change it is that the
+// value `env` reads is a worthless per-run nonce: when a relay base URL is configured the real key
+// never enters the sandbox at all, and a host-side loopback proxy (credential-proxy.mjs) injects
+// it only into requests toward the fixed relay origin. Leaking the nonce costs nothing.
 
+test('the sandbox, not a permission list, is what confines the reviewer', () => {
+  const args = buildSandboxArgs({
+    executable: '/host/claude',
+    ripgrepExecutable: '/host/rg',
+    repositoryRoot: '/host/repo',
+    environment: { ANTHROPIC_API_KEY: 'k', EVIL: 'x' },
+    claudeArgs: ['-p'],
+  });
+  const pairIndex = (flag, value) => args.findIndex((a, i) => a === flag && args[i + 1] === value);
+
+  // The repository is READ-ONLY. Every capability granted above is bounded by this line.
+  assert.ok(pairIndex('--ro-bind', '/host/repo') >= 0);
+  assert.equal(args[args.indexOf('--ro-bind', pairIndex('--ro-bind', '/host/repo')) + 2], '/workspace');
+  for (const writable of ['--bind', '--bind-try', '--dev-bind', '--dev-bind-try']) {
+    assert.equal(args.includes(writable), false, `${writable} may not exist: nothing may be mounted writable`);
+  }
+
+  // The host environment does not leak in: --clearenv rebuilds the sandbox env from --setenv
+  // only, and the /proc environ path is masked per triple so nothing inside reads it back - not
+  // even a child process, since the /dev/null binds overlay the shared mount namespace. What the
+  // masks do NOT do is hide the process environment block from env/getenv; that is why the sandbox
+  // holds a nonce (asserted in the runFreshClaude test below) rather than the real key.
+  assert.ok(args.includes('--clearenv'));
+  for (const procPath of ['/proc/self/environ', '/proc/1/environ']) {
+    const index = args.indexOf(procPath);
+    assert.ok(index >= 2 && args[index - 2] === '--ro-bind' && args[index - 1] === '/dev/null',
+      `${procPath} must be masked by a /dev/null ro-bind triple`);
+  }
+  assert.equal(args.includes('EVIL'), false);
+
+  assert.ok(args.includes('--unshare-all'));
+  assert.ok(args.includes('--die-with-parent'));
+});
+
+function proxyRequest(origin, path, method = 'POST', headers = {}, body) {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(`${origin}${path}`, {
+      method,
+      headers: { connection: 'close', ...headers },
+    }, (response) => {
+      let data = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { data += chunk; });
+      response.on('end', () => resolve({ status: response.statusCode, body: data }));
+    });
+    request.on('error', reject);
+    if (body !== undefined) request.write(body);
+    request.end();
+  });
+}
+
+test('credential proxy injects the real key only toward the fixed relay, never the nonce', async () => {
+  const received = [];
+  const upstream = createServer((request, response) => {
+    let body = '';
+    request.setEncoding('utf8');
+    request.on('data', (chunk) => { body += chunk; });
+    request.on('end', () => {
+      received.push({
+        path: request.url,
+        method: request.method,
+        key: request.headers['x-api-key'],
+        auth: request.headers.authorization,
+        body,
+      });
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ ok: true }));
+    });
+  });
+  await new Promise((resolve, reject) => {
+    upstream.once('error', reject);
+    upstream.listen(0, '127.0.0.1', resolve);
+  });
+  const upstreamPort = upstream.address().port;
+  const proxy = await createCredentialProxy({
+    ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
+    ANTHROPIC_API_KEY: 'real-provider-key',
+  });
+  try {
+    // The sandbox-facing credential is a worthless per-run nonce; the real key never crosses
+    // the boundary, and the base URL is the loopback proxy, not the relay.
+    assert.match(proxy.sandboxEnvironment.ANTHROPIC_API_KEY, /^claude-review-proxy-/);
+    assert.equal(proxy.sandboxEnvironment.ANTHROPIC_API_KEY.includes('real-provider-key'), false);
+    assert.match(proxy.sandboxEnvironment.ANTHROPIC_BASE_URL, /^http:\/\/127\.0\.0\.1:\d+$/);
+
+    // A bogus sandbox-side key and any leftover auth are replaced with the real key upstream.
+    const ok = await proxyRequest(proxy.origin, '/v1/messages', 'POST',
+      { 'x-api-key': 'nonce-key', authorization: 'Bearer nonce' }, '{"prompt":"x"}');
+    assert.equal(ok.status, 200);
+    assert.deepEqual(received, [{
+      path: '/v1/messages',
+      method: 'POST',
+      key: 'real-provider-key',
+      auth: undefined,
+      body: '{"prompt":"x"}',
+    }]);
+
+    // The CLI's startup probe against the bare base path is allowed through.
+    const head = await proxyRequest(proxy.origin, '/', 'HEAD');
+    assert.equal(head.status, 200);
+    assert.equal(received[1].method, 'HEAD');
+    assert.equal(received[1].path, '/');
+
+    // Paths outside the provider API surface are refused outright, and the upstream
+    // never sees them.
+    const forbidden = await proxyRequest(proxy.origin, '/v1/some-unrelated-endpoint', 'POST', {}, '{}');
+    assert.equal(forbidden.status, 403);
+    assert.equal(received.length, 2);
+
+    // No key or no base URL: no proxy at all.
+    assert.equal(await createCredentialProxy({ ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}` }), null);
+    assert.equal(await createCredentialProxy({ ANTHROPIC_API_KEY: 'k' }), null);
+    assert.equal(await createCredentialProxy({}), null);
+  } finally {
+    await proxy.close();
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
+test('runFreshClaude keeps the real API key out of the sandbox when a relay base URL is configured', async () => {
+  const realKey = 'sk-ant-real-provider-key';
+  let captured;
+  const result = await runFreshClaude(baseRun({
+    environment: { PATH: '/bin', ANTHROPIC_API_KEY: realKey, ANTHROPIC_BASE_URL: 'https://relay.example' },
+    spawn: fakeSpawn({ stdout: resultEvent({ verdict: 'PASS' }), capture: ({ args }) => { captured = args; } }),
+  }));
+  assert.equal(result.status, 'ok');
+  const setenvValue = (name) => {
+    const index = captured.findIndex((value, i) => value === '--setenv' && captured[i + 1] === name);
+    return index >= 0 ? captured[index + 2] : undefined;
+  };
+  // The sandbox points at the loopback credential proxy and authenticates with a nonce.
+  assert.match(setenvValue('ANTHROPIC_BASE_URL'), /^http:\/\/127\.0\.0\.1:\d+$/);
+  assert.match(setenvValue('ANTHROPIC_API_KEY'), /^claude-review-proxy-/);
+  // The real key and the real relay origin never appear anywhere in the sandbox argument list.
+  assert.equal(captured.includes(realKey), false);
+  assert.equal(captured.includes('https://relay.example'), false);
+});
+
+test('git works against a read-only checkout it does not own', () => {
+  const args = buildSandboxArgs({
+    executable: '/host/claude',
+    ripgrepExecutable: '/host/rg',
+    repositoryRoot: '/host/repo',
+    environment: {},
+    claudeArgs: [],
+  });
+  const env = Object.fromEntries(
+    args.map((a, i) => (a === '--setenv' ? [args[i + 1], args[i + 2]] : null)).filter(Boolean),
+  );
+  // Without these git fails in two ways that both read as "git is broken" rather than as a mount
+  // decision: it takes an index lock on a read-only tree, and it refuses a directory whose owner
+  // differs from the caller.
+  assert.equal(env.GIT_OPTIONAL_LOCKS, '0');
+  assert.equal(env.GIT_CONFIG_KEY_0, 'safe.directory');
+  assert.equal(env.GIT_CONFIG_VALUE_0, '/workspace');
+});
 
 
 test('a thinking reply is never echoed back into a follow-up request body', async (context) => {
@@ -465,7 +601,7 @@ test('a thinking reply is never echoed back into a follow-up request body', asyn
     `expected the turn to end on the text reply; ${bodies.length} requests means a follow-up was built`);
 });
 
-test('native Claude registers Read, Glob and Grep - and NO StructuredOutput', async (context) => {
+test('native Claude is given the full toolset, with the sandbox as the only fence', async (context) => {
   if (process.platform !== 'linux') return context.skip('Linux Bubblewrap test');
   const tools = nativeTestExecutables();
   if (!tools) return context.skip('CLAUDE_EXECUTABLE and RIPGREP_EXECUTABLE are required');
@@ -491,13 +627,21 @@ test('native Claude registers Read, Glob and Grep - and NO StructuredOutput', as
     ...tools, repository, baseUrl, secret: 'native-tool-contract-secret', prompt: 'Return done=true.',
   }));
   assert.equal(result.status, 'ok');
-  // The read-only whitelist is UNCHANGED by this fix and still asserted exactly.
-  // What changes is the fourth entry: StructuredOutput is gone with --json-schema.
-  assert.deepEqual(advertisedTools, ['Glob', 'Grep', 'Read']);
+  // Capabilities are asserted, the LIST is not. Pinning the exact set is what made this brittle
+  // in the first place: every tool the CLI adds would fail a test that has nothing to say about
+  // whether the reviewer is safe, and the honest answer to "is it safe" lives in the mount table.
+  // Bash and Read, not Glob and Grep. Granting the full toolset does not merely ADD Bash - the
+  // CLI drops the Grep and Glob tools and tells the model to use `grep` through Bash instead, so
+  // asserting them here would fail for a capability that is present by another route.
+  for (const required of ['Read', 'Bash']) {
+    assert.ok(advertisedTools.includes(required), `the reviewer needs ${required}`);
+  }
+  assert.equal(advertisedTools.includes('Grep'), false,
+    'Grep and Glob are gone with the whitelist - the reviewer greps through Bash now');
+  assert.equal(advertisedTools.includes('Glob'), false);
 
-  // The reason this change exists, asserted against a real CLI rather than against argv.
-  //
-  // An upstream in thinking mode answers a FORCED tool_choice with a hard 400 - deterministic,
+  // No StructuredOutput: --json-schema is gone (#45), so nothing forces a tool call. An
+  // upstream in thinking mode answers a FORCED tool_choice with a hard 400 - deterministic,
   // routing-dependent, and invisible to every channel health check. So the wire must show no
   // forcing at all: no StructuredOutput tool to force, and no tool_choice pinning one.
   assert.equal(advertisedTools.includes('StructuredOutput'), false,
@@ -507,150 +651,14 @@ test('native Claude registers Read, Glob and Grep - and NO StructuredOutput', as
   // And the schema still has to arrive, or "no forcing" would just mean "no contract".
   assert.match(firstPrompt, /Return ONLY a JSON value matching this JSON Schema/);
   assert.match(firstPrompt, /"required":\["done"\]/, 'the schema must reach the model in the prompt');
-
-});
-
-test('native Grep rejects the exact provider credential oracle outside /workspace', async (context) => {
-  if (process.platform !== 'linux') return context.skip('Linux Bubblewrap test');
-  const tools = nativeTestExecutables();
-  if (!tools) return context.skip('CLAUDE_EXECUTABLE and RIPGREP_EXECUTABLE are required');
-  const root = await mkdtemp(path.join(tmpdir(), 'claude-native-credential-'));
-  const repository = path.join(root, 'repository');
-  await mkdir(repository);
-  const secret = 'credential-oracle-must-not-match';
-  let step = 0;
-  let denied;
-  const result = await withMockClaudeProvider((request, response) => {
-    const toolResult = toolResultFrom(request.messages?.at(-1));
-    if (toolResult?.tool_use_id === 'credential-oracle') denied = toolResult;
-    if (step++ === 0) {
-      writeToolUse(response, {
-        id: 'credential-oracle',
-        name: 'Grep',
-        input: {
-          pattern: `ANTHROPIC_API_KEY=${secret}`,
-          path: '/proc/self/environ',
-          output_mode: 'count',
-          multiline: true,
-        },
-      });
-      return;
-    }
-    // Terminating with TEXT, not a StructuredOutput tool call. That tool only existed
-    // because --json-schema registered it; naming a tool the CLI never advertised makes
-    // the turn hang until the timeout, which reads as a broken sandbox rather than a
-    // broken mock. The text IS the answer now.
-    writeText(response, '{"done":true}');
-  }, (baseUrl) => runNativeClaude({
-    ...tools, repository, baseUrl, secret, prompt: 'Use the requested tools, then return done=true.',
-  }));
-  assert.equal(result.status, 'ok');
-  assert.equal(denied?.is_error, true);
-  assert.match(String(denied?.content), /Permission to use Grep has been denied/);
-  assert.doesNotMatch(String(denied?.content), /Found 1 total occurrence|\/proc\/self\/environ:1/);
-});
-
-test('native Grep remains functional for the sanitized /workspace snapshot', async (context) => {
-  if (process.platform !== 'linux') return context.skip('Linux Bubblewrap test');
-  const tools = nativeTestExecutables();
-  if (!tools) return context.skip('CLAUDE_EXECUTABLE and RIPGREP_EXECUTABLE are required');
-  const root = await mkdtemp(path.join(tmpdir(), 'claude-native-workspace-'));
-  const repository = path.join(root, 'repository');
-  await mkdir(repository);
-  await writeFile(path.join(repository, 'visible.txt'), 'workspace-needle\n');
-  let step = 0;
-  let grepResult;
-  const result = await withMockClaudeProvider((request, response) => {
-    const toolResult = toolResultFrom(request.messages?.at(-1));
-    if (toolResult?.tool_use_id === 'workspace-grep') grepResult = toolResult;
-    if (step++ === 0) {
-      writeToolUse(response, {
-        id: 'workspace-grep',
-        name: 'Grep',
-        input: { pattern: 'workspace-needle', path: '/workspace', output_mode: 'content' },
-      });
-      return;
-    }
-    // Terminating with TEXT, not a StructuredOutput tool call. That tool only existed
-    // because --json-schema registered it; naming a tool the CLI never advertised makes
-    // the turn hang until the timeout, which reads as a broken sandbox rather than a
-    // broken mock. The text IS the answer now.
-    writeText(response, '{"done":true}');
-  }, (baseUrl) => runNativeClaude({
-    ...tools, repository, baseUrl, secret: 'workspace-grep-secret', prompt: 'Use the requested tools, then return done=true.',
-  }));
-  assert.equal(result.status, 'ok');
-  assert.equal(grepResult?.is_error, undefined);
-  assert.match(String(grepResult?.content), /visible\.txt.*workspace-needle/);
+  // Bash specifically, because its absence is what forced the diff to be computed outside and
+  // pushed in pre-sharded - the thing that made a whole review fail when one shard did.
+  assert.ok(advertisedTools.length > 10, 'no curated whitelist should be back');
 });
 
 
-test('native repository tools reject proc aliases and concurrent credential scans', async (context) => {
-  if (process.platform !== 'linux') return context.skip('Linux Bubblewrap test');
-  const tools = nativeTestExecutables();
-  if (!tools) return context.skip('CLAUDE_EXECUTABLE and RIPGREP_EXECUTABLE are required');
-  const root = await mkdtemp(path.join(tmpdir(), 'claude-native-proc-boundary-'));
-  const repository = path.join(root, 'repository');
-  await mkdir(repository);
-  const secret = 'proc-boundary-must-not-match';
-  const attacks = [
-    { id: 'read-self', name: 'Read', input: { file_path: '/proc/self/environ' } },
-    { id: 'read-init', name: 'Read', input: { file_path: '/proc/1/environ' } },
-    { id: 'read-self-root', name: 'Read', input: { file_path: '/proc/self/root/proc/self/environ' } },
-    { id: 'read-normalized', name: 'Read', input: { file_path: '/workspace/../proc/self/environ' } },
-    { id: 'glob-proc', name: 'Glob', input: { pattern: '/proc/*/environ' } },
-    {
-      id: 'grep-self', name: 'Grep',
-      input: { pattern: `ANTHROPIC_API_KEY=${secret}`, path: '/proc/self/environ', output_mode: 'count', multiline: true },
-    },
-    {
-      id: 'grep-init', name: 'Grep',
-      input: { pattern: `ANTHROPIC_API_KEY=${secret}`, path: '/proc/1/environ', output_mode: 'count', multiline: true },
-    },
-    {
-      id: 'grep-normalized', name: 'Grep',
-      input: { pattern: `ANTHROPIC_API_KEY=${secret}`, path: '/workspace/../proc/self/environ', output_mode: 'count', multiline: true },
-    },
-    {
-      id: 'grep-double-root', name: 'Grep',
-      input: { pattern: `ANTHROPIC_API_KEY=${secret}`, path: '//proc/self/environ', output_mode: 'count', multiline: true },
-    },
-    {
-      id: 'grep-proc-scan', name: 'Grep',
-      input: { pattern: `ANTHROPIC_API_KEY=${secret}`, path: '/proc', glob: '*/environ', output_mode: 'count', multiline: true },
-    },
-  ];
-  let step = 0;
-  const results = new Map();
-  const result = await withMockClaudeProvider((request, response) => {
-    for (const toolResult of toolResultsFrom(request.messages?.at(-1))) {
-      results.set(toolResult.tool_use_id, toolResult);
-    }
-    if (step++ === 0) {
-      writeToolUses(response, attacks);
-      return;
-    }
-    // Terminating with TEXT, not a StructuredOutput tool call. That tool only existed
-    // because --json-schema registered it; naming a tool the CLI never advertised makes
-    // the turn hang until the timeout, which reads as a broken sandbox rather than a
-    // broken mock. The text IS the answer now.
-    writeText(response, '{"done":true}');
-  }, (baseUrl) => runNativeClaude({
-    ...tools, repository, baseUrl, secret, prompt: 'Use every requested tool, then return done=true.',
-  }));
-  assert.equal(result.status, 'ok');
-  assert.equal(results.size, attacks.length);
-  for (const attack of attacks) {
-    const toolResult = results.get(attack.id);
-    assert.equal(toolResult?.is_error, true, `${attack.id} must fail without returning proc contents`);
-    assert.match(
-      String(toolResult?.content),
-      /Permission to use (?:Read|Glob|Grep) has been denied|Cannot read '[^']*\/proc\/[^']+': this device file would block/,
-    );
-    assert.equal(String(toolResult?.content).includes(secret), false);
-    assert.doesNotMatch(String(toolResult?.content), /Found 1 total occurrence|\/proc\/(?:self|1)\/environ:1/);
-  }
-});
+
+
 
 test('loads schema files before spawning and validates structured_output, not the envelope', async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'claude-schema-'));
