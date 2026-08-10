@@ -12,8 +12,14 @@
 # 用法: dispatch.sh [--queue] <worker 1|2> <task-name> <directive text...>
 # 环境: HARNESS_SESSION(tmux 会话)、HARNESS_DIR(状态根,布局见 layout.mjs)
 #
-# 本移植只面向 pi 风格的工人 pane:忙 = 可见画面里有 "Working..."。
+# 忙 = 可见画面里有 "esc to interrupt"(Claude Code 的页脚)。
 # fake 桩通过 清屏+打印 模拟同一 TUI 契约,使真假两种模式共用同一忙检测。
+#
+# 2026-08-10:审核组从 pi 换成 cc-review-lite(设计 5.9),忙信号随之从 pi 的
+# "Working..." 改为 Claude Code 的页脚。本文件目前**没有调用者**——live 的是
+# v2/dispatch.sh——但两份 dispatch 各带一套忙检测,正是本地 lib-state.sh 记过的
+# 「忙检测分叉」故障:W8 的活跃回合被读成 IDLE,因为另一份实现少了一个分支。
+# 所以此处与 v2/dispatch.sh 同步改,不留一份会过期的副本。合并前应决定删哪一份。
 set -uo pipefail
 
 SESSION=${HARNESS_SESSION:?HARNESS_SESSION is required}
@@ -47,7 +53,7 @@ if LC_ALL=C grep -qP '[^\x09\x20-\x7E]' <<<"$text"; then
 fi
 
 pane() { tmux capture-pane -t "$SESSION:$window" -p 2>/dev/null; }
-busy() { pane | grep -qF 'Working...'; }
+busy() { pane | grep -q 'esc to interrupt'; }
 alive() {
   # 会话开着 remain-on-exit:死 pane 仍挂在窗口上,必须看 pane_dead,
   # 不能拿"窗口还在"当活着(本地编排吃过"重启后遗像看似在线"的亏)。

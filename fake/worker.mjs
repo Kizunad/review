@@ -1,20 +1,24 @@
-// Deterministic fake worker for local/CI smoke tests. Replaces a real pi pane
-// and speaks BOTH worker channels:
+// Deterministic fake worker for local/CI smoke tests. Replaces a real
+// cc-review-lite pane and speaks BOTH worker channels:
 //
 //   1. stdin (the tmux pane channel): v2/dispatch.sh types the directive into
-//      the pane and verifies delivery by watching for pi's busy signal. The
-//      fake worker honors that contract - on receiving a directive line it
-//      prints 'Working...' immediately (so dispatch acceptance sees a busy
+//      the pane and verifies delivery by watching for the agent's busy signal.
+//      The fake worker honors that contract - on receiving a directive line it
+//      prints the busy footer immediately (so dispatch acceptance sees a busy
 //      pane), simulates work for FAKE_WORKER_DELAY_MS, writes the evidence,
 //      then CLEARS the screen (like a TUI status line vanishing) so the pane
-//      reads idle again and stale 'Working...' text cannot fool the next
-//      busy-check.
+//      reads idle again and a stale footer cannot fool the next busy-check.
 //   2. directives/W<N>.md (the crash-recovery record dispatch.sh writes):
 //      polled as a fallback so a directive that raced past stdin still lands.
 //
+// The busy string is Claude Code's 'esc to interrupt' footer, NOT pi's
+// 'Working...'. The crew moved to cc-review-lite (design 5.9) and a stub that
+// imitates the wrong agent is worse than no stub: fake mode would keep testing
+// a pi-shaped world green while every real pane read idle forever.
+//
 // No model involved - the point is to exercise the orchestration loop
 // (boot -> dispatch -> evidence -> checkpoint -> wrapper -> review.json)
-// deterministically, through the SAME pane plumbing the real pi worker uses.
+// deterministically, through the SAME pane plumbing the real worker uses.
 //
 // Usage: node fake/worker.mjs W1    (env HARNESS_DIR, HEAD_OID required;
 //        FAKE_WORKER_DELAY_MS simulated work time, default 6000)
@@ -68,7 +72,7 @@ async function handleAssignment(assignmentId) {
   if (working) return;
   working = true;
   // Busy signal FIRST: dispatch.sh polls the pane for exactly this string.
-  console.log('Working...');
+  console.log('esc to interrupt');
   await sleep(delayMs);
   await writeEvidence(assignmentId);
   clearScreen();

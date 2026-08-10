@@ -81,18 +81,23 @@ jobs:
       ENGINE_PIN: ${{ github.sha }}
       RUN_ID: ${{ github.run_id }}
       RV2_WORKFLOW_FILE: review-v2-p1.yml
-      # AXONHUB_* stay as the INTERNAL names the pi plugin reads; only their source changes.
+      # ONE relay, one pair of names. The AXONHUB_BASE_URL / PI_AXONHUB_API_KEY pair is gone
+      # with pi (design 5.9): it existed only because pi's built-in provider ignored
+      # ANTHROPIC_BASE_URL and had to be routed through a vendored plugin. Both the trunk
+      # (cc-review) and the crew (cc-review-lite) are Claude Code and honor these two
+      # directly - probed 2026-08-08 for claude.
+      #
       # The `||` chain covers both call shapes: workflow_call supplies review_base_url /
       # review_api_key, while a workflow_dispatch smoke trial falls back to whatever the
       # owning repo defines. secrets.<undeclared> is empty rather than an error, so the same
       # expression is valid in both modes.
-      AXONHUB_BASE_URL: ${{ inputs.review_base_url || vars.REVIEW_CLAUDE_BASE_URL || 'https://api.claudeopus.world' }}
-      PI_AXONHUB_API_KEY: ${{ secrets.review_api_key || secrets.REVIEW_CLAUDE_API_KEY }}
-      # Trunk: claude -p honors ANTHROPIC_BASE_URL (probed 2026-08-08) and
-      # carries the relay key as a Bearer token.
       ANTHROPIC_BASE_URL: ${{ inputs.review_base_url || vars.REVIEW_CLAUDE_BASE_URL || 'https://api.claudeopus.world' }}
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.review_api_key || secrets.REVIEW_CLAUDE_API_KEY }}
-      ANTHROPIC_MODEL: ${{ inputs.trunk_model }}
+      # Model policy lives in v2/lib.sh (rv2_trunk_model / rv2_worker_model) so a pane cannot
+      # boot on the wrong tier. ANTHROPIC_MODEL is deliberately NOT set: it would apply to
+      # every claude process in the job, trunk and crew alike, and silently override the
+      # per-pane --model that keeps the two roles apart.
+      RV2_TRUNK_MODEL: ${{ inputs.trunk_model }}
     steps:
       - name: Checkout engine
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262

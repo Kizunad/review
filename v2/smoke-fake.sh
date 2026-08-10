@@ -189,7 +189,7 @@ free_out="$(RV2_ROOT="$F" HARNESS_DIR="$F" TMUX_TMPDIR="$F/tmux" \
   "$HERE/dispatch.sh" W1 s-2 TEST "ASSIGNMENT s-2 under the cap" 2>&1)"
 case "$free_out" in
   *'at/over the cap'*) fail "F completed evidence must free a slot (got: $free_out)" ;;
-  *'no pi process'*) pass "F completed evidence frees a slot (stops at liveness)" ;;
+  *'no claude process'*) pass "F completed evidence frees a slot (stops at liveness)" ;;
   *) fail "F expected a liveness refusal after the slot freed (got: $free_out)" ;;
 esac
 # --queue is the deliberate bypass; it must never be refused by the cap.
@@ -203,20 +203,23 @@ esac
 
 echo "== leg G: empty relay env is a config refusal, not a pane death =="
 # The first three CI trials all ended with "boot: trunk pane never came alive" after two and
-# a half minutes of booting, and the real cause - AXONHUB_BASE_URL and PI_AXONHUB_API_KEY
-# sourced from secrets that exist in no repo - was invisible in that message. Boot must now
-# refuse up front with EX_CONFIG and name the empty variable, and it must do so BEFORE
-# creating a session (a leg that boots nothing is also the proof that it exits early).
+# a half minutes of booting, and the real cause - relay variables sourced from secrets that
+# exist in no repo - was invisible in that message. Boot must now refuse up front with
+# EX_CONFIG and name the empty variable, and it must do so BEFORE creating a session (a leg
+# that boots nothing is also the proof that it exits early).
+#
+# The pair used to be four names because pi needed its own AXONHUB_* set. It is two now, and
+# unsetting the retired names would make this leg pass for the wrong reason - it would be
+# testing variables nothing reads.
 G="$WORK/run-g"
 mkdir -p "$G/tmux"
-g_out="$(env -u AXONHUB_BASE_URL -u PI_AXONHUB_API_KEY -u ANTHROPIC_BASE_URL \
-             -u ANTHROPIC_AUTH_TOKEN \
+g_out="$(env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN \
          RV2_ROOT="$G" HARNESS_DIR="$G" TMUX_TMPDIR="$G/tmux" RV2_FAKE=0 \
          "$HERE/boot-session.sh" 2>&1)"
 g_rc=$?
 assert_eq "G empty relay refuses with rc=78" "$g_rc" "78"
 case "$g_out" in
-  *AXONHUB_BASE_URL*PI_AXONHUB_API_KEY*) pass "G refusal names the empty variables" ;;
+  *ANTHROPIC_BASE_URL*ANTHROPIC_AUTH_TOKEN*) pass "G refusal names the empty variables" ;;
   *) fail "G refusal must name the empty variables (got: $g_out)" ;;
 esac
 # Asserted on the socket, not on the message: the refusal text deliberately quotes the old

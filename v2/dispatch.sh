@@ -54,9 +54,8 @@ if [ "$QUEUE" -eq 0 ] && [ "$active" -ge "$max_active" ]; then
   exit 75
 fi
 
-is_pi=1  # workers always run pi in the v2 harness
 if ! rv2_alive "$pane_index"; then
-  echo "dispatch.sh: W$pane_index has no pi process - relaunch it first" >&2
+  echo "dispatch.sh: W$pane_index has no claude process - relaunch it first" >&2
   exit 69
 fi
 rv2_untranscript "$pane_index"
@@ -66,7 +65,7 @@ if rv2_dialog_up "$pane_index"; then
 fi
 
 if [ "$QUEUE" -eq 0 ]; then
-  if ! rv2_wait_idle "$pane_index" 60 "$is_pi"; then
+  if ! rv2_wait_idle "$pane_index" 60; then
     echo "dispatch.sh: W$pane_index still busy after 60s - not interrupting; re-run when it settles (or --queue)" >&2
     exit 75
   fi
@@ -82,12 +81,23 @@ send_once() {
   sleep 4
 }
 
-# pi's only accept signal is going busy (Working...). Poll rather than sample:
-# the TUI can take seconds to render the running state after Enter.
+# Two accept signals now that the crew is Claude Code, not pi.
+#
+# Going busy is the obvious one. The second is the 'queued messages' banner: a
+# directive submitted while the worker is mid-turn is QUEUED rather than started,
+# and the pane says so instead of clearing. That is a successful hand-off - it
+# runs at the end of the current turn - and mistaking it for a swallowed
+# directive makes the retry below type a second copy, queueing the same
+# instruction twice. pi had no equivalent banner, which is why this branch did
+# not exist before.
+#
+# Polled, not sampled: the TUI can take seconds to render the running state after
+# Enter, and a single sample inside that window reports a false "not accepted".
 accepted() {
   local i
   for i in $(seq 1 10); do
-    rv2_pi_busy "$pane_index" && return 0
+    rv2_busy "$pane_index" && return 0
+    rv2_pane "$pane_index" | grep -q 'queued messages' && return 0
     sleep 1
   done
   return 1

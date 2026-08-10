@@ -48,24 +48,41 @@ rv2_run_id()     { printf '%s' "${RUN_ID:-${RV2_RUN_ID:-local-run}}"; }
 #
 # A missing credential is a configuration error. It must be reported as one, before anything
 # expensive runs, naming the variable - never as a runtime death two minutes later.
+#
+# 2026-08-10: the crew is cc-review-lite, not pi, so there is exactly ONE relay and one pair of
+# names. The AXONHUB_BASE_URL / PI_AXONHUB_API_KEY pair existed only because pi refused to honor
+# ANTHROPIC_BASE_URL and had to be routed through a vendored plugin; with pi gone both roles dial
+# the same endpoint the same way. Two names for one relay is how the pair went empty unnoticed.
 rv2_require_relay() {
   [ "${RV2_FAKE:-0}" = "1" ] && return 0   # the fake harness dials nothing
   local missing="" v
-  for v in AXONHUB_BASE_URL PI_AXONHUB_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN; do
+  for v in ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN; do
     [ -n "${!v:-}" ] || missing="$missing $v"
   done
   [ -n "$missing" ] || return 0
   {
     echo "rv2: relay env is empty:$missing"
-    echo "rv2: the trunk (claude -p) and the pi workers both dial the relay, so with these"
-    echo "rv2: unset every pane dies at startup and the harness can only report that the"
-    echo "rv2: pane never came alive. Fix the caller, not the harness."
+    echo "rv2: the trunk ($(rv2_trunk_model)) and the crew ($(rv2_worker_model)) both dial this"
+    echo "rv2: relay, so with these unset every pane dies at startup and the harness can only"
+    echo "rv2: report that the pane never came alive. Fix the caller, not the harness."
     echo "rv2: a workflow_dispatch run only sees secrets defined on the repo that OWNS the"
     echo "rv2: workflow - Kizunad/review has none. Either call this workflow from Bong with"
     echo "rv2: secrets.review_api_key, or define the secret on Kizunad/review."
   } >&2
   return 78   # EX_CONFIG
 }
+
+# The two roles, and the whole of the model policy (design 5.9).
+#
+# sol judges and orchestrates and writes NOTHING; the crew acts and judges nothing. Keeping the
+# names here rather than in each script means a pane cannot silently boot on the wrong tier - the
+# failure that produces is a crew member reasoning instead of testing, which looks like a review.
+#
+# cc-review-lite runs on a small model BY DESIGN (operator, 2026-08-09). A "lite is degraded"
+# reading has sent someone to fix a healthy config before; it is the correct tier for doing work
+# under someone else's direction.
+rv2_trunk_model()  { printf '%s' "${RV2_TRUNK_MODEL:-cc-review}"; }
+rv2_worker_model() { printf '%s' "${RV2_WORKER_MODEL:-cc-review-lite}"; }
 
 # Dump every pane into the run's logs (and stderr) so a boot failure carries the reason.
 #
@@ -101,20 +118,19 @@ rv2_pane() {
   tmux capture-pane -t "$(rv2_session):$1" -p 2>/dev/null
 }
 
-# Is the pane running claude (trunk) and currently busy?
-rv2_trunk_busy() {
+# Is the pane busy? Every pane is Claude Code now (trunk AND crew), so there is
+# one busy signal instead of two: the 'esc to interrupt' footer.
+#
+# This used to fork on is_pi because pi's only busy marker was 'Working...'.
+# Carrying two detectors is how W17 sat idle for a full day locally - the caller
+# picked the wrong branch and every poll read "not busy". One role, one check.
+rv2_busy() {
   local p
-  p="$(rv2_pane "$(rv2_trunk_index)")"
+  p="$(rv2_pane "$1")"
   grep -q 'esc to interrupt' <<<"$p"
 }
 
-# Is the pane running pi (worker) and currently busy? pi's only busy signal is
-# the 'Working...' status line (lib-state.sh owns that call locally; ported).
-rv2_pi_busy() {
-  local p
-  p="$(rv2_pane "$1")"
-  grep -qF 'Working...' <<<"$p"
-}
+rv2_trunk_busy() { rv2_busy "$(rv2_trunk_index)"; }
 
 # Liveness from the process table, never the pane: after a host reboot tmux
 # restores each pane's last pre-crash frame, status bar and all, so a dead
@@ -125,7 +141,13 @@ rv2_alive() {
   [ -n "$pp" ] || return 1
   # 'fake' covers the deterministic smoke stubs (fake/trunk.sh runs as bash,
   # whose cmdline matches neither claude nor node).
-  pgrep -P "$pp" -f 'claude|pi|node|fake' >/dev/null 2>&1
+  #
+  # 'pi' is deliberately NOT in this alternation any more. Beyond being dead
+  # (the crew is cc-review-lite), as a -f regex it matched any command line
+  # merely CONTAINING those two letters - a path like /opt/pipeline/x is enough -
+  # so a dead pane could read as alive. A liveness check that can be satisfied by
+  # an unrelated process is worse than no check: it converts a crash into a hang.
+  pgrep -P "$pp" -f 'claude|node|fake' >/dev/null 2>&1
 }
 
 # The detailed-transcript view (ctrl+o in claude) has no input box, so
@@ -145,12 +167,17 @@ rv2_dialog_up() {
 }
 
 # Wait up to timeout_s for the pane to stop being busy. Returns 0 when quiet.
+# The third argument used to be is_pi, and it is REMOVED rather than ignored so
+# a stale `rv2_wait_idle "$i" 60 1` fails loudly instead of quietly checking the
+# wrong pane. Worth removing on its own: the old default (0) routed to
+# rv2_trunk_busy, which ignores pane_index entirely, so any worker wait that
+# omitted the flag would have polled the TRUNK's footer. No caller did - the one
+# live call site passed 1 explicitly - but the trap outlived the reason for it.
 rv2_wait_idle() {
-  local pane_index="$1" timeout_s="${2:-60}" is_pi="${3:-0}"
+  local pane_index="$1" timeout_s="${2:-60}"
   local i
   for i in $(seq 1 "$((timeout_s / 3))"); do
-    if [ "$is_pi" -eq 1 ]; then rv2_pi_busy "$pane_index" || return 0
-    else rv2_trunk_busy || return 0; fi
+    rv2_busy "$pane_index" || return 0
     sleep 3
   done
   return 1
