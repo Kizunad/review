@@ -74,15 +74,37 @@ function budgetExceededFailure(stage, failed, total, allowance, budget = FINDER_
   };
 }
 
+// The structured fields a stage result can carry (the confirmed API error
+// envelope, the model called, attempts consumed, determinism) ride through every
+// record type - failure and gap alike - so a record's cause never depends on
+// substring-matching the collapsed error string. Absent fields stay absent: a
+// plain infra failure has no status to claim.
+function structuredFields(source = {}) {
+  return {
+    ...(Number.isInteger(source.apiErrorStatus) ? { apiErrorStatus: source.apiErrorStatus } : {}),
+    ...(typeof source.apiErrorMessage === 'string' && source.apiErrorMessage.length > 0
+      ? { apiErrorMessage: source.apiErrorMessage } : {}),
+    ...(typeof source.terminalReason === 'string' && source.terminalReason.length > 0
+      ? { terminalReason: source.terminalReason } : {}),
+    ...(typeof source.model === 'string' && source.model.length > 0 ? { model: source.model } : {}),
+    ...(Number.isSafeInteger(source.attempts) && source.attempts >= 0 ? { attempts: source.attempts } : {}),
+    ...(typeof source.retryable === 'boolean' ? { retryable: source.retryable } : {}),
+  };
+}
+
 // paths names what the dropped batch was covering, so a gap can be read against
-// the diff instead of being an opaque batch number.
-function coverageGap(stage, batch, paths, error, diagnostic) {
+// the diff instead of being an opaque batch number. source is the runner result
+// that failed; its diagnostic and structured fields ride on the gap so a review
+// that ships with a blind lens says why it went blind.
+function coverageGap(stage, batch, paths, error, source = {}) {
   return {
     stage,
     batch,
     paths: Array.isArray(paths) ? [...paths] : [],
     error: boundedFailureText(error),
-    ...(typeof diagnostic === 'string' && diagnostic.length > 0 ? { diagnostic } : {}),
+    ...(typeof source?.diagnostic === 'string' && source.diagnostic.length > 0
+      ? { diagnostic: source.diagnostic } : {}),
+    ...structuredFields(source),
   };
 }
 
@@ -156,6 +178,16 @@ function aggregateFinderFailures(taxonomy, finderBatches, records) {
         .map((failure) => failure.diagnostic)
         .filter((diagnostic) => typeof diagnostic === 'string' && diagnostic.length > 0)
         .slice(0, MAX_FAILURE_SAMPLES);
+      // Distinct statuses and models across the collapsed batches - the census
+      // surface: N batches dying on the same 402 reads differently from a
+      // mixed-status failure, and judgment-stage vs lite-pool failures are
+      // different outages.
+      const apiErrorStatuses = [...new Set(
+        failures.map((failure) => failure.apiErrorStatus).filter((value) => Number.isInteger(value)),
+      )].sort((left, right) => left - right);
+      const models = [...new Set(
+        failures.map((failure) => failure.model).filter((value) => typeof value === 'string' && value.length > 0),
+      )];
       aggregates.push({
         stage: `find:${dimensionId}`,
         status,
@@ -165,6 +197,8 @@ function aggregateFinderFailures(taxonomy, finderBatches, records) {
         ...(diagnosticSamples.length > 0
           ? { diagnostic: boundedFailureText(diagnosticSamples.join('\n')) }
           : {}),
+        ...(apiErrorStatuses.length > 0 ? { apiErrorStatuses } : {}),
+        ...(models.length > 0 ? { models } : {}),
       });
     }
   }
@@ -196,6 +230,7 @@ function stageFailure(stage, result) {
     ...(typeof result?.diagnostic === 'string' && result.diagnostic.length > 0
       ? { diagnostic: result.diagnostic }
       : {}),
+    ...structuredFields(result),
   };
 }
 
@@ -379,7 +414,7 @@ export async function runReview({
     return { findings: [], failures, coverageGaps };
   }
   for (const { assignment, summary } of summaryFailures) {
-    coverageGaps.push(coverageGap('summary', assignment.id, assignment.paths, summary?.error ?? 'runner returned no result'));
+    coverageGaps.push(coverageGap('summary', assignment.id, assignment.paths, summary?.error ?? 'runner returned no result', summary));
   }
   const finderShards = shards.filter((shard) => summarisedShardIndexes.has(shard.index));
   const finderBatches = finderShards.length > 0
@@ -414,6 +449,7 @@ export async function runReview({
         status: FAILURE_STATUSES.includes(finder?.status) ? finder.status : 'infra_error',
         error: finder?.error ?? 'runner returned no result',
         diagnostic: finder?.diagnostic,
+        ...structuredFields(finder),
       });
       continue;
     }
@@ -451,7 +487,7 @@ export async function runReview({
     return { findings: [], failures, coverageGaps };
   }
   for (const record of finderFailureRecords) {
-    coverageGaps.push(coverageGap(`find:${record.dimensionId}`, record.batchIndex, record.batchPaths, record.error, record.diagnostic));
+    coverageGaps.push(coverageGap(`find:${record.dimensionId}`, record.batchIndex, record.batchPaths, record.error, record));
   }
 
   const exactCandidates = dedupeFindings(candidates);

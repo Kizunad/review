@@ -20,10 +20,13 @@ export const PUBLIC_FAILURE_TEXT_LIMITS = Object.freeze({
   stage: 300,
   error: 4_000,
   diagnostic: 4_000,
+  apiErrorMessage: 240,
 });
 
 export const PUBLIC_COVERAGE_GAP_TEXT_LIMITS = Object.freeze({
   stage: 300,
   path: 500,
   error: 1_000,
+  diagnostic: 1_000,
+  apiErrorMessage: 240,
 });

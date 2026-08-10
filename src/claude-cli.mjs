@@ -360,24 +360,33 @@ function extractApiError(stdout, environment) {
   // and a bounded HTTP status. Anything else reads nothing.
   if (resultEvents.length !== 1) return {};
   const event = resultEvents[0];
-  if (event?.is_error !== true
-    || event.terminal_reason !== 'api_error'
+  if (event?.is_error !== true) return {};
+  // terminal_reason is structural - a bounded closed enum, the same tier streamDiagnostic
+  // discloses without touching event.result - so it surfaces even for CLI-level errors
+  // (where the restricted read below stays closed).
+  const structural = typeof event.terminal_reason === 'string' && TERMINAL_REASON.test(event.terminal_reason)
+    ? { terminalReason: event.terminal_reason }
+    : {};
+  if (event.terminal_reason !== 'api_error'
     || !Number.isInteger(event.api_error_status)
     || event.api_error_status < 100
     || event.api_error_status > 599) {
-    return {};
+    return structural;
   }
   let body;
   try {
     body = JSON.parse(String(event.result ?? ''));
   } catch {
-    return { apiErrorStatus: event.api_error_status };
+    return { ...structural, apiErrorStatus: event.api_error_status };
   }
   const message = typeof body?.message === 'string' ? body.message
     : typeof body?.error?.message === 'string' ? body.error.message
     : undefined;
-  if (typeof message !== 'string' || message.length === 0) return { apiErrorStatus: event.api_error_status };
+  if (typeof message !== 'string' || message.length === 0) {
+    return { ...structural, apiErrorStatus: event.api_error_status };
+  }
   return {
+    ...structural,
     apiErrorStatus: event.api_error_status,
     apiErrorMessage: diagnostic(message, environment, 240),
   };
@@ -562,6 +571,7 @@ export async function runFreshClaude({
           diagnostic: outputDiagnostic(),
           ...(apiError.apiErrorStatus === undefined ? {} : { apiErrorStatus: apiError.apiErrorStatus }),
           ...(apiError.apiErrorMessage === undefined ? {} : { apiErrorMessage: apiError.apiErrorMessage }),
+          ...(apiError.terminalReason === undefined ? {} : { terminalReason: apiError.terminalReason }),
         });
         return;
       }

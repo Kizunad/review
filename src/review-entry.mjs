@@ -159,6 +159,35 @@ function nonEmptyBoundedText(value, maxLength, fallback) {
   return `${text.slice(0, truncatedEnd)}…`;
 }
 
+// The public boundary for the structured diagnostic fields: each is shape-checked
+// before it is allowed onto the artifact (status is a bounded HTTP range, terminal
+// reason a closed enum, model a routing name) and text fields are bounded like
+// their siblings. Unknown values are dropped, not sanitised - a record that does
+// not match the contract does not claim the field.
+const TERMINAL_REASON = /^[a-z][a-z0-9_]{0,63}$/;
+const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+
+function publicStructuredFields(record, limits) {
+  return {
+    ...(Number.isInteger(record?.apiErrorStatus) && record.apiErrorStatus >= 100 && record.apiErrorStatus <= 599
+      ? { apiErrorStatus: record.apiErrorStatus }
+      : {}),
+    ...(typeof record?.apiErrorMessage === 'string' && record.apiErrorMessage.length > 0
+      ? { apiErrorMessage: nonEmptyBoundedText(record.apiErrorMessage, limits.apiErrorMessage, 'api error unavailable') }
+      : {}),
+    ...(typeof record?.terminalReason === 'string' && TERMINAL_REASON.test(record.terminalReason)
+      ? { terminalReason: record.terminalReason }
+      : {}),
+    ...(typeof record?.model === 'string' && MODEL_NAME.test(record.model)
+      ? { model: record.model }
+      : {}),
+    ...(Number.isSafeInteger(record?.attempts) && record.attempts >= 0
+      ? { attempts: record.attempts }
+      : {}),
+    ...(typeof record?.retryable === 'boolean' ? { retryable: record.retryable } : {}),
+  };
+}
+
 function publicFailure(failure) {
   return {
     stage: nonEmptyBoundedText(failure?.stage, PUBLIC_FAILURE_TEXT_LIMITS.stage, 'unknown-stage'),
@@ -173,6 +202,7 @@ function publicFailure(failure) {
         ),
       }
       : {}),
+    ...publicStructuredFields(failure, PUBLIC_FAILURE_TEXT_LIMITS),
   };
 }
 
@@ -203,6 +233,16 @@ function publicCoverageGap(gap) {
     batch: Number.isSafeInteger(gap?.batch) && gap.batch >= 0 ? gap.batch : 0,
     paths: publicCoverageGapPaths(gap?.paths),
     error: nonEmptyBoundedText(gap?.error, PUBLIC_COVERAGE_GAP_TEXT_LIMITS.error, 'runner returned no result'),
+    ...(typeof gap?.diagnostic === 'string' && gap.diagnostic.trim().length > 0
+      ? {
+        diagnostic: nonEmptyBoundedText(
+          gap.diagnostic,
+          PUBLIC_COVERAGE_GAP_TEXT_LIMITS.diagnostic,
+          'diagnostic unavailable',
+        ),
+      }
+      : {}),
+    ...publicStructuredFields(gap, PUBLIC_COVERAGE_GAP_TEXT_LIMITS),
   };
 }
 
@@ -415,9 +455,15 @@ export function renderReviewMarkdown(review, metadata) {
     lines.push(...introduction);
     let omitted = 0;
     for (const [index, failure] of review.failures.entries()) {
+      const facts = [];
+      if (failure.apiErrorStatus !== undefined) facts.push(`status ${failure.apiErrorStatus}`);
+      if (failure.terminalReason !== undefined) facts.push(failure.terminalReason);
+      if (failure.model !== undefined) facts.push(`model ${failure.model}`);
+      if (failure.attempts !== undefined) facts.push(`attempts ${failure.attempts}`);
       const entry = [
         `- ${markdownCodeSpan(failure.stage)} — ${markdownCodeSpan(failure.status)}: ${markdownCodeSpan(failure.error)}`,
         ...(failure.diagnostic ? [`  - diagnostic: ${markdownCodeSpan(failure.diagnostic)}`] : []),
+        ...(facts.length > 0 ? [`  - api: ${markdownCodeSpan(facts.join(' '))}`] : []),
       ];
       const remaining = review.failures.length - index - 1;
       const footer = remaining > 0

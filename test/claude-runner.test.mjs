@@ -282,6 +282,9 @@ test('consolidate unknown-member repair retries exhaust with fresh prompts and a
   assert.equal(result.status, 'schema_error');
   assert.equal(result.error, `after 3 attempts: consolidation contains unknown member ${secondUnknown}`);
   assert.equal(calls.length, 3, 'consolidate gets at most two schema-error repairs');
+  assert.equal(result.model, 'sol', 'the schema-exhausted record names the model that kept failing');
+  assert.equal(result.attempts, 3);
+  assert.equal(result.retryable, false, 'a schema-error is the runner misreading the model, not the model failing');
   assert.match(calls[1].prompt, new RegExp(`Previous attempt referenced unknown fingerprint\\(s\\): ${firstUnknown}\\.`));
   assert.ok(calls[2].prompt.startsWith(calls[1].prompt));
   assert.match(calls[2].prompt, new RegExp(`Previous attempt referenced unknown fingerprint\\(s\\): ${secondUnknown}\\.`));
@@ -412,6 +415,9 @@ test('transport retry: gives up after the attempt budget and annotates the survi
   assert.match(result.error, /^after 3 attempts: claude exited 1$/,
     'the verdict must distinguish "one 524" from "524 through three spaced attempts"');
   assert.equal(calls.length, 3, 'the attempt budget is a hard stop');
+  assert.equal(result.model, 'terra', 'the stage provenance names the model that was called');
+  assert.equal(result.attempts, 3, 'the surviving record says how many attempts were consumed');
+  assert.equal(result.retryable, true, 'a plain infra failure is not deterministic');
 });
 
 test('transport retry: a cpu-overload gate fails fast with a named reason instead of retrying', async () => {
@@ -427,6 +433,8 @@ test('transport retry: a cpu-overload gate fails fast with a named reason instea
   assert.match(result.error, /cpu overload gate rejected the call/);
   assert.match(result.error, /96\.5%/);
   assert.doesNotMatch(result.error, /after 3 attempts/, 'a fail-fast is one attempt, not an exhausted budget');
+  assert.equal(result.attempts, 1, 'a fail-fast record says it died on the first call');
+  assert.equal(result.retryable, true, 'the gate closes - a later run may succeed');
 });
 
 test('transport retry: a plain 503 without the cpu marker keeps the existing retry schedule', async () => {
@@ -436,6 +444,23 @@ test('transport retry: a plain 503 without the cpu marker keeps the existing ret
   assert.equal(result.status, 'infra_error');
   assert.equal(calls.length, 3, 'a genuine upstream 503 still gets the full retry budget');
   assert.match(result.error, /^after 3 attempts: claude exited 1$/);
+  assert.equal(result.apiErrorStatus, 503, 'the exhausted record still names the upstream status');
+  assert.equal(result.model, 'terra', 'the record names the model that exhausted the budget');
+  assert.equal(result.attempts, 3, 'the record counts the three attempts that were consumed');
+  assert.equal(result.retryable, true, 'a plain upstream 503 is transient, not deterministic');
+});
+
+test('transport retry: an out-of-balance 402 keeps the retry budget and surfaces its status', async () => {
+  const { result, calls } = await runStubbedVote({
+    responses: [{ status: 'infra_error', error: 'claude exited 1', apiErrorStatus: 402 }],
+  });
+  assert.equal(result.status, 'infra_error');
+  assert.equal(calls.length, 3, 'a 402 still gets the full retry budget');
+  assert.match(result.error, /^after 3 attempts: claude exited 1$/);
+  assert.equal(result.apiErrorStatus, 402, 'the balance failure stays nameable as a 402');
+  assert.equal(result.model, 'terra', 'the record names the model that kept hitting the drained alias');
+  assert.equal(result.attempts, 3, 'the record counts the three attempts that were consumed');
+  assert.equal(result.retryable, true, 'a drained-pool alias can be re-pointed, so the failure is not deterministic');
 });
 
 test('transport retry: a 400 without the cpu marker keeps the existing retry schedule', async () => {
@@ -445,6 +470,10 @@ test('transport retry: a 400 without the cpu marker keeps the existing retry sch
   assert.equal(result.status, 'infra_error');
   assert.equal(calls.length, 3, 'a 400 still gets the full retry budget');
   assert.match(result.error, /^after 3 attempts: claude exited 1$/);
+  assert.equal(result.apiErrorStatus, 400, 'the exhausted record still names the status');
+  assert.equal(result.model, 'terra', 'the record names the model that kept failing');
+  assert.equal(result.attempts, 3, 'the record counts the three attempts that were consumed');
+  assert.equal(result.retryable, true, 'a 400 is not a deterministic schema reading');
 });
 
 test('transport retry: schema repairs and infra retries spend separate budgets', async () => {
