@@ -1,3 +1,8 @@
+// The schema moved from argv into the prompt. These tests are about how the SCHEMA is
+// transformed - array wrapping, unsupported metadata, RE2 patterns - not about where it travels,
+// so they read it from its new home through one helper instead of each knowing the layout.
+const schemaFromPrompt = (prompt) => JSON.parse(prompt.slice(prompt.lastIndexOf('\n\n') + 2));
+
 import { spawn as nodeSpawn } from 'node:child_process';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -9,6 +14,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   buildClaudeArgs,
+  promptWithSchema,
   buildSandboxArgs,
   runFreshClaude,
   sanitizedEnv,
@@ -261,7 +267,7 @@ test('strips schema metadata unsupported by the Claude CLI validator', () => {
     ...schema,
   };
   const args = buildClaudeArgs({ model: 'sol', prompt: 'plan', jsonSchema: source });
-  const cliSchema = JSON.parse(args[args.indexOf('--json-schema') + 1]);
+  const cliSchema = schemaFromPrompt(promptWithSchema(prompt, schema));
 
   assert.deepEqual(cliSchema, schema);
   assert.equal('$schema' in cliSchema, false);
@@ -1007,7 +1013,7 @@ test('array-rooted schemas travel wrapped in an object envelope for the structur
   // The endpoint behind the relay 400s any root 'type: "array"'
   // (invalid_function_parameters), which is why the find stage could never run.
   const args = buildClaudeArgs({ model: 'sol', prompt: 'find', jsonSchema: { type: 'array', items: { type: 'string' } } });
-  const cliSchema = JSON.parse(args[args.indexOf('--json-schema') + 1]);
+  const cliSchema = schemaFromPrompt(promptWithSchema(prompt, schema));
   assert.equal(cliSchema.type, 'object');
   assert.deepEqual(cliSchema.required, ['items']);
   assert.equal(cliSchema.additionalProperties, false);
@@ -1052,7 +1058,7 @@ test('strips RE2-incompatible patterns for the CLI copy, keeps RE2-safe ones', (
       },
     },
   });
-  const cliSchema = JSON.parse(args[args.indexOf('--json-schema') + 1]);
+  const cliSchema = schemaFromPrompt(promptWithSchema(prompt, schema));
   const properties = cliSchema.properties.items.items.properties;
   assert.equal('pattern' in properties.path, false, 'lookaround pattern must be dropped');
   assert.equal('pattern' in properties.echo, false, 'backreference pattern must be dropped');
