@@ -1,13 +1,19 @@
-# review engine v2 - P1 prototype: runner orchestration harness (design 5.5 + 5.7).
+# review engine v2 - runner orchestration harness (design 5.5, 5.7, 5.9).
 #
-# Boots a tmux session on the runner: a trunk pane (headless claude) that
-# orchestrates and judges, two pi worker panes (cheap-pool models) that write
-# and run tests, plus a checkpoint watchdog. A deterministic bash wrapper
-# validates the trunk's review.json and converts trunk death/timeout into
+# Boots a tmux session on the runner: a trunk pane (cc-review) that classifies
+# the diff, directs the crew, and judges; two crew panes (cc-review-lite) that
+# write and run tests and drop evidence; plus a checkpoint watchdog. A
+# deterministic bash wrapper validates the trunk's review.json, scans crew
+# output for leaked credentials, and converts trunk death/timeout into
 # decision=infrastructure_failure.
 #
-# P1 runs in TEST MODE: only script/knowledge files are dispatched (kind=testable),
-# nothing is built. The engine never builds binaries for P1.
+# NOT YET WIRED: probe mode. The prompts describe it and the evidence contract
+# enforces it (binaryProvenance must name this pipeline's build of this head),
+# but there is no build-server job here, so a worker asked to probe has no
+# pipeline binary to use and must correctly return verdict=blocked. Adding that
+# job is the remaining step before probe is real - and where it belongs (this
+# reusable workflow vs the caller) is still open, because the build is
+# caller-specific while the provenance rule is not.
 #
 # Smoke trials run via workflow_dispatch on this branch (gh workflow run
 # review-v2-p1.yml --ref <branch> -f repository=... -f pull_number=... -f head_oid=...).
@@ -112,7 +118,7 @@ jobs:
       - name: Install hash-pinned Claude Code
         uses: ./.github/actions/setup-claude
 
-      - name: Install runner harness (tmux + jq + pi + axonhub plugin)
+      - name: Install runner harness (tmux + jq)
         run: v2/install-runner.sh
 
       - name: Prepare repo under review

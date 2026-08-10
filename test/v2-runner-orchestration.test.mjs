@@ -66,7 +66,7 @@ test('review-v2-p1.yml declares the runner harness job in order', () => {
     'Checkout engine',
     'Set up Node 22',
     'Install hash-pinned Claude Code',
-    'Install runner harness (tmux + jq + pi + axonhub plugin)',
+    'Install runner harness (tmux + jq)',
     'Prepare repo under review',
     'Build PR diff',
     'Restore prior checkpoint (resume)',

@@ -101,7 +101,21 @@ run_leg() {
     "$HERE/wrapper.sh" >>"$dir/logs/smoke.log" 2>&1 || true
 
     # 收尾:杀本腿的看门狗与专用 tmux server。
-    [ -f "$dir/watchdog.pid" ] && kill "$(cat "$dir/watchdog.pid")" 2>/dev/null || true
+    #
+    # 这里原本只发一次 SIGTERM 就当杀掉了。看门狗的 trap 收到 TERM 只写一次
+    # checkpoint 然后**继续跑**,于是每跑一条腿就漏一个不死的看门狗——本机堆到 60 个,
+    # 每个醒来都拉起一个吃 CPU 的 checkpoint 写入,把整机推过 New API 的 90% 主机
+    # CPU 闸门,导致中央审查停摆一夜。trap 已修,但**清理动作不能依赖被清理方是对的**:
+    # 确认它真的死了,没死就 SIGKILL。静默失败的清理正是 60 个能堆起来的原因。
+    if [ -f "$dir/watchdog.pid" ]; then
+      wd="$(cat "$dir/watchdog.pid")"
+      kill "$wd" 2>/dev/null || true
+      for _ in 1 2 3 4 5; do kill -0 "$wd" 2>/dev/null || break; sleep 0.4; done
+      if kill -0 "$wd" 2>/dev/null; then
+        echo "smoke: watchdog $wd ignored SIGTERM, SIGKILLing" >&2
+        kill -9 "$wd" 2>/dev/null || true
+      fi
+    fi
     tmux kill-server 2>/dev/null || true
   )
 }

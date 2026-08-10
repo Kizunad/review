@@ -8,8 +8,16 @@
 #
 # Output: $RV2_ORCH/assignments.json
 #   [ {"id":"s-0","paths":["..."],"chars":123,"kind":"testable|skip"}, ... ]
-#   kind=testable for script/knowledge paths (P1 test mode); kind=skip for
-#   lockfiles, vendor, and non-script paths that P1 does not contract-test.
+#
+# The ids are POSITIONAL and that is load-bearing: resume matches a checkpoint's
+# completedAssignments by id, so the same diff must produce the same ids or every
+# resumed run redoes everything. This is why the split stays deterministic even
+# though the classification no longer is.
+#
+# `kind` is now an ADVISORY HINT ONLY (design 5.9). It is a path heuristic -
+# script-ish vs lockfile/vendor - and deciding what a change actually needs is
+# the trunk's job, not a filename's. sol assigns the mode (static/test/probe/
+# skip) per assignment and may disagree with this field freely.
 #
 # Usage: v2/shard-diff.sh <diff-file> [max-chars]
 #   Env: RV2_ORCH (default _orch), RV2_MAX_SHARD_CHARS (default 12000, aligned
