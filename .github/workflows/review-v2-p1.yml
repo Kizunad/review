@@ -323,6 +323,13 @@ jobs:
       - name: Restore prior checkpoint (resume)
         run: v2/restore-checkpoint.sh
 
+      # Free, unauthenticated, and it saves a whole run. The relay's CPU gate refuses on
+      # arrival before auth, so this reaches no channel and spends nothing - and booting three
+      # Claude Code sessions into a shedding relay is what turned run 31376928375 into fifty
+      # minutes of idle.
+      - name: Wait for the relay's CPU gate
+        run: v2/wait-for-relay.sh
+
       - name: Boot harness session (trunk + workers + watchdog)
         id: boot
         run: v2/boot-session.sh
@@ -387,13 +394,20 @@ jobs:
           # have burned storage quota within a handful of runs. Everything a human or a resume
           # needs to reconstruct the run is in these paths; the checkout is reproducible from
           # head_oid and belongs nowhere near an artifact.
+          #
+          # RELATIVE to the workspace, not ${{ env.HARNESS_DIR }}. Absolute paths made the
+          # artifact's entries rooted, and `gh run download` refuses those outright: "would
+          # result in path traversal". Measured 2026-08-10 while trying to read the pane dump
+          # from a failed run - the diagnostic bundle could only be fetched by hand through the
+          # zip API. An artifact that the standard tool will not open is one nobody reads at the
+          # moment they need it, which is the only moment it exists for.
           path: |
-            ${{ env.HARNESS_DIR }}/output
-            ${{ env.HARNESS_DIR }}/evidence
-            ${{ env.HARNESS_DIR }}/logs
-            ${{ env.HARNESS_DIR }}/checkpoint
-            ${{ env.HARNESS_DIR }}/resume
-            ${{ env.HARNESS_DIR }}/directives
-            ${{ env.HARNESS_DIR }}/assignments
-            ${{ env.HARNESS_DIR }}/ledger.tsv
+            _rv2/output
+            _rv2/evidence
+            _rv2/logs
+            _rv2/checkpoint
+            _rv2/resume
+            _rv2/directives
+            _rv2/assignments
+            _rv2/ledger.tsv
           if-no-files-found: warn
