@@ -172,7 +172,48 @@ rv2_alive() {
   # merely CONTAINING those two letters - a path like /opt/pipeline/x is enough -
   # so a dead pane could read as alive. A liveness check that can be satisfied by
   # an unrelated process is worse than no check: it converts a crash into a hang.
-  pgrep -P "$pp" -f 'claude|node|fake' >/dev/null 2>&1
+  #
+  # DESCENDANTS, not `pgrep -P`. -P matches DIRECT children only, and the real
+  # tree is pane shell -> shell -> claude, so a live trunk read as dead: on
+  # 2026-08-10 boot printed "trunk pane never came alive" while the trunk was
+  # visibly mid-turn, and wait-review then used the same check to kill a review
+  # that was working. A liveness test that answers "is my immediate child still
+  # there" breaks the moment anything wraps the process in a shell - which is
+  # exactly what the launch line does.
+  rv2_descendant_matches "$pp" 'claude|node|fake'
+}
+
+# Is any DESCENDANT of $1 running a command line matching $2?
+#
+# Deliberately not clever: find candidates by pattern, then walk each one's ppid
+# chain upward looking for the root. Going up is bounded and needs no tree
+# building; going down needs a full table and a fixpoint loop, and the version
+# that did got both directions wrong on the first try.
+# /proc/PID/stat field 4 is the ppid, but field 2 is the command name in
+# parentheses and MAY CONTAIN SPACES, which shifts every positional field after
+# it. Cut at the last ')' before counting. patrol.sh's pi_alive_under takes
+# field 4 directly and gets away with it because pi and node have space-free
+# names; that is a property of the processes, not of the parser.
+rv2_ppid_of() {
+  local s
+  s=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+  s=${s##*') '}            # drop "pid (comm) " - greedy, so a ')' in comm is safe
+  printf '%s\n' "$s" | awk '{print $2}'   # state is now $1, ppid is $2
+}
+
+rv2_descendant_matches() {
+  local root="$1" pattern="$2" cand up n
+  [ -n "$root" ] || return 1
+  for cand in $(pgrep -f "$pattern" 2>/dev/null); do
+    [ "$cand" = "$root" ] && continue
+    up="$cand"; n=0
+    while [ -n "$up" ] && [ "$up" != "1" ] && [ "$n" -lt 30 ]; do
+      up=$(rv2_ppid_of "$up") || break
+      [ "$up" = "$root" ] && return 0
+      n=$((n + 1))
+    done
+  done
+  return 1
 }
 
 # The detailed-transcript view (ctrl+o in claude) has no input box, so
