@@ -868,10 +868,21 @@ jobs:
       # from a review job that died before its resolve step all produce: job red at step 2, no
       # download, no publish, and no comment. Exactly the red-X-with-no-verdict this step exists
       # to prevent, in exactly the circumstances that trigger it.
+      #
+      # IT ALSO FIRES WHEN PUBLISH FAILED, not only when the download did. Observed live on run
+      # 31391454369: the artifact downloaded, verifyManifest passed every binding, and the step
+      # died on the final `curl` with 403 "Resource not accessible by integration". Result: no
+      # comment on the pull request and a red run - and because the DOWNLOAD had succeeded, this
+      # step was skipped, so nothing said anything at all. The condition was testing the wrong
+      # stage: what this handoff is for is "no verdict reached the PR", and download success is
+      # only one of the ways that can happen.
+      #
+      # Safe against double-posting: the comment POST is the last action in the publish step, so
+      # a failed publish is a publish that posted nothing.
       - name: Publish a missing-artifact infrastructure handoff
         if: >-
           !cancelled() && needs.preflight.outputs.circuit_should_run == 'true'
-          && steps.download.outcome != 'success'
+          && (steps.download.outcome != 'success' || steps.publish.outcome != 'success')
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}

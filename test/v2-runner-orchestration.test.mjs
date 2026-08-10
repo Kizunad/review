@@ -411,12 +411,63 @@ test('every variable the agent prompts reference is actually provided to the pan
   assert.ok(referenced.includes('V2_DIR'), 'guard self-check: the prompts must reference V2_DIR');
   assert.ok(referenced.length >= 5, `guard self-check: expected several referenced vars, got ${referenced.length}`);
 
-  const unprovided = referenced.filter((name) => {
-    const inJobEnv = new RegExp(`^\\s{6}${name}:`, 'm').test(wf);
-    const viaGithubEnv = new RegExp(`${name}=`).test(wf) && /GITHUB_ENV/.test(wf);
-    const exportedToPane = new RegExp(`export\\s+${name}=`).test(boot);
-    return !inJobEnv && !viaGithubEnv && !exportedToPane;
-  });
+  // THE THREE PROBES BELOW WERE ALL WRONG, IN BOTH DIRECTIONS, AND THE GUARD STILL "WORKED".
+  //
+  // exportedToPane was /export\s+NAME=/. boot-session.sh exports several variables in one
+  // statement - `export HOME='...' V2_DIR='...'` - so `export` is followed by `HOME=` and the
+  // regex missed every variable but the first. This test therefore FAILED on V2_DIR while
+  // V2_DIR was correctly exported: the guard written to catch the V2_DIR bug fired on the fix
+  // for the V2_DIR bug. A false alarm here is not harmless - it is what teaches the next person
+  // to add a name to an allowlist instead of reading the code.
+  //
+  // viaGithubEnv was `new RegExp(`${name}=`).test(wf) && /GITHUB_ENV/.test(wf)`. The right
+  // conjunct is a CONSTANT TRUE - the workflow mentions GITHUB_ENV somewhere, always. The left
+  // was unanchored, so it matched a comment, and matched inside a longer name: `HEAD_OID=`
+  // matches within `RV2_HEAD_OID=`, so HEAD_OID scored "provided" with nothing providing it.
+  // Between them the check answered "is this string somewhere in the file", not "is this
+  // variable set" - so a variable added to a prompt and never plumbed would pass, which is the
+  // single thing this test exists to prevent.
+  // A name is "provided" only through one of the three mechanisms that actually exist, each
+  // matched as it is really written - not by appearing somewhere in a file.
+  //
+  // Widening a probe until the suite goes green is the failure mode here, so the widening is
+  // bounded by the self-checks below: a name nobody sets must still come back unprovided. That
+  // assertion is what separates "the probes model the code" from "the probes match anything".
+  const word = (name) => new RegExp(`(?<![A-Z0-9_])${name}=`);
+  const wfLines = wf.split('\n');
+  const bootLines = boot.replace(/\\\n/g, ' ').split('\n');
+
+  const isProvided = (name) => {
+    // 1. static job env: `      NAME: value`
+    if (new RegExp(`^\\s{6}${name}:`, 'm').test(wf)) return true;
+    // 2. written to $GITHUB_ENV. The redirect is often a BLOCK redirect several lines below the
+    //    printf that names the variable, so look ahead a little - but only to a redirect, never
+    //    to the mere mention of GITHUB_ENV anywhere in the file (that was the constant-true bug).
+    for (let i = 0; i < wfLines.length; i += 1) {
+      if (!word(name).test(wfLines[i])) continue;
+      if (/GITHUB_ENV/.test(wfLines[i])) return true;
+      for (let j = i + 1; j < Math.min(i + 10, wfLines.length); j += 1) {
+        if (/>>\s*"?\$\{?GITHUB_ENV\}?"?/.test(wfLines[j])) return true;
+        if (/^\s*-\s+name:/.test(wfLines[j])) break;   // next step - stop looking
+      }
+    }
+    // 3. exported into the pane by boot-session.sh, either directly on an `export` statement or
+    //    accumulated into PANE_ENV, which is what the pane launch line exports.
+    return bootLines.some((l) => word(name).test(l)
+      && (/(^|[;&|]|\s)export\s/.test(l) || /PANE_ENV=/.test(l)));
+  };
+
+  const unprovided = referenced.filter((name) => !isProvided(name));
+
+  // Probe self-checks. Each names the exact defect it prevents.
+  assert.ok(isProvided('V2_DIR'),
+    'probe self-check: V2_DIR is exported by boot-session.sh and must be seen as provided '
+    + '(a probe that misses it fires on the fix for the bug it was written to catch)');
+  assert.ok(!isProvided('RV2_NOTHING_SETS_THIS'),
+    'probe self-check: a variable nobody sets must still come back UNPROVIDED - without this '
+    + 'the probes can widen until nothing can ever fail, which is the same as deleting the test');
+  assert.ok(!word('HEAD_OID').test('RV2_HEAD_OID=x'),
+    'probe self-check: a short name must not match inside a longer one');
   assert.deepEqual(unprovided, [],
     `these are referenced by the prompts but set by nobody, so they expand to empty: ${unprovided.join(', ')}`);
 });
