@@ -94,12 +94,6 @@ run_leg() {
     local kv
     for kv in "$@"; do export "${kv?}"; done
 
-    "$HERE/shard-diff.sh" "$dir/diff.txt" >>"$dir/logs/smoke.log" 2>&1 || { echo "shard failed" >&2; exit 1; }
-    node "$REPO/harness/checkpoint.mjs" resume >>"$dir/logs/smoke.log" 2>&1 || true
-    "$HERE/boot-session.sh" >>"$dir/logs/smoke.log" 2>&1 || { echo "boot failed" >&2; exit 1; }
-    "$HERE/wait-review.sh" >>"$dir/logs/smoke.log" 2>&1 || true
-    "$HERE/wrapper.sh" >>"$dir/logs/smoke.log" 2>&1 || true
-
     # 收尾:杀本腿的看门狗与专用 tmux server。
     #
     # 这里原本只发一次 SIGTERM 就当杀掉了。看门狗的 trap 收到 TERM 只写一次
@@ -107,16 +101,53 @@ run_leg() {
     # 每个醒来都拉起一个吃 CPU 的 checkpoint 写入,把整机推过 New API 的 90% 主机
     # CPU 闸门,导致中央审查停摆一夜。trap 已修,但**清理动作不能依赖被清理方是对的**:
     # 确认它真的死了,没死就 SIGKILL。静默失败的清理正是 60 个能堆起来的原因。
-    if [ -f "$dir/watchdog.pid" ]; then
-      wd="$(cat "$dir/watchdog.pid")"
-      kill "$wd" 2>/dev/null || true
-      for _ in 1 2 3 4 5; do kill -0 "$wd" 2>/dev/null || break; sleep 0.4; done
-      if kill -0 "$wd" 2>/dev/null; then
-        echo "smoke: watchdog $wd ignored SIGTERM, SIGKILLing" >&2
-        kill -9 "$wd" 2>/dev/null || true
+    #
+    # It runs from an EXIT trap now, not as the tail of the happy path. Measured
+    # 2026-08-10: leg H's boot lost its liveness race, the `|| exit 1` that used to
+    # sit below jumped straight over this block, and the leg left BOTH its watchdog
+    # (pid 101035, still writing checkpoint.json every 5s eight minutes after the
+    # smoke process had exited) and its tmux server (3 windows) behind. That is the
+    # same 60-watchdog leak described above, reintroduced through an early exit
+    # rather than through a bad trap - so fixing the trap in checkpoint-watchdog.sh
+    # was never going to be enough on its own. The runs that need cleanup are
+    # exactly the ones that fail, so cleanup cannot be reachable only on success.
+    leg_cleanup() {
+      local wd
+      if [ -f "$dir/watchdog.pid" ]; then
+        wd="$(cat "$dir/watchdog.pid")"
+        kill "$wd" 2>/dev/null || true
+        for _ in 1 2 3 4 5; do kill -0 "$wd" 2>/dev/null || break; sleep 0.4; done
+        if kill -0 "$wd" 2>/dev/null; then
+          echo "smoke: watchdog $wd ignored SIGTERM, SIGKILLing" >&2
+          kill -9 "$wd" 2>/dev/null || true
+        fi
       fi
+      tmux kill-server 2>/dev/null || true
+    }
+    trap leg_cleanup EXIT
+
+    "$HERE/shard-diff.sh" "$dir/diff.txt" >>"$dir/logs/smoke.log" 2>&1 || { echo "shard failed" >&2; exit 1; }
+    node "$REPO/harness/checkpoint.mjs" resume >>"$dir/logs/smoke.log" 2>&1 || true
+    # These three legs are the workflow's three steps, and their conditions are
+    # copied from it rather than invented here (review-v2-p1.yml, "Wait for
+    # review.json" / "Wrapper validate / synthesize"):
+    #
+    #   wait-review   if: always() && steps.boot.conclusion == 'success'
+    #   wrapper       if: always()
+    #
+    # A failed boot therefore skips ONLY the wait; the wrapper still runs and still
+    # synthesizes decision=infrastructure_failure from the absent review.json. This
+    # used to be `boot || exit 1`, which abandoned the leg outright, so on
+    # 2026-08-10 leg H reported "review decision (expected 'infrastructure_failure',
+    # got '')" for a case the shipped pipeline handles correctly - the smoke was
+    # failing on its own model of the workflow, not on the workflow. A smoke that is
+    # stricter than the thing it stands in for reports failures nobody can act on.
+    if "$HERE/boot-session.sh" >>"$dir/logs/smoke.log" 2>&1; then
+      "$HERE/wait-review.sh" >>"$dir/logs/smoke.log" 2>&1 || true
+    else
+      echo "boot failed" >&2
     fi
-    tmux kill-server 2>/dev/null || true
+    "$HERE/wrapper.sh" >>"$dir/logs/smoke.log" 2>&1 || true
   )
 }
 
@@ -256,7 +287,19 @@ run_leg run-h run-h 60 FAKE_TRUNK_STOP_AFTER=1
 H="$WORK/run-h"
 assert_eq "H review decision" "$(jq -r .decision "$H/output/review.json" 2>/dev/null)" "infrastructure_failure"
 assert_file_grep "H gave up early on a dead trunk" "$H/logs/smoke.log" 'trunk pane dead for'
-if grep -q 'wait-review: timeout after' "$H/logs/smoke.log"; then
+# The absence of the timeout line is only evidence if wait-review ran at all.
+#
+# When the boot fails, the workflow skips the wait step entirely - so smoke.log
+# contains no wait-review line of any kind, and the old two-branch form printed
+# "ok - H did not wait out the full timeout" for a leg that never reached the
+# code the assertion is about. Measured 2026-08-10: leg H's boot lost its
+# liveness race, three of its four assertions failed, and this one reported ok on
+# the same run. That is the adjacent-question failure in miniature - grep answers
+# "is this string absent", which is not "did the early give-up work" - so the
+# positive evidence that wait-review ran and concluded has to be required first.
+if ! grep -q '^wait-review: ' "$H/logs/smoke.log"; then
+  fail "H wait-review never ran, so 'it did not time out' proves nothing"
+elif grep -q 'wait-review: timeout after' "$H/logs/smoke.log"; then
   fail "H must not sit out the full timeout once the trunk is gone"
 else
   pass "H did not wait out the full timeout"
