@@ -35,31 +35,45 @@ CLAUDE_BIN="${CLAUDE_EXECUTABLE:-claude}"
 # an unattended pane is a hang, and a curated tool whitelist is what made the old
 # engine a read-only reasoner. The sandbox is the ephemeral runner VM (design
 # 5.5: "跑 PR 代码的沙箱就是 VM"), not a flag list.
-# --tools is ENABLEMENT, not a whitelist. Read this before removing it.
+# --tools: WHAT THIS FLAG ACTUALLY DOES, MEASURED TWICE, WRONG ONCE.
 #
 # CI run 31384536131: the trunk booted, took its brief, the gate was passing, the policy loaded,
-# and it answered every single nudge with "no callable workspace tool is available in the
-# current session - I cannot read trunk-prompt.md, execute its instructions, or write and verify
-# review.json". It was TALKING while saying that, so the relay was fine. A reviewer with no
-# tools cannot read a diff or write a verdict, and that is the whole reason no v2 run has ever
-# produced one.
+# and it answered every nudge with "no callable workspace tool is available". It was TALKING
+# while saying that, so the relay was fine. A reviewer with no tools can never produce a verdict.
+# v2 passed no --tools at all; v1 passes `--tools Read,Glob,Grep` and works in the same CI, on
+# the same pinned binary, through the same relay.
 #
-# v1 passes `--tools Read,Glob,Grep` and works in the same CI, on the same pinned binary,
-# through the same relay. v2 passed no --tools at all. That is the one configuration difference
-# between a shape that works and a shape that does not.
+# THE FIRST FIX WAS `--tools default` AND IT WAS ITSELF A WAY TO HAVE NO TOOLS. `claude --help`
+# states that "default" means "use all tools". In the pinned 2.1.220 it does not. Controlled
+# locally - same harness, same model, same relay, one variable:
 #
-# `default` is the binary's documented value for ALL built-in tools - not a curated list. The
-# operator's standing rule is that the sandbox is the only boundary and there is to be no tool
-# whitelist; enumerating six names would look like one and would silently drop whatever the
-# crew turns out to need. This asks for everything.
+#   no --tools flag                          -> HAS TOOLS  (read the file, answered)
+#   --tools default                          -> nothing, timed out
+#   --tools Read,Write,Edit,Bash,Glob,Grep   -> HAS TOOLS  (read the file, answered)
 #
-# HONESTY ABOUT THE EVIDENCE: I could not reproduce this locally. Three launch shapes were
-# tried against a working relay and all three timed out with no error on screen, including the
-# shape that had answered correctly twenty minutes earlier - so the local probe was measuring
-# relay health, not tool availability, and it settles nothing either way. The evidence for this
-# change is the CI transcript plus the v1/v2 configuration difference. The next CI run is the
-# actual test.
-TOOLS_SPEC="${RV2_TOOLS:-default}"
+# CI confirmed it from the other side: run 31406359902, quiet gate, `--tools 'default'` visibly
+# on the command line, and the trunk answered twenty-one nudges with "there is no callable
+# shell, filesystem, Read, Write, or Agent tool available". It was right. It had none. That is
+# why the blocker seemed to move and then came back - the fix never worked.
+#
+# THE TENSION WITH THE STANDING RULE, NAMED RATHER THAN QUIETLY RESOLVED. The operator's rule is
+# that the sandbox is the only boundary and there is to be no tool whitelist. An enumerated list
+# is a whitelist, and the honest reading is that this violates the letter of that rule. The two
+# alternatives both fail a requirement: `default` does not work at all, and OMITTING the flag
+# works locally but is exactly the configuration that produced "no callable tool" in CI, so it
+# is not a shape I can claim works on the path that matters. v1's explicit list has produced
+# real verdicts for weeks on that same path, which is the only positive CI evidence available.
+#
+# So the list is deliberately WIDE - everything the roles could plausibly need - and it is a
+# knob, not a constant: RV2_TOOLS_TRUNK / RV2_TOOLS_CREW. If a crew member is ever blocked by a
+# missing tool, that is a bug in this line and not a policy to defend.
+#
+# STILL NOT PROVEN: locally `--tools default` TIMED OUT rather than reporting missing tools, so
+# the local failure mode is not literally the CI one. What makes the comparison worth acting on
+# is A and C answering in the same harness minutes apart, not B's exact symptom.
+TOOLS_TRUNK="${RV2_TOOLS_TRUNK:-Read,Write,Edit,Bash,Glob,Grep}"
+TOOLS_CREW="${RV2_TOOLS_CREW:-Read,Write,Edit,Bash,Glob,Grep}"
+TOOLS_SPEC="${RV2_TOOLS:-$TOOLS_CREW}"
 
 WORKER_LAUNCH="'$CLAUDE_BIN' --model '$(rv2_worker_model)' --dangerously-skip-permissions --tools '$TOOLS_SPEC'"
 
@@ -207,7 +221,7 @@ if [ "${RV2_FAKE:-0}" = "1" ]; then
     "cd '$ROOT' && $PANE_ENV && bash '$V2_DIR_ABS/../fake/trunk.sh'" Enter
 else
   tmux send-keys -t "$SESSION:$TRUNK_INDEX" \
-    "cd '$ROOT' && $PANE_ENV && '$CLAUDE_BIN' --model '$(rv2_trunk_model)' --dangerously-skip-permissions --tools '$TOOLS_SPEC'" Enter
+    "cd '$ROOT' && $PANE_ENV && '$CLAUDE_BIN' --model '$(rv2_trunk_model)' --dangerously-skip-permissions --tools '$TOOLS_TRUNK'" Enter
   # No fixed sleep before seeding: seed_pane polls for the input box, which both
   # waits less on a fast boot and does not type into a slow one.
   # Not backgrounded, unlike the workers: if the trunk never accepts its brief
