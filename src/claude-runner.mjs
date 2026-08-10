@@ -68,12 +68,12 @@ export function stagePrompt(request, { policy, repository, skillPath, skill }) {
         levelInstructions(),
         'Never emit a partial candidate. Omit any candidate whose required fields are not all concretely supported. Return the response as a JSON array of finding candidates; return [] when no complete candidate qualifies.',
         'Every returned candidate must include taxonomy exactly equal to the assigned taxonomy dimension id, not its title or another dimension.',
-        `Assigned taxonomy dimension:\n${json(request.taxonomy)}`,
         policyBindingInstruction(),
         `Trusted caller policy:\n${json(policy)}`,
         `Validated Luna summaries:\n${json(request.summaries)}`,
         `Diff batch paths:\n${json(request.paths)}`,
         `Immutable pull-request diff batch:\n${request.diff}`,
+        `Assigned taxonomy dimension:\n${json(request.taxonomy)}`,
       ].join('\n\n');
     case 'consolidate':
       return [
@@ -218,9 +218,10 @@ function boundedFeedbackJson(value) {
 // engine-side contract (observed drift: finder candidates missing required
 // fields, plan answers renaming assignments to luna_summary_assignments). The
 // next attempt gets the exact validation error plus the failing output, both
-// APPENDED to the unchanged base prompt so the upstream prefix cache still
-// covers the expensive part; the nonce keeps two identical consecutive
-// failures from replaying a cached identical answer.
+// APPENDED to the unchanged base prompt so the expensive part stays a stable
+// prefix; the nonce keeps two identical consecutive failures from replaying a
+// cached identical answer. The relay currently creates no prompt-cache entries
+// even when explicitly asked, so this is forward-structure, not a live guarantee.
 function schemaFeedbackPrompt(prompt, error, rawOutput) {
   return [
     prompt,
