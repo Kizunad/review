@@ -354,6 +354,32 @@ test('every variable the agent prompts reference is actually provided to the pan
     `these are referenced by the prompts but set by nobody, so they expand to empty: ${unprovided.join(', ')}`);
 });
 
+test('the review timeout leaves room for the wrapper and the upload inside the job timeout', () => {
+  // Two numbers in two files with no link between them. If wait-review's timeout
+  // ever exceeds the job's, GitHub kills the job first - and a job killed by
+  // GitHub produces NO synthesized review.json and NO artifact, which is
+  // strictly worse than a clean infrastructure_failure. The wrapper and the
+  // upload are `if: always()` steps that still have to run after the wait
+  // expires, so the gap is a requirement, not slack.
+  const wf = readFileSync(path.join(root, '.github/workflows/review-v2-p1.yml'), 'utf8');
+  const wait = readFileSync(path.join(root, 'v2/wait-review.sh'), 'utf8');
+
+  const reviewJob = wf.slice(wf.indexOf('\n  review:'));
+  const jobMinutes = Number(/timeout-minutes:\s*(\d+)/.exec(reviewJob)?.[1]);
+  const waitSeconds = Number(/RV2_REVIEW_TIMEOUT_S:-(\d+)/.exec(wait)?.[1]);
+  assert.ok(Number.isInteger(jobMinutes) && jobMinutes > 0, 'could not read the review job timeout');
+  assert.ok(Number.isInteger(waitSeconds) && waitSeconds > 0, 'could not read the wait-review default');
+
+  const RESERVE_S = 300;
+  assert.ok(waitSeconds + RESERVE_S <= jobMinutes * 60,
+    `wait-review default ${waitSeconds}s + ${RESERVE_S}s for wrapper/upload exceeds the ${jobMinutes}m job timeout`);
+  // The other direction is not a correctness bug but it is waste worth naming:
+  // 1500s against a 60m job left 35 minutes of paid runner unused, sized for a
+  // test-only mode that no longer exists now that probe builds and deploys.
+  assert.ok(waitSeconds >= jobMinutes * 60 * 0.6,
+    `wait-review default ${waitSeconds}s uses under 60% of the ${jobMinutes}m job - probe runs need the room`);
+});
+
 function waitFor(predicate, timeoutMs, label) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

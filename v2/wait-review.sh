@@ -11,7 +11,26 @@ V2_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUT="$(rv2_output)"
 mkdir -p "$OUT"
 REVIEW="$OUT/review.json"
-TIMEOUT_S="${RV2_REVIEW_TIMEOUT_S:-1500}"
+# Sized against the JOB timeout, not picked. The review job is 60 minutes; the
+# wrapper and the artifact upload both run `if: always()` and must still fit
+# after this expires, because a job killed by GitHub produces no synthesized
+# review.json and no artifact at all - strictly worse than a clean INFRA. 3000s
+# leaves 10 minutes for that tail. test/v2-runner-orchestration.test.mjs asserts
+# the relationship so the two numbers cannot drift apart.
+#
+# It was 1500s, which left 35 of the job's 60 minutes unused. That was sized for
+# P1 test mode - scripts only, nothing built. Probe mode changes the shape: the
+# crew stands a server up and drives it, two workers serially over N
+# assignments, so slow-but-alive is now the normal case rather than a symptom.
+#
+# Raising it is only safe because the timeout no longer doubles as a liveness
+# detector: a dead trunk is caught by the dead_polls path below within
+# DEAD_LIMIT polls and gives up immediately. The timeout now binds ONLY on a
+# trunk that is alive and working, which is exactly the case that should be
+# allowed to finish. A timeout that fires there is not a safety net, it is a
+# lost run - and it costs a taskq attempt, which is how PRs end up parked at
+# "attempt 2 of 3".
+TIMEOUT_S="${RV2_REVIEW_TIMEOUT_S:-3000}"
 POLL_S="${RV2_REVIEW_POLL_S:-20}"
 
 # Consecutive dead polls before believing the trunk is gone. A single miss is not proof:
