@@ -87,7 +87,12 @@ test('review-v2-p1.yml declares the runner harness job in order', () => {
   assert.match(wf, /HARNESS_DIR:/);
   assert.match(wf, /PR_NUMBER:\s*\$\{\{ inputs\.pull_number \}\}/);
   assert.match(wf, /HEAD_OID:\s*\$\{\{ inputs\.head_oid \}\}/);
-  assert.match(wf, /ENGINE_PIN:\s*\$\{\{ github\.sha \}\}/);
+  // ENGINE_PIN comes from the preflight job's resolution, NOT from github.sha. This assertion
+  // used to demand github.sha and was wrong in the mode that matters: under workflow_call
+  // github.sha is the CALLER's commit, so a resume key built from it names Bong's HEAD as the
+  // engine pin. The workflow says so in a comment and the test still asserted the old value -
+  // a red test that everyone learns to scroll past is worse than no test.
+  assert.match(wf, /ENGINE_PIN:\s*\$\{\{ needs\.preflight\.outputs\.engine_ref \}\}/);
   assert.match(wf, /RUN_ID:\s*\$\{\{ github\.run_id \}\}/);
   assert.match(wf, /actions\/checkout@11d5960a326750d5838078e36cf38b85af677262/);
   assert.match(wf, /actions\/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020/);
@@ -98,6 +103,68 @@ test('review-v2-p1.yml declares the runner harness job in order', () => {
   assert.match(wf, /- name: Wait for review\.json[\s\S]*?if: always\(\)/);
   assert.match(wf, /- name: Wrapper validate \/ synthesize[\s\S]*?if: always\(\)/);
   assert.match(wf, /- name: Upload artifacts[\s\S]*?if: always\(\)/);
+});
+
+// The breaker is caller-visible behaviour that only shows up during an outage, which is the
+// worst time to discover it was silently un-wired by an edit to a `needs:` line. v1 guards its
+// copy the same way in workflow-static.test.mjs; this is the v2 half.
+test('review-v2-p1.yml gates every expensive job behind the shared infrastructure circuit', () => {
+  const wf = readFileSync(path.join(root, '.github/workflows/review-v2-p1.yml'), 'utf8');
+  const section = (name, next) => {
+    const match = wf.match(new RegExp(`\\n  ${name}:\\n([\\s\\S]*?)${next ? `\\n  ${next}:\\n` : '$'}`));
+    assert.ok(match, `job ${name} must be extractable`);
+    return match[1];
+  };
+  const preflight = section('preflight', 'build-server');
+  const build = section('build-server', 'review');
+  const review = section('review', 'write-finalize');
+  const finalize = section('write-finalize');
+
+  // ONE implementation, shared with v1. A second copy of the sliding-window arithmetic is a
+  // second thing to keep in step, and the two would only be discovered to disagree during the
+  // outage they both exist for.
+  assert.match(preflight, /node src\/run-circuit\.mjs preflight/);
+  assert.match(finalize, /node _central\/src\/run-circuit\.mjs skip-comment/);
+  assert.match(finalize, /node _central\/src\/run-circuit\.mjs record/);
+  // Comments stripped first: the workflow is entitled to NAME circuit-store.mjs when it
+  // explains where the state lives. What must not appear is a call into it, or a second
+  // sliding-window computed in bash or jq.
+  const executable = wf.split('\n').filter((line) => !line.trim().startsWith('#')).join('\n');
+  assert.doesNotMatch(executable, /evaluateCircuit|parseTrustedCircuitEvents|circuit-store/);
+
+  // Read-only, and it never speaks on the pull request: the skip notice belongs to the one job
+  // that has write permission.
+  assert.match(preflight, /circuit_should_run: \$\{\{ steps\.circuit\.outputs\.should_run \}\}/);
+  assert.match(preflight, /circuit_open_until: \$\{\{ steps\.circuit\.outputs\.open_until \}\}/);
+  assert.doesNotMatch(preflight, /pull-requests: write|issues: write|skip-comment/);
+
+  // Every job that costs money is behind the breaker - the 45-minute build included, since it
+  // is the single largest piece of what an open circuit is saving.
+  for (const [name, job] of [['build-server', build], ['review', review]]) {
+    assert.match(job, /needs\.preflight\.outputs\.circuit_should_run == 'true'/,
+      `${name} must not start while the circuit is open`);
+  }
+
+  // A skip is announced and then fails the check. Silence, or worse a green check, would let
+  // branch protection read "no review attempted" as "approved".
+  assert.match(finalize, /Publish the circuit skip notice[\s\S]*?circuit_should_run == 'false'/);
+  assert.match(finalize, /Preserve the circuit skip as a non-verdict failure[\s\S]*?circuit_should_run == 'false'/);
+
+  // What may and may not enter the count. A request_changes is a verdict and a moved head is a
+  // refusal; neither is an outage, and three of either must never open the breaker.
+  const record = finalize.match(/Record the infrastructure failure in the caller circuit([\s\S]*?)\n      - name: /);
+  assert.ok(record, 'the circuit record step must be extractable');
+  assert.match(record[1], /steps\.publish\.outputs\.decision == 'infrastructure_failure'/);
+  assert.match(record[1], /steps\.publish\.outputs\.stale_head != 'true'/);
+  assert.doesNotMatch(record[1], /request_changes/);
+  assert.match(finalize, /printf 'stale_head=true\\n' >> "\$GITHUB_OUTPUT"/);
+
+  // The breaker's numbers exist once. v1 repeats them in two jobs with nothing linking the
+  // copies, so a preflight opening at 3-in-60 can coexist with a record step counting some
+  // other rule.
+  for (const key of ['CIRCUIT_THRESHOLD', 'CIRCUIT_WINDOW_MINUTES', 'CIRCUIT_DURATION_MINUTES']) {
+    assert.equal(wf.split(`${key}:`).length - 1, 1, `${key} must be configured in exactly one place`);
+  }
 });
 
 test('every v2 shell script passes bash -n and is executable; mjs passes node --check', () => {

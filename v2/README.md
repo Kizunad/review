@@ -26,7 +26,11 @@ the final call is sol's and cannot be bypassed (operator, 2026-08-10).
 
 ```
 workflow_dispatch / workflow_call
-   └─ review job (ubuntu-latest, timeout 60m)
+   ├─ preflight job (read-only)
+   │     ├─ resolve this engine's own repo + commit from referenced_workflows
+   │     └─ src/run-circuit.mjs preflight -> circuit_should_run
+   ├─ build-server job (only with build_command, only if the circuit is closed)
+   └─ review job (ubuntu-latest, timeout 60m, only if the circuit is closed)
        ├─ setup-node 22 + setup-claude (hash-pinned) + install-runner.sh
        ├─ prepare-repo.sh          -> $HARNESS_DIR/repo at PR head
        ├─ build-diff.sh            -> $HARNESS_DIR/diff.txt
@@ -41,7 +45,38 @@ workflow_dispatch / workflow_call
        │                              cross-check; synthesize
        │                              infrastructure_failure on trunk death
        └─ upload-artifact (if: always())  -> rv2-p1 (whole HARNESS_DIR)
+   └─ write-finalize job (the only write permission; if: always())
+         ├─ circuit open   -> src/run-circuit.mjs skip-comment, then fail red
+         ├─ circuit closed -> verify manifest, publish the verdict
+         └─ infrastructure_failure or a broken publish -> run-circuit.mjs record
 ```
+
+## Infrastructure circuit
+
+Shared with v1, one implementation: `src/run-circuit.mjs` over
+`src/circuit-store.mjs`. Three infrastructure failures from distinct run
+attempts inside `CIRCUIT_WINDOW_MINUTES` open the breaker for
+`CIRCUIT_DURATION_MINUTES`; while it is open no build and no review is
+dispatched, and write-finalize posts a skip notice on the pull request and
+fails the check, because an unattempted review must never read as an approval.
+
+The state is not local to a run: it is a trusted log of bot comments on an
+issue in the **repository under review** (`CIRCUIT_REPOSITORY`, which is not
+`$GITHUB_REPOSITORY` when a dispatch trial reviews another repo). Reads fail
+open - an unreadable failure log is not evidence of an outage.
+
+What counts is narrow, and the exclusions are the point:
+
+| Situation | Counted? |
+|-----------|----------|
+| published verdict `decision=infrastructure_failure` | yes |
+| write-finalize could not verify or publish the artifact | yes |
+| `request_changes` / `approve` | no - those are verdicts |
+| the PR head moved during the review | no - a refusal, not an outage |
+| no artifact at all | no - the cause is not observable from write-finalize; v2's `wrapper.sh` runs on `always()`, so a real outage still publishes an `infrastructure_failure` and is counted through the first row |
+
+Retry after an outage with a `workflow_dispatch` and
+`circuit_manual_retry: true`. That bypass applies to no other trigger.
 
 ## State root and data contracts
 
@@ -100,7 +135,7 @@ Set by the workflow (`review-v2-p1.yml`):
 |-----|---------|
 | `HARNESS_DIR` / `RV2_ROOT` | the single state root (default `$PWD`) |
 | `RV2_REPOSITORY` / `PR_NUMBER` / `HEAD_OID` | the PR under review |
-| `ENGINE_PIN` | engine pin for the resume key (`github.sha`) |
+| `ENGINE_PIN` | engine pin for the resume key (the preflight job's resolved engine commit, NOT `github.sha`) |
 | `RUN_ID` | this run's id (`github.run_id`) |
 | `RV2_WORKFLOW_FILE` | this workflow's file name (for restore queries) |
 | `RV2_CHECKPOINT_INTERVAL` | watchdog cadence (default 300s) |
@@ -187,7 +222,8 @@ invalidates prior checkpoints). The trunk skips shards listed in
   install needed.
 - **trunk model id** - the relay's model list decides; set `trunk_model` input
   to a model the relay serves, or leave empty for the relay default.
-- **workflow_call engine pin** - `ENGINE_PIN=github.sha` is correct for
-  workflow_dispatch smoke trials; under workflow_call `github.sha` is the
-  caller's sha, so callers must pass `engine_ref` explicitly and the pin
-  semantics need re-checking before production.
+- **workflow_call engine pin** - closed. The preflight job resolves the engine's
+  own repo and commit from the run's `referenced_workflows` entry and hands it
+  to every other job, so `ENGINE_PIN` is the engine's commit in both call
+  shapes. `github.sha` remains the dispatch-mode fallback only, where there is
+  no caller to confuse it with.

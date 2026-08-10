@@ -118,6 +118,30 @@ test('retry opt-in cannot bypass the circuit for a different trigger or command'
   }
 });
 
+// v2 is dispatched on the engine repository against another repository's pull request, so
+// $GITHUB_REPOSITORY is the engine while PR_NUMBER belongs to the reviewed repo. Without this
+// redirect the breaker would read a failure log that does not exist and - far worse on the
+// record path - post an infrastructure-failure comment onto whatever issue in Kizunad/review
+// happened to share the number.
+test('the circuit reads and writes state in the repository under review, not the running one', async () => {
+  const seen = [];
+  const outputs = [];
+  await runCircuit('preflight', {
+    environment: environment({ CIRCUIT_REPOSITORY: 'org/under-review' }),
+    fetchImpl: async (url, init) => {
+      seen.push(new URL(url).pathname);
+      return readOnlyStateFetch(failureEvents)(url, init);
+    },
+    append: async (_path, value) => outputs.push(value),
+    now: () => '2026-07-25T00:30:00.000Z',
+  });
+  assert.deepEqual(outputs, ['should_run=false\nopen_until=2026-07-25T01:20:00.000Z\n']);
+  assert.ok(seen.length > 0, 'the preflight must have read state');
+  for (const pathname of seen) {
+    assert.ok(pathname.startsWith('/repos/org/under-review/'), `state read from ${pathname}`);
+  }
+});
+
 test('preflight fails open when trusted circuit state cannot be read', async () => {
   const outputs = [];
   await runCircuit('preflight', {

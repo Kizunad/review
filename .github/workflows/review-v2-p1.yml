@@ -78,6 +78,15 @@ on:
         required: false
         type: string
         default: ''
+      # Same name, default and meaning as v1's input, so a caller that already sets it keeps
+      # working when it switches the `uses:` line. It is deliberately NOT a general "ignore the
+      # breaker" switch: run-circuit.mjs honours it only when the trigger is a workflow_dispatch,
+      # which is the one entrypoint a human has to reach for on purpose.
+      circuit_manual_retry:
+        description: Allow a trusted workflow_dispatch retry to bypass an open infrastructure circuit
+        required: false
+        default: false
+        type: boolean
     secrets:
       review_api_key:
         required: true
@@ -120,13 +129,179 @@ on:
         required: false
         default: ''
         type: string
+      # Mirrored into workflow_dispatch because dispatch is the ONLY trigger the bypass applies
+      # to. Declared only under workflow_call it would be permanently unreachable: the retry
+      # after an outage is a dispatch, and inputs.circuit_manual_retry would read empty there -
+      # i.e. the escape hatch would exist in exactly the mode that cannot use it.
+      circuit_manual_retry:
+        description: 'bypass an open infrastructure circuit for this run (trusted dispatch only)'
+        required: false
+        default: false
+        type: boolean
+
+# The three numbers that define the breaker, in ONE place. v1 repeats them in its preflight job
+# and again in its record step; nothing links the two copies, and a run whose preflight opens at
+# 3-in-60 while its record step counts against some other rule is a breaker nobody wrote. They
+# are read straight out of the environment by src/run-circuit.mjs, so workflow-level env is
+# enough - no job needs to restate them.
+env:
+  CIRCUIT_THRESHOLD: '3'
+  CIRCUIT_WINDOW_MINUTES: '60'
+  CIRCUIT_DURATION_MINUTES: '60'
 
 jobs:
+  # The caller-owned infrastructure circuit, and the engine identity everything else hangs off.
+  # Both have to be known BEFORE anything expensive starts, which is why they share a job.
+  #
+  # WHAT THE BREAKER IS FOR. v2 shipped without one. Three infrastructure failures in an hour -
+  # a relay shedding on its CPU gate, a channel with no upstream, a key that stopped working -
+  # and v2 would keep dispatching: for every PR, a 45-minute build plus three Claude Code
+  # sessions booted into whatever is broken, each one ending in the same infrastructure_failure.
+  # v1 has stopped this since the first outage and v2 replacing v1 without it would be a
+  # regression in the one behaviour that costs real money when it is missing.
+  #
+  # The state is NOT local to a run: it is a trusted failure log kept as bot comments on an
+  # issue in the reviewed repository (src/circuit-store.mjs), which is what lets one run see the
+  # failures of the runs before it. So the only thing this job needs off the engine checkout is
+  # src/run-circuit.mjs - the same file v1 runs, not a second copy that would have to be kept in
+  # step with it.
+  #
+  # The engine resolution MOVED here from the review job; it was not copied. The answer is
+  # identical in every job of a run - it parses this run's own attempt record, nothing job-local
+  # - and the review job now cannot start until the breaker has spoken, so something had to
+  # resolve the engine first anyway. write-finalize also reads it from here rather than from the
+  # review job, because the review job is SKIPPED when the circuit is open and a skipped job
+  # hands its dependents empty outputs - including the ref of the engine whose skip notice
+  # write-finalize still has to post.
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Read-only by construction. This job decides whether to run a review; it never publishes
+    # one. `actions: read` is not optional - the engine resolution reads the run's attempt
+    # record - and `issues: read` is what the circuit's failure log lives in.
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      engine_ref: ${{ steps.engine.outputs.ref }}
+      engine_repo: ${{ steps.engine.outputs.repo }}
+      circuit_should_run: ${{ steps.circuit.outputs.should_run }}
+      circuit_open_until: ${{ steps.circuit.outputs.open_until }}
+    steps:
+      # Inside a reusable workflow the github context belongs to the CALLER. actions/checkout
+      # with no `repository:` therefore checks out BONG, not this engine - so every path below
+      # (src/run-circuit.mjs, v2/boot-session.sh, harness/) would be missing, under
+      # workflow_call only. v2 has only ever run via workflow_dispatch, where
+      # github.repository happens to BE this repo, so the bug is invisible in the one mode that
+      # has been exercised.
+      #
+      # referenced_workflows names both halves - "Owner/Repo/.github/workflows/x.yml@<sha>" -
+      # so the repository and the commit both come from what actually ran rather than from a
+      # hard-coded name or from github.sha, which is the caller's commit and answers a different
+      # question. github.sha is the correct fallback under dispatch, where there is no caller.
+      - name: Resolve the engine's own repository and commit
+        id: engine
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo='' ref=''
+          if [ "${{ github.event_name }}" != workflow_dispatch ]; then
+            run_json="$(curl --fail-with-body --silent --show-error \
+              -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT")"
+            entry="$(jq -r '
+              [ .referenced_workflows[]?
+                | select(.path | contains("/.github/workflows/review-v2-p1.yml@")) ]
+              | if length == 1 then .[0].path else "" end
+            ' <<<"$run_json")"
+            if [ -n "$entry" ]; then
+              repo="${entry%%/.github/workflows/*}"
+              ref="$(printf '%s' "${entry##*@}" | tr 'A-F' 'a-f')"
+            fi
+          fi
+          if [ -z "$ref" ]; then
+            repo='${{ github.repository }}'
+            ref='${{ inputs.engine_ref || github.sha }}'
+            echo "engine: no referenced_workflows entry - dispatch mode, using $repo@$ref"
+          else
+            echo "engine: this run called $repo/.github/workflows/review-v2-p1.yml@$ref"
+          fi
+          printf '%s' "$ref" | grep -qE '^[0-9a-f]{40}$' || {
+            echo "engine: '$ref' is not a 40-hex commit SHA - refusing to check out an ambiguous engine" >&2
+            exit 1
+          }
+          printf 'ref=%s\n' "$ref" >>"$GITHUB_OUTPUT"
+          printf 'repo=%s\n' "$repo" >>"$GITHUB_OUTPUT"
+
+      - name: Checkout the engine for the circuit implementation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ steps.engine.outputs.repo }}
+          ref: ${{ steps.engine.outputs.ref }}
+          persist-credentials: false
+
+      # The checkout is asserted, not assumed: a ref that resolves to something else leaves the
+      # engine silently running a different commit than the one the manifest will claim.
+      - name: Assert the engine checkout matches the resolved commit
+        run: |
+          actual="$(git rev-parse HEAD)"
+          [ "$actual" = "${{ steps.engine.outputs.ref }}" ] || {
+            echo "engine: checkout is at $actual, expected ${{ steps.engine.outputs.ref }}" >&2
+            exit 1
+          }
+          [ -f src/run-circuit.mjs ] || { echo "engine: src/run-circuit.mjs missing - wrong repository" >&2; exit 1; }
+          echo "engine: at $actual with the circuit implementation present"
+
+      # Pinned rather than "whatever node the image ships". The review job pins its Node for the
+      # harness; the breaker deciding whether that job runs at all should not be the one step in
+      # the pipeline whose runtime is decided by an image refresh.
+      - name: Set up Node 22 for the circuit
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+
+      # FAIL-OPEN, and that is deliberate: run-circuit.mjs catches every read error and emits
+      # should_run=true. A breaker whose state store is unreachable must not become an outage of
+      # its own - "I could not read the failure log" is not evidence that the relay is down.
+      - name: Evaluate the caller infrastructure circuit
+        id: circuit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # The failure log lives with the pull request it is about. Under a dispatch trial
+          # $GITHUB_REPOSITORY is this engine while pull_number belongs to the repo under
+          # review, and a breaker reading the wrong repo's issues answers a question nobody
+          # asked. See the comment on CIRCUIT_REPOSITORY in src/run-circuit.mjs.
+          CIRCUIT_REPOSITORY: ${{ inputs.repository }}
+          PR_NUMBER: ${{ inputs.pull_number }}
+          REVIEW_TRIGGER: ${{ github.event_name }}
+          CIRCUIT_MANUAL_RETRY: ${{ inputs.circuit_manual_retry }}
+        run: |
+          set -euo pipefail
+          node src/run-circuit.mjs preflight
+          # Say the decision out loud in the log. `grep '^should_run=' "$GITHUB_OUTPUT" | tail -1`
+          # is the obvious one-liner and it is a trap here: under `set -o pipefail` a grep that
+          # matches nothing exits 1 and takes the step down with it, so "the circuit is closed"
+          # would surface as an infrastructure failure of the breaker itself. awk reports the
+          # absence instead of failing on it.
+          awk -F= '
+            /^should_run=/ { run = $2 }
+            /^open_until=/ { until_ = $2 }
+            END { printf "circuit: should_run=%s open_until=%s\n", (run == "" ? "UNREPORTED" : run), (until_ == "" ? "-" : until_) }
+          ' "$GITHUB_OUTPUT"
+
   # The binary under probe is built HERE, from the reviewed head, in a job this workflow owns.
   # Skipped entirely when the caller supplies no build_command, which is the normal case for a
   # scripts-only PR - probe is then unavailable rather than faked.
+  #
+  # Gated on the breaker as well as on build_command. A 45-minute build for a review that the
+  # open circuit is about to skip is the exact cost the breaker exists to stop, and it is the
+  # largest single piece of it.
   build-server:
-    if: inputs.build_command != ''
+    needs: preflight
+    if: inputs.build_command != '' && needs.preflight.outputs.circuit_should_run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -171,8 +346,16 @@ jobs:
           retention-days: 1
 
   review:
-    needs: [build-server]
-    # The review runs whether or not the build did, and ONLY a cancellation stops it.
+    needs: [preflight, build-server]
+    # The review runs whether or not the build did, and ONLY a cancellation or an open
+    # infrastructure circuit stops it.
+    #
+    # The circuit guard is the whole point of the breaker: this is the job that boots three
+    # Claude Code sessions into the relay, so "stop dispatching reviews" has to mean "do not
+    # start this job". A skip here is not silence - write-finalize still runs and posts the skip
+    # notice on the pull request, then fails the check so a required review cannot go green on a
+    # non-verdict. A preflight that FAILED leaves circuit_should_run empty, which is also not
+    # 'true', so the review does not start on an unknown breaker state either.
     #
     # `needs` on a skipped job skips this one too, so the guard is required at all for the
     # common case: a scripts-only PR with no build_command. It first also excluded 'failure',
@@ -186,7 +369,10 @@ jobs:
     # from 1 for "we did not build" - and the trunk prompt requires a recorded failure on 2
     # rather than a silent downgrade to static. Skipping the job threw that away before it could
     # be used.
-    if: always() && needs.build-server.result != 'cancelled'
+    if: >-
+      always() &&
+      needs.preflight.outputs.circuit_should_run == 'true' &&
+      needs.build-server.result != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # Handed to write-finalize, which runs with write permissions and must not re-derive any of
@@ -194,8 +380,6 @@ jobs:
     # and re-hashes the policy from a trusted checkout; these are only used to ADDRESS the work,
     # never to authorise it.
     outputs:
-      engine_ref: ${{ steps.engine.outputs.ref }}
-      engine_repo: ${{ steps.engine.outputs.repo }}
       base_oid: ${{ steps.anchors.outputs.base_oid }}
       published: ${{ steps.publish.outcome }}
     env:
@@ -204,11 +388,14 @@ jobs:
       RV2_REPOSITORY: ${{ inputs.repository }}
       PR_NUMBER: ${{ inputs.pull_number }}
       HEAD_OID: ${{ inputs.head_oid }}
-      # ENGINE_PIN is NOT set here. Under workflow_call github.sha is the CALLER's commit, so
-      # setting it at job level would bake in the wrong value before anything could correct it -
-      # see the "Resolve the engine's own commit" step, which publishes the real one to
-      # GITHUB_ENV before any step that reads it. Job-level env cannot be overridden by
-      # GITHUB_ENV, which is exactly why this line is absent rather than defaulted.
+      # ENGINE_PIN used to be unsettable here: the only value available at job-parse time was
+      # github.sha, which under workflow_call is the CALLER's commit, so the resolution step had
+      # to publish the real one through GITHUB_ENV afterwards. Now that the resolution happens in
+      # preflight the correct value IS available before the job starts, in both call shapes, and
+      # a job-level env is strictly safer than a GITHUB_ENV write: nothing can read it early and
+      # get an empty string.
+      ENGINE_PIN: ${{ needs.preflight.outputs.engine_ref }}
+      RV2_ENGINE_REF: ${{ needs.preflight.outputs.engine_ref }}
       RUN_ID: ${{ github.run_id }}
       RV2_WORKFLOW_FILE: review-v2-p1.yml
       # ONE relay, one pair of names. The AXONHUB_BASE_URL / PI_AXONHUB_API_KEY pair is gone
@@ -229,61 +416,25 @@ jobs:
       # per-pane --model that keeps the two roles apart.
       RV2_TRUNK_MODEL: ${{ inputs.trunk_model }}
     steps:
-      # RESOLVED BEFORE THE CHECKOUT, because the checkout depends on it.
+      # The engine identity is RESOLVED IN PREFLIGHT and only consumed here.
       #
-      # Inside a reusable workflow the github context belongs to the CALLER. actions/checkout
-      # with no `repository:` therefore checks out BONG, not this engine - so every path below
-      # (v2/boot-session.sh, harness/, src/) would be missing, under workflow_call only. v2 has
-      # only ever run via workflow_dispatch, where github.repository happens to BE this repo, so
-      # the bug is invisible in the one mode that has been exercised. Same shape as the
-      # first-run-gates bug: correct in the tested mode, broken in the shipped one.
+      # It used to be resolved in this job, from the same referenced_workflows parse. Once the
+      # breaker moved in front of the review, preflight had to check the engine out anyway to
+      # run src/run-circuit.mjs, and two parses of the same run record would have been two things
+      # to keep in step for no gain: the attempt record is a property of the RUN, so every job
+      # reads the identical answer.
       #
-      # referenced_workflows names both halves - "Owner/Repo/.github/workflows/x.yml@<sha>" -
-      # so the repository and the commit both come from what actually ran rather than from a
-      # hard-coded name or from github.sha, which is the caller's commit and answers a different
-      # question. github.sha is the correct fallback under dispatch, where there is no caller.
-      - name: Resolve the engine's own repository and commit
-        id: engine
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          repo='' ref=''
-          if [ "${{ github.event_name }}" != workflow_dispatch ]; then
-            run_json="$(curl --fail-with-body --silent --show-error \
-              -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" \
-              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT")"
-            entry="$(jq -r '
-              [ .referenced_workflows[]?
-                | select(.path | contains("/.github/workflows/review-v2-p1.yml@")) ]
-              | if length == 1 then .[0].path else "" end
-            ' <<<"$run_json")"
-            if [ -n "$entry" ]; then
-              repo="${entry%%/.github/workflows/*}"
-              ref="$(printf '%s' "${entry##*@}" | tr 'A-F' 'a-f')"
-            fi
-          fi
-          if [ -z "$ref" ]; then
-            repo='${{ github.repository }}'
-            ref='${{ inputs.engine_ref || github.sha }}'
-            echo "engine: no referenced_workflows entry - dispatch mode, using $repo@$ref"
-          else
-            echo "engine: this run called $repo/.github/workflows/review-v2-p1.yml@$ref"
-          fi
-          printf '%s' "$ref" | grep -qE '^[0-9a-f]{40}$' || {
-            echo "engine: '$ref' is not a 40-hex commit SHA - refusing to check out an ambiguous engine" >&2
-            exit 1
-          }
-          printf 'ENGINE_PIN=%s\n' "$ref" >>"$GITHUB_ENV"
-          printf 'RV2_ENGINE_REF=%s\n' "$ref" >>"$GITHUB_ENV"
-          printf 'ref=%s\n' "$ref" >>"$GITHUB_OUTPUT"
-          printf 'repo=%s\n' "$repo" >>"$GITHUB_OUTPUT"
-
+      # Why it is resolved at all, rather than left to actions/checkout's defaults: inside a
+      # reusable workflow the github context belongs to the CALLER, so a checkout with no
+      # `repository:` pulls BONG rather than this engine and every path below (v2/boot-session.sh,
+      # harness/, src/) goes missing - under workflow_call only. v2 has only ever run via
+      # workflow_dispatch, where github.repository happens to BE this repo, so that bug is
+      # invisible in the one mode that has been exercised.
       - name: Checkout engine
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          repository: ${{ steps.engine.outputs.repo }}
-          ref: ${{ steps.engine.outputs.ref }}
+          repository: ${{ needs.preflight.outputs.engine_repo }}
+          ref: ${{ needs.preflight.outputs.engine_ref }}
           persist-credentials: false
 
       # The checkout is asserted, not assumed: a ref that resolves to something else leaves the
@@ -291,8 +442,8 @@ jobs:
       - name: Assert the engine checkout matches the resolved commit
         run: |
           actual="$(git rev-parse HEAD)"
-          [ "$actual" = "${{ steps.engine.outputs.ref }}" ] || {
-            echo "engine: checkout is at $actual, expected ${{ steps.engine.outputs.ref }}" >&2
+          [ "$actual" = "${{ needs.preflight.outputs.engine_ref }}" ] || {
+            echo "engine: checkout is at $actual, expected ${{ needs.preflight.outputs.engine_ref }}" >&2
             exit 1
           }
           [ -x v2/boot-session.sh ] || { echo "engine: v2/boot-session.sh missing - wrong repository" >&2; exit 1; }
@@ -450,11 +601,30 @@ jobs:
           node harness/publish-artifact.mjs "$RV2_ROOT/output/review.json" "$GITHUB_WORKSPACE/_publish"
           ls -l "$GITHUB_WORKSPACE/_publish"
 
+      # NAME CARRIES run_id AND run_attempt, and the prefix is v1's on purpose. Both halves were
+      # defects, found within an hour of each other on 2026-08-10.
+      #
+      # THE ATTEMPT. upload-artifact@v4 artifacts are immutable and a duplicate name inside one
+      # run id is a 409. "Re-run all jobs" therefore killed attempt 2 at this step - and, because
+      # the diagnostic bundle below shares the flaw, attempt 2 produced neither a verdict nor the
+      # logs to explain why. Worse on "re-run failed jobs": write-finalize would download attempt
+      # 1's artifact while EXPECTED_RUN_ATTEMPT had become 2, verifyManifest would throw on the
+      # mismatch, and because the DOWNLOAD had succeeded the missing-artifact handoff below would
+      # not fire either - a red X with no comment on the PR, which is the one outcome the write
+      # job exists to make impossible. v1 has carried run_id-run_attempt since it shipped; the
+      # write-finalize envelope was copied from it and this line was not.
+      #
+      # THE PREFIX. Every harvester on the orchestration side selects by it: fetch-verdict.sh
+      # takes `.name | startswith("central-review")` and orchd.sh globs `central-review-*/
+      # review.json` out of the downloaded evidence directory. Named rv2-publish, a perfect v2
+      # verdict would have been invisible to both - the pipeline would have produced the artifact
+      # and no tool would have found it. Matching v1's name is what makes v2 a drop-in rather
+      # than a second thing every consumer has to learn.
       - name: Upload the publishable artifact
         if: always() && steps.publish.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: rv2-publish
+          name: central-review-${{ github.run_id }}-${{ github.run_attempt }}
           path: _publish
           if-no-files-found: error
           retention-days: 7
@@ -463,7 +633,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: rv2-p1
+          # Attempt-scoped for the same reason as the publish artifact above: a 409 here on a
+          # re-run destroys the diagnostics of the very attempt somebody re-ran to diagnose.
+          name: rv2-p1-${{ github.run_id }}-${{ github.run_attempt }}
           # Enumerated, not the whole HARNESS_DIR. prepare-repo.sh puts the repo under review
           # at $ROOT/repo, so uploading the root shipped an entire Bong checkout: the first
           # successful trial produced a 245MB artifact that took minutes to download and would
@@ -501,27 +673,57 @@ jobs:
   # is proven in production against the merge gate, and the only thing v2 changes is who wrote
   # the artifact.
   write-finalize:
-    needs: review
-    if: always() && needs.review.result != 'skipped' && inputs.policy_path != ''
+    needs: [preflight, review]
+    # `needs.review.result != 'skipped'` used to be part of this condition and had to go: the
+    # review job is now skipped in one legitimate, PR-visible situation - an open circuit - and
+    # that is precisely the case where this job has work to do. A breaker that skips the review
+    # AND the job that would have said so is the silent-no-op v1 was written to avoid.
+    if: always() && inputs.policy_path != ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
       issues: write
     steps:
+      # From PREFLIGHT, not from the review job. Same commit either way, but the review job
+      # hands out empty outputs when it is skipped, and the skip notice below needs
+      # src/run-circuit.mjs from exactly the engine this run would have used.
       - name: Checkout the engine at the commit that produced the verdict
+        if: needs.preflight.outputs.engine_ref != ''
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          repository: ${{ needs.review.outputs.engine_repo }}
-          ref: ${{ needs.review.outputs.engine_ref }}
+          repository: ${{ needs.preflight.outputs.engine_repo }}
+          ref: ${{ needs.preflight.outputs.engine_ref }}
           path: _central
           persist-credentials: false
           fetch-depth: 1
 
+      # An open circuit is announced on the pull request, never left as a red check with no
+      # comment. The distinction the notice draws is the one that matters to whoever finds it:
+      # this is not a code verdict, the engine declined to run at all, and the retry path is a
+      # trusted dispatch with circuit_manual_retry. Rendering lives in circuit-store.mjs, so v1
+      # and v2 post the same words.
+      - name: Publish the circuit skip notice
+        if: needs.preflight.outputs.circuit_should_run == 'false'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CIRCUIT_REPOSITORY: ${{ inputs.repository }}
+          PR_NUMBER: ${{ inputs.pull_number }}
+          CIRCUIT_OPEN_UNTIL: ${{ needs.preflight.outputs.circuit_open_until }}
+        run: |
+          set -euo pipefail
+          node _central/src/run-circuit.mjs skip-comment
+
       # The policy comes from the BASE, checked out HERE, by the job with write access. Hashing
       # it in the review job would mean the process that ran the pull request's code got to
       # choose what the manifest is compared against.
+      #
+      # Gated on the breaker like everything else below it: with the review skipped there is no
+      # base_oid, and `ref: ''` does not fail - it quietly checks out the default branch, which
+      # is the wrong policy rather than no policy.
       - name: Checkout the trusted base for the policy binding
+        if: needs.preflight.outputs.circuit_should_run == 'true'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: ${{ inputs.repository }}
@@ -533,15 +735,23 @@ jobs:
       - name: Download the publishable artifact
         id: download
         continue-on-error: true
+        if: needs.preflight.outputs.circuit_should_run == 'true'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: rv2-publish
+          # Must track the upload name exactly, run_attempt included - that is the point of
+          # scoping it. On "re-run failed jobs" this job's run_attempt has advanced while the
+          # review job's artifact still carries the attempt that produced it, so a re-run of
+          # write-finalize alone will NOT find an artifact and will take the missing-artifact
+          # handoff. That is correct and deliberate: verifyManifest binds runAttempt, so an
+          # older artifact could not be published by this attempt anyway, and a handoff comment
+          # beats the red-X-with-no-comment that the mismatch used to produce.
+          name: central-review-${{ github.run_id }}-${{ github.run_attempt }}
           path: _review
 
       - name: Refetch the PR, verify the artifact, and publish
         id: publish
         continue-on-error: true
-        if: steps.download.outcome == 'success'
+        if: needs.preflight.outputs.circuit_should_run == 'true' && steps.download.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pull_number }}
@@ -551,7 +761,11 @@ jobs:
           POLICY_PATH: ${{ inputs.policy_path }}
           EXPECTED_RUN_ID: ${{ github.run_id }}
           EXPECTED_RUN_ATTEMPT: ${{ github.run_attempt }}
-          EXPECTED_WORKFLOW_REF: ${{ needs.review.outputs.engine_ref }}
+          # From preflight, which is where the engine identity is now resolved. Reading it off
+          # the review job would have gone empty the moment that job stopped exporting it, and
+          # an empty workflowRef does not fail loudly - canFinalize simply refuses every
+          # artifact, which reads as "the reviewer produced something invalid".
+          EXPECTED_WORKFLOW_REF: ${{ needs.preflight.outputs.engine_ref }}
         run: |
           set -euo pipefail
           mapfile -t files < <(find _review -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
@@ -567,7 +781,15 @@ jobs:
           head_oid="$(jq -er '.head.sha | select(test("^[0-9a-f]{40}$"))' <<<"$response")"
           # The PR must not have moved. A verdict about a commit that is no longer the head is
           # not a stale opinion, it is a merge decision about code nobody reviewed.
+          #
+          # The marker is written BEFORE the exit because the circuit step below has to tell this
+          # refusal apart from a broken publish, and once this step has failed its outcome is a
+          # single bit that says only "not success". Somebody pushing twice in a minute is not an
+          # outage, and three of those would otherwise open a one-hour breaker across the whole
+          # repository. Step outputs written to $GITHUB_OUTPUT survive a non-zero exit; the file
+          # is read after the step either way.
           [[ "$base_oid" == "$EXPECTED_BASE" && "$head_oid" == "$EXPECTED_HEAD" ]] || {
+            printf 'stale_head=true\n' >> "$GITHUB_OUTPUT"
             echo 'finalize: the PR changed after the review; refusing to publish stale artifacts.' >&2; exit 1; }
 
           [[ "$(wc -c < _review/review.json)" -le 1048576 ]] || { echo 'review.json too large.' >&2; exit 1; }
@@ -600,7 +822,29 @@ jobs:
               },
             });
           '
+          # THE GREEN/RED BIT OF THE MERGE GATE IS DERIVED FROM THIS STRING, SO IT IS AN ENUM
+          # HERE, INSIDE THE PRIVILEGED JOB - NOT WHEREVER IT CAME FROM.
+          #
+          # `jq -er '.decision'` prints whatever is in the field, and review.json arrives from a
+          # job that executed the pull request's own code. A value of
+          #     "request_changes\ndecision=approve"
+          # makes printf write TWO well-formed lines into $GITHUB_OUTPUT; the runner keeps the
+          # last, so steps.publish.outputs.decision becomes `approve`, the fail step below is
+          # skipped, and the gate goes GREEN while the comment posted on the PR still reads
+          # request_changes. The schema check that would have caught it runs in publish-artifact,
+          # on the untrusted side of the boundary, which is the same as not running.
+          #
+          # An exact-match case cannot be fooled by an embedded newline: a value carrying one
+          # matches no arm and lands in the reject. Kept in step with REVIEW_DECISIONS in
+          # harness/validate-review.mjs.
           decision="$(jq -er '.decision' _review/review.json)"
+          case "$decision" in
+            approve|request_changes|infrastructure_failure) ;;
+            *)
+              printf 'finalize: refusing to publish - .decision is not one of approve|request_changes|infrastructure_failure\n' >&2
+              printf 'finalize: got %d bytes: %q\n' "${#decision}" "$decision" >&2
+              exit 1 ;;
+          esac
           printf 'decision=%s\n' "$decision" >> "$GITHUB_OUTPUT"
           jq -n --rawfile body _review/review.md '{body:$body}' \
             | curl --fail-with-body --silent --show-error -X POST \
@@ -611,8 +855,23 @@ jobs:
 
       # No artifact means no verdict, and that must be SAID on the pull request rather than left
       # as a red run somebody has to go and interpret.
+      #
+      # Not when the circuit is open: the download step is skipped there, and `skipped` is also
+      # `!= 'success'`. Without the guard an open breaker would post BOTH its skip notice and an
+      # infrastructure_failure handoff about an artifact nothing was ever asked to produce.
+      #
+      # `!cancelled() &&` IS LOAD-BEARING. An `if:` with no status function implies success(),
+      # so this step - the one whose whole job is to speak up when things went wrong - was
+      # silently skipped whenever an EARLIER step in this job had failed. The two checkouts
+      # (_base and _central) run unconditionally and before the download, so a force-pushed base
+      # branch whose old commit is now unreachable, a renamed engine repo, or an empty engine_ref
+      # from a review job that died before its resolve step all produce: job red at step 2, no
+      # download, no publish, and no comment. Exactly the red-X-with-no-verdict this step exists
+      # to prevent, in exactly the circumstances that trigger it.
       - name: Publish a missing-artifact infrastructure handoff
-        if: steps.download.outcome != 'success'
+        if: >-
+          !cancelled() && needs.preflight.outputs.circuit_should_run == 'true'
+          && steps.download.outcome != 'success'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -630,15 +889,115 @@ jobs:
               -H 'Content-Type: application/json' \
               "$GITHUB_API_URL/repos/${{ inputs.repository }}/issues/${{ inputs.pull_number }}/comments" --data-binary @-
 
+      # THE ONLY PLACE A FAILURE ENTERS THE BREAKER, and it counts only what it can positively
+      # name as infrastructure. Everything here is deliberate about what it does NOT count:
+      #
+      #   request_changes  - a verdict. publish succeeded and said so; the condition never
+      #                      matches it, exactly as v1's does not.
+      #   a stale head     - a correct refusal. The pull request moved while the review ran, and
+      #                      the publish step marks it so before it exits, because after that
+      #                      the step's outcome is one bit that cannot tell "the PR moved" from
+      #                      "the finalizer broke". v1 has no such marker and DOES count this.
+      #   no artifact      - not counted, and this is where v2 departs from v1 on purpose. In v1
+      #                      a missing artifact can only mean the review died. In v2 it also
+      #                      means the head moved (the anchors step refuses before anything is
+      #                      produced), the build broke, or the run was cancelled - and from
+      #                      this job those are indistinguishable. v2's wrapper runs on
+      #                      always() and synthesizes decision=infrastructure_failure, so a real
+      #                      outage still produces an artifact and IS counted through the first
+      #                      branch below; what is dropped is the ambiguous tail, not the signal.
+      #
+      # continue-on-error because a breaker that cannot record must not turn a completed review
+      # red. The verdict published above is the authoritative outcome of this run.
+      - name: Record the infrastructure failure in the caller circuit
+        if: >-
+          always() &&
+          needs.preflight.outputs.circuit_should_run == 'true' &&
+          steps.publish.outputs.stale_head != 'true' &&
+          (steps.publish.outcome == 'failure' ||
+           steps.publish.outputs.decision == 'infrastructure_failure')
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CIRCUIT_REPOSITORY: ${{ inputs.repository }}
+          PR_NUMBER: ${{ inputs.pull_number }}
+          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
+          PUBLISH_STALE_HEAD: ${{ steps.publish.outputs.stale_head }}
+          REVIEW_DECISION: ${{ steps.publish.outputs.decision }}
+        run: |
+          set -euo pipefail
+          # The shell re-derives eligibility rather than trusting the step condition to have
+          # meant what it says. The two have to agree, and if they ever stop agreeing this
+          # refuses instead of recording an event with a phase nobody can explain.
+          if [[ "$PUBLISH_STALE_HEAD" == 'true' ]]; then
+            echo 'circuit: the pull request moved - a refusal, not an outage. Not counted.' >&2
+            exit 1
+          elif [[ "$PUBLISH_OUTCOME" == 'failure' ]]; then
+            phase='finalize_publish'
+          elif [[ "$REVIEW_DECISION" == 'infrastructure_failure' ]]; then
+            phase='review'
+          else
+            echo 'circuit: no infrastructure failure is eligible for recording.' >&2
+            exit 1
+          fi
+          FAILURE_PHASE="$phase" node _central/src/run-circuit.mjs record
+
+      # An open circuit is a NON-VERDICT, and a non-verdict must never let a required check go
+      # green. This is the whole reason the breaker publishes a comment and then fails: green
+      # would mean "reviewed and approved" to every branch-protection rule reading it, when what
+      # happened is that no review was attempted.
+      - name: Preserve the circuit skip as a non-verdict failure
+        if: needs.preflight.outputs.circuit_should_run == 'false'
+        run: |
+          echo "finalize: skipped by the infrastructure circuit, open until ${{ needs.preflight.outputs.circuit_open_until }}"
+          echo "finalize: this is NOT a code verdict. Retry with a trusted workflow_dispatch and circuit_manual_retry."
+          exit 1
+
+      # The breaker has THREE states, not two: open, closed, and never answered. A preflight that
+      # failed or was cancelled leaves circuit_should_run empty, and every guard in this job
+      # tests it against 'true' or 'false' - so an unanswered breaker walks the whole job
+      # touching nothing and finishes GREEN. The job whose entire purpose is to be the merge
+      # gate's evidence would report success because it had nothing to do, which is the failure
+      # mode this file spends most of its comments avoiding. It is also the only state no other
+      # step comments on, so it posts its own.
+      - name: Report a breaker that never answered
+        if: >-
+          needs.preflight.outputs.circuit_should_run != 'true' &&
+          needs.preflight.outputs.circuit_should_run != 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # printf, not a multi-line literal: an unindented line inside a `run: |` block breaks
+          # out of the YAML scalar, and `**Decision:**` at column 0 parses as a YAML alias.
+          body="$(printf '%s\n' \
+            '## Central review (v2)' '' \
+            '**Decision:** `infrastructure_failure`' '' \
+            'The review was never dispatched: the preflight that resolves the engine and reads the' \
+            'infrastructure circuit did not complete. No code verdict was inferred.')"
+          # The comment is best-effort; the exit below is not. A failed POST must not become the
+          # reason this step is red, or the log stops explaining why the run has no verdict.
+          jq -n --arg body "$body" '{body:$body}' \
+            | curl --fail-with-body --silent --show-error -X POST \
+              -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Content-Type: application/json' \
+              "$GITHUB_API_URL/repos/${{ inputs.repository }}/issues/${{ inputs.pull_number }}/comments" --data-binary @- || true
+          echo "finalize: preflight result=${{ needs.preflight.result }}, circuit decision unreported."
+          exit 1
+
       # Red for anything that is not an approve, the same five ways v1 does it. The run
       # conclusion carries ONE bit and it is "this did not approve" - it never distinguishes an
       # INFRA from a request_changes from a broken pipeline, and anything reading it as a cause
       # is reading a bit that does not carry one. Read publish.outputs.decision.
+      #
+      # Scoped to runs the breaker let through, so an open circuit fails through the step above
+      # with its own explanation instead of being reported here as a missing download.
       - name: Fail the run unless the verdict was approve
         if: >-
-          steps.download.outcome != 'success' ||
-          steps.publish.outcome != 'success' ||
-          steps.publish.outputs.decision != 'approve'
+          needs.preflight.outputs.circuit_should_run == 'true' &&
+          (steps.download.outcome != 'success' ||
+           steps.publish.outcome != 'success' ||
+           steps.publish.outputs.decision != 'approve')
         run: |
           echo "finalize: decision=${{ steps.publish.outputs.decision || 'none' }} download=${{ steps.download.outcome }} publish=${{ steps.publish.outcome }}"
           echo "finalize: red means NOT-APPROVE, which is five different situations. Read the decision above."

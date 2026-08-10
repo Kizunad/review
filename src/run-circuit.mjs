@@ -29,9 +29,20 @@ export async function runCircuit(command, {
   now = () => new Date().toISOString(),
 } = {}) {
   requireEnvironment(environment, ['GITHUB_API_URL', 'GITHUB_REPOSITORY', 'GITHUB_TOKEN', 'PR_NUMBER']);
+  // The failure log and the skip notice belong to the repository being REVIEWED, which is not
+  // always $GITHUB_REPOSITORY. In v1 the two are the same thing by construction - the caller
+  // runs the reusable workflow inside its own repository. v2 is also dispatched on the engine
+  // repository against another repository's pull request, and there PR_NUMBER means nothing
+  // locally: reading state would look at the wrong issue list, and recording would post an
+  // infrastructure-failure comment onto whatever Kizunad/review issue happens to carry that
+  // number. Overriding the ambient GITHUB_REPOSITORY for one step was the alternative, and it
+  // relies on the runner letting a GITHUB_* default be shadowed - behaviour the docs reserve
+  // and which I could not verify here. An explicit opt-in variable needs no such assumption,
+  // and leaves every existing v1 call site byte-identical.
+  const repository = environment.CIRCUIT_REPOSITORY || environment.GITHUB_REPOSITORY;
   const store = createCircuitStore({
     apiUrl: environment.GITHUB_API_URL,
-    repository: environment.GITHUB_REPOSITORY,
+    repository,
     token: environment.GITHUB_TOKEN,
     fetchImpl,
   });
