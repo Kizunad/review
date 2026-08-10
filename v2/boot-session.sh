@@ -35,7 +35,33 @@ CLAUDE_BIN="${CLAUDE_EXECUTABLE:-claude}"
 # an unattended pane is a hang, and a curated tool whitelist is what made the old
 # engine a read-only reasoner. The sandbox is the ephemeral runner VM (design
 # 5.5: "跑 PR 代码的沙箱就是 VM"), not a flag list.
-WORKER_LAUNCH="'$CLAUDE_BIN' --model '$(rv2_worker_model)' --dangerously-skip-permissions"
+# --tools is ENABLEMENT, not a whitelist. Read this before removing it.
+#
+# CI run 31384536131: the trunk booted, took its brief, the gate was passing, the policy loaded,
+# and it answered every single nudge with "no callable workspace tool is available in the
+# current session - I cannot read trunk-prompt.md, execute its instructions, or write and verify
+# review.json". It was TALKING while saying that, so the relay was fine. A reviewer with no
+# tools cannot read a diff or write a verdict, and that is the whole reason no v2 run has ever
+# produced one.
+#
+# v1 passes `--tools Read,Glob,Grep` and works in the same CI, on the same pinned binary,
+# through the same relay. v2 passed no --tools at all. That is the one configuration difference
+# between a shape that works and a shape that does not.
+#
+# `default` is the binary's documented value for ALL built-in tools - not a curated list. The
+# operator's standing rule is that the sandbox is the only boundary and there is to be no tool
+# whitelist; enumerating six names would look like one and would silently drop whatever the
+# crew turns out to need. This asks for everything.
+#
+# HONESTY ABOUT THE EVIDENCE: I could not reproduce this locally. Three launch shapes were
+# tried against a working relay and all three timed out with no error on screen, including the
+# shape that had answered correctly twenty minutes earlier - so the local probe was measuring
+# relay health, not tool availability, and it settles nothing either way. The evidence for this
+# change is the CI transcript plus the v1/v2 configuration difference. The next CI run is the
+# actual test.
+TOOLS_SPEC="${RV2_TOOLS:-default}"
+
+WORKER_LAUNCH="'$CLAUDE_BIN' --model '$(rv2_worker_model)' --dangerously-skip-permissions --tools '$TOOLS_SPEC'"
 
 # Panes run a POSIX shell we name, NOT the user's login shell.
 #
@@ -181,7 +207,7 @@ if [ "${RV2_FAKE:-0}" = "1" ]; then
     "cd '$ROOT' && $PANE_ENV && bash '$V2_DIR_ABS/../fake/trunk.sh'" Enter
 else
   tmux send-keys -t "$SESSION:$TRUNK_INDEX" \
-    "cd '$ROOT' && $PANE_ENV && '$CLAUDE_BIN' --model '$(rv2_trunk_model)' --dangerously-skip-permissions" Enter
+    "cd '$ROOT' && $PANE_ENV && '$CLAUDE_BIN' --model '$(rv2_trunk_model)' --dangerously-skip-permissions --tools '$TOOLS_SPEC'" Enter
   # No fixed sleep before seeding: seed_pane polls for the input box, which both
   # waits less on a fast boot and does not type into a slow one.
   # Not backgrounded, unlike the workers: if the trunk never accepts its brief
