@@ -1,8 +1,27 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 
-export const READ_ONLY_TOOLS = 'Read,Glob,Grep';
-export const READ_ONLY_PERMISSIONS = 'Read(//workspace/**),Glob(//workspace/**),Grep(//workspace/**)';
+// THE SANDBOX IS THE BOUNDARY. There is no second fence inside it.
+//
+// This used to hand the reviewer Read, Glob and Grep and nothing else, so it could see the code
+// but never what CHANGED - computing that needs git, and it had no way to run anything. The diff
+// therefore had to be produced outside and pushed in, truncated at MAX_DIFF_CHARS and split at
+// MAX_SHARD_CHARS. That spoon-feeding is what made reviews fragile: one summary call per shard,
+// every one of which must succeed, so a path that fails a single call some of the time fails a
+// twelve-shard review most of the time.
+//
+// A permission whitelist here was redundant with bwrap and strictly weaker than it. The workspace
+// is mounted READ-ONLY, the environment is cleared and rebuilt, /proc/self/environ is masked, and
+// the process is unshared from everything but the network. Anything the reviewer runs is confined
+// by those mounts whether or not the CLI also refuses it - while the whitelist DID reliably block
+// useful work, because it had to enumerate capabilities in advance and no such list survives
+// contact with a real review.
+//
+// --safe-mode STAYS, and it is not a permission fence. It refuses CLAUDE.md, skills, hooks, MCP
+// servers and custom commands, which is what stops THE CODE UNDER REVIEW from reconfiguring the
+// reviewer that is judging it. That is an integrity property of the gate, not a restriction on
+// what the reviewer may do with its own tools.
+
 const SANDBOX_REPOSITORY = '/workspace';
 const SANDBOX_HOME = '/home/claude';
 const SANDBOX_EXECUTABLE = '/sandbox/claude';
@@ -128,8 +147,8 @@ export function buildClaudeArgs({ model, prompt, jsonSchema }) {
     '--safe-mode', '--disable-slash-commands', '--no-chrome',
     '--strict-mcp-config', '--mcp-config', EMPTY_MCP_CONFIG,
     '-p', '--no-session-persistence', '--model', model,
-    '--effort', 'max', '--tools', READ_ONLY_TOOLS, '--allowedTools', READ_ONLY_PERMISSIONS,
-    '--permission-mode', 'dontAsk', '--output-format', 'stream-json', '--verbose',
+    '--effort', 'max', '--dangerously-skip-permissions',
+    '--output-format', 'stream-json', '--verbose',
     '--json-schema', schemaJson(jsonSchema),
   ];
 }
@@ -189,6 +208,16 @@ export function buildSandboxArgs({ executable, ripgrepExecutable, repositoryRoot
     HOME: SANDBOX_HOME,
     PATH: SANDBOX_PATH,
     USE_BUILTIN_RIPGREP: '0',
+    // git has to work against a REPOSITORY MOUNTED READ-ONLY and owned by whoever checked it
+    // out. Without these it fails in two ways that both look like "git is broken" rather than
+    // like a mount decision: it tries to take an index lock, and it refuses a directory whose
+    // owner differs from the caller. Set after safeEnvironment so a caller cannot unset them.
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'safe.directory',
+    GIT_CONFIG_VALUE_0: SANDBOX_REPOSITORY,
   };
   for (const [key, value] of Object.entries(sandboxEnvironment)) {
     args.push('--setenv', key, value);
