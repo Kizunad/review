@@ -93,6 +93,20 @@ on:
         required: false
         default: ''
         type: string
+      # Mirrored from workflow_call on purpose. Without these a dispatch trial cannot reach
+      # probe mode at all - build_command would always be empty, build-server would skip, and
+      # rv2_probe_available would report "not built" forever. The one mode that has never run
+      # would have stayed unreachable by the only entry point available for trying it.
+      build_command:
+        description: 'shell command that builds the binary under test, run at the reviewed head (empty = no probe)'
+        required: false
+        default: ''
+        type: string
+      build_artifact_path:
+        description: 'path to the built binary, relative to the repo root'
+        required: false
+        default: ''
+        type: string
 
 jobs:
   # The binary under probe is built HERE, from the reviewed head, in a job this workflow owns.
