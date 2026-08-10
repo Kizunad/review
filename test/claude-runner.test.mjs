@@ -444,6 +444,23 @@ test('transport retry: a plain 503 without the cpu marker keeps the existing ret
   assert.equal(result.status, 'infra_error');
   assert.equal(calls.length, 3, 'a genuine upstream 503 still gets the full retry budget');
   assert.match(result.error, /^after 3 attempts: claude exited 1$/);
+  assert.equal(result.apiErrorStatus, 503, 'the exhausted record still names the upstream status');
+  assert.equal(result.model, 'terra', 'the record names the model that exhausted the budget');
+  assert.equal(result.attempts, 3, 'the record counts the three attempts that were consumed');
+  assert.equal(result.retryable, true, 'a plain upstream 503 is transient, not deterministic');
+});
+
+test('transport retry: an out-of-balance 402 keeps the retry budget and surfaces its status', async () => {
+  const { result, calls } = await runStubbedVote({
+    responses: [{ status: 'infra_error', error: 'claude exited 1', apiErrorStatus: 402 }],
+  });
+  assert.equal(result.status, 'infra_error');
+  assert.equal(calls.length, 3, 'a 402 still gets the full retry budget');
+  assert.match(result.error, /^after 3 attempts: claude exited 1$/);
+  assert.equal(result.apiErrorStatus, 402, 'the balance failure stays nameable as a 402');
+  assert.equal(result.model, 'terra', 'the record names the model that kept hitting the drained alias');
+  assert.equal(result.attempts, 3, 'the record counts the three attempts that were consumed');
+  assert.equal(result.retryable, true, 'a drained-pool alias can be re-pointed, so the failure is not deterministic');
 });
 
 test('transport retry: a 400 without the cpu marker keeps the existing retry schedule', async () => {
@@ -453,6 +470,10 @@ test('transport retry: a 400 without the cpu marker keeps the existing retry sch
   assert.equal(result.status, 'infra_error');
   assert.equal(calls.length, 3, 'a 400 still gets the full retry budget');
   assert.match(result.error, /^after 3 attempts: claude exited 1$/);
+  assert.equal(result.apiErrorStatus, 400, 'the exhausted record still names the status');
+  assert.equal(result.model, 'terra', 'the record names the model that kept failing');
+  assert.equal(result.attempts, 3, 'the record counts the three attempts that were consumed');
+  assert.equal(result.retryable, true, 'a 400 is not a deterministic schema reading');
 });
 
 test('transport retry: schema repairs and infra retries spend separate budgets', async () => {
