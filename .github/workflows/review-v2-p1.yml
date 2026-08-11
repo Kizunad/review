@@ -236,7 +236,21 @@ jobs:
         run: |
           set -euo pipefail
           repo='' ref=''
-          if [ "${{ github.event_name }}" != workflow_dispatch ]; then
+          # DO NOT GATE THIS ON github.event_name. That gate was the third and root defect, and
+          # it made the two fixes below dead code on their first outing.
+          #
+          # Inside a REUSABLE workflow, github.event_name is the CALLER'S triggering event, not
+          # "workflow_call". review-v2-trial.yml is workflow_dispatch, so the called engine also
+          # saw workflow_dispatch, the whole resolution block was skipped in ZERO seconds - the
+          # log shows the fallback line with no API call and no retry - and it went straight to
+          # the dispatch fallback that treats the CALLER as the engine.
+          #
+          # The honest discriminator is not how the run was triggered, it is whether this
+          # workflow was REFERENCED by another one. So always ask, and let an empty answer mean
+          # dispatch. That is also correct in the direction we already had working: a genuine
+          # dispatch runs in the engine's own repository and has no referenced_workflows entry,
+          # so it still lands on the fallback - it just pays the retry window first.
+          if true; then
             # TWO DEFECTS FIXED HERE, both found by v2's FIRST EVER workflow_call
             # (Bong run 31453668599, 2026-08-11). Until that run this branch had only ever
             # executed in dispatch mode, so neither could be seen.
@@ -259,7 +273,10 @@ jobs:
             #    exited 1. Read back afterwards, both the run and the attempt endpoints had the
             #    entry all along, so a single early read is a race that misidentifies the
             #    engine as whoever called it. Retry until it appears.
-            for _try in 1 2 3 4 5 6 7 8; do
+            # Four tries, three seconds apart. A genuine dispatch pays this whole window
+            # before falling back, so it is kept short deliberately - twelve seconds on the
+            # trial path is cheaper than a resolution that is right only sometimes.
+            for _try in 1 2 3 4; do
               run_json="$(curl --fail-with-body --silent --show-error \
                 -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" \
                 "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT")"
@@ -270,7 +287,7 @@ jobs:
               ' <<<"$run_json")"
               [ -n "$entry" ] && break
               echo "engine: referenced_workflows not populated yet (try $_try) - retrying"
-              sleep 5
+              sleep 3
             done
             if [ -n "$entry" ]; then
               repo="${entry%%/.github/workflows/*}"
