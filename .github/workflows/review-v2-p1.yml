@@ -237,17 +237,51 @@ jobs:
           set -euo pipefail
           repo='' ref=''
           if [ "${{ github.event_name }}" != workflow_dispatch ]; then
-            run_json="$(curl --fail-with-body --silent --show-error \
-              -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" \
-              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT")"
-            entry="$(jq -r '
-              [ .referenced_workflows[]?
-                | select(.path | contains("/.github/workflows/review-v2-p1.yml@")) ]
-              | if length == 1 then .[0].path else "" end
-            ' <<<"$run_json")"
+            # TWO DEFECTS FIXED HERE, both found by v2's FIRST EVER workflow_call
+            # (Bong run 31453668599, 2026-08-11). Until that run this branch had only ever
+            # executed in dispatch mode, so neither could be seen.
+            #
+            # 1. THE SHA CAME OFF THE WRONG FIELD. This parsed the commit out of the tail of
+            #    `.path`, i.e. whatever the caller wrote after `@`. That is a SHA only when the
+            #    caller pins one; a caller using a branch or tag - which is the normal way to
+            #    trial an engine branch - yields "feat/v2-review-crew", the 40-hex assertion
+            #    below rejects it, and the run dies at the first step with a message about an
+            #    "ambiguous engine" that names the caller's spelling rather than the real
+            #    problem. The API already resolves it: each referenced_workflows entry carries
+            #    `.sha` alongside `.path` and `.ref`. Read the resolved value instead of
+            #    re-deriving it from the request.
+            #
+            # 2. IT READ BEFORE THE FIELD EXISTED. referenced_workflows is populated
+            #    asynchronously. The failing run queried it ~2s after the job started, got an
+            #    empty list, and fell through to the dispatch fallback - which sets repo to
+            #    ${{ github.repository }}, i.e. THE CALLER. The engine then checked out Bong,
+            #    correctly reported "src/run-circuit.mjs missing - wrong repository", and
+            #    exited 1. Read back afterwards, both the run and the attempt endpoints had the
+            #    entry all along, so a single early read is a race that misidentifies the
+            #    engine as whoever called it. Retry until it appears.
+            for _try in 1 2 3 4 5 6 7 8; do
+              run_json="$(curl --fail-with-body --silent --show-error \
+                -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" \
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT")"
+              entry="$(jq -r '
+                [ .referenced_workflows[]?
+                  | select(.path | contains("/.github/workflows/review-v2-p1.yml@")) ]
+                | if length == 1 then (.[0].path + "\t" + (.[0].sha // "")) else "" end
+              ' <<<"$run_json")"
+              [ -n "$entry" ] && break
+              echo "engine: referenced_workflows not populated yet (try $_try) - retrying"
+              sleep 5
+            done
             if [ -n "$entry" ]; then
               repo="${entry%%/.github/workflows/*}"
-              ref="$(printf '%s' "${entry##*@}" | tr 'A-F' 'a-f')"
+              ref="$(printf '%s' "${entry##*$(printf '\t')}" | tr 'A-F' 'a-f')"
+              # An entry with an empty .sha must NOT silently degrade into the caller-repo
+              # fallback: that fallback is only correct for a dispatch, and reaching it from a
+              # workflow_call is how this failure presented as "wrong repository".
+              [ -n "$ref" ] || {
+                echo "engine: referenced_workflows entry has no sha - cannot resolve the engine commit" >&2
+                exit 1
+              }
             fi
           fi
           if [ -z "$ref" ]; then
