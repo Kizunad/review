@@ -464,7 +464,24 @@ jobs:
       needs.preflight.outputs.circuit_should_run == 'true' &&
       needs.build-server.result != 'cancelled'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # WHY THIS IS NOT UNLIMITED, and why the internal budget below is derived from it.
+    #
+    # Operator asked to remove the internal review budget. Removing it makes failures WORSE,
+    # specifically: the internal timeout firing FIRST is what produces a clean
+    # infrastructure_failure verdict AND lets the Upload steps run. Without it GitHub hard-kills
+    # the job at this wall clock, the upload steps never execute, and every artifact - evidence,
+    # pane dumps, the crew's own record of how far it got - is lost. The PR gets a red X and
+    # zero diagnostics, which is the "red X and silence" shape this pipeline exists to avoid.
+    #
+    # So the budget is raised to where it stops being the binding constraint, and the ORDER is
+    # preserved as an invariant: RV2_REVIEW_TIMEOUT_S < timeout-minutes, always, with the margin
+    # sized for setup plus artifact upload.
+    #
+    # Sized from measurement, not taste: the first end-to-end trial took 34 minutes total, and
+    # the next run on the SAME PR was still working at 47 with the pool healthy and busy
+    # (123 cc-review requests in twelve minutes, last success seconds earlier). So 50 minutes was
+    # binding on real work, not on a hang.
+    timeout-minutes: 180
     # Handed to write-finalize, which runs with write permissions and must not re-derive any of
     # them from a job that executed the pull request's code. It re-fetches the PR from the API
     # and re-hashes the policy from a trusted checkout; these are only used to ADDRESS the work,

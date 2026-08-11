@@ -32,7 +32,17 @@ REVIEW="$OUT/review.json"
 # allowed to finish. A timeout that fires there is not a safety net, it is a
 # lost run - and it costs a taskq attempt, which is how PRs end up parked at
 # "attempt 2 of 3".
-TIMEOUT_S="${RV2_REVIEW_TIMEOUT_S:-3000}"
+# 10200s = 170 minutes, against the review job's 180-minute wall clock. Raised from 3000
+# on 2026-08-11: a real review of Bong#2042 was still working at 47 minutes with the pool
+# healthy and busy (123 cc-review requests in the previous twelve, last success seconds
+# earlier), so 50 minutes was binding on WORK, not on a hang. The operator asked for the
+# budget to be removed; it is raised instead, because this timeout expiring BEFORE the job
+# wall clock is what produces a clean infrastructure_failure AND lets the artifact upload
+# run. Without it GitHub hard-kills the job and every piece of evidence is lost - a red X
+# with no diagnostics. ONE home for the number, deliberately: the ordering is asserted in
+# test/v2-runner-orchestration.test.mjs by reading this default and the job timeout, and a
+# second copy in the workflow env would give that test something to disagree with.
+TIMEOUT_S="${RV2_REVIEW_TIMEOUT_S:-10200}"
 # Whatever wait-for-relay.sh spent waiting for the CPU gate comes out of here.
 # The two budgets share one 60-minute job, and a pre-wait that is not subtracted
 # turns a clean INFRA into a job GitHub kills - which produces no synthesized
