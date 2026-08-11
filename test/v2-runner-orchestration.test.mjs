@@ -232,7 +232,19 @@ test('wrapper.sh synthesizes infrastructure_failure when the trunk produced noth
 test('wrapper.sh passes through a valid review.json and rejects bad ones', () => {
   const dir = tempDir('wrap');
   mkdirSync(path.join(dir, 'output'), { recursive: true });
+  mkdirSync(path.join(dir, 'evidence'), { recursive: true });
+  mkdirSync(path.join(dir, 'assignments'), { recursive: true });
   const reviewFile = path.join(dir, 'output', 'review.json');
+
+  // The fixture now needs an assignment and a PASSING evidence file, because an approve no
+  // longer stands on an empty harness directory - see v2/test-approve-guard.sh and Bong run
+  // 31456996236, where two shards reported verdict=blocked and the trunk approved anyway.
+  // This test is about VALIDATION, so it supplies the sufficiency the guard requires and keeps
+  // testing the thing it is named for. The two invalid cases below never reach the guard: they
+  // fail v2r1 validation first.
+  writeFileSync(path.join(dir, 'assignments', 'assignments.json'),
+    JSON.stringify([{ id: 's-0', paths: ['a.py'], chars: 10, kind: 'testable' }]));
+  writeFileSync(path.join(dir, 'evidence', 's-0.json'), JSON.stringify(validEvidence('s-0')));
 
   // approve with zero findings/failures is valid v2r1.
   writeFileSync(reviewFile, JSON.stringify({
@@ -507,3 +519,48 @@ function waitFor(predicate, timeoutMs, label) {
   assert.fail(`timeout waiting for ${label}`);
 }
 
+
+// setup_command exists so the crew can reach a toolchain the engine does not know about, and
+// its ORDERING is the safety property, not a detail.
+//
+// 2026-08-11: across two complete runs, six shards, the crew invoked python3 and nothing else -
+// because both runs reviewed a Python-only PR. So Rust and Java were never "broken", they were
+// never ATTEMPTED, and the review job installs only Node, Claude Code, tmux and jq. Bong's own
+// e2e.yml sets up dtolnay/rust-toolchain and actions/setup-java explicitly, which is the tell
+// that the runner image's defaults are not what its tests actually run on.
+//
+// The step must run BEFORE the reviewed head is on disk. A setup command that executes after
+// `Prepare repo under review` could be pointed at a script inside the PR - `bash
+// scripts/ci-setup.sh` - and would then run attacker-controlled code with a caller's trust
+// level. Ordering is what makes that impossible rather than merely discouraged, and ordering is
+// exactly the kind of property that survives review and then quietly dies in a later edit.
+test('caller toolchain setup runs before the reviewed repo is on disk', () => {
+  const wf = readFileSync(path.join(root, '.github/workflows/review-v2-p1.yml'), 'utf8');
+  const setupAt = wf.indexOf('- name: Caller toolchain setup');
+  const prepAt = wf.indexOf('- name: Prepare repo under review');
+  assert.ok(setupAt > 0, 'the Caller toolchain setup step must exist');
+  assert.ok(prepAt > 0, 'Prepare repo under review must exist');
+  assert.ok(
+    setupAt < prepAt,
+    'setup_command must run BEFORE the reviewed head is checked out, or it can execute code from the PR',
+  );
+  // Gated, so a caller that supplies nothing does not get an empty bash -c.
+  const step = wf.slice(setupAt, prepAt);
+  assert.match(step, /if:\s*inputs\.setup_command != ''/);
+  // Passed through the environment, never interpolated into the script body: an expression
+  // expanded inline is a shell injection from whatever the caller wrote, and the caller's
+  // workflow file is trusted but its VARIABLES may not be.
+  assert.match(step, /SETUP_COMMAND:\s*\$\{\{ inputs\.setup_command \}\}/);
+  assert.match(step, /bash -eo pipefail -c "\$SETUP_COMMAND"/);
+  assert.doesNotMatch(step, /run:[\s\S]*\$\{\{ inputs\.setup_command \}\}/);
+});
+
+// Declared under workflow_call only, a trial could never reach it - the same hole that kept
+// probe mode unreachable until build_command was mirrored into dispatch.
+test('setup_command is reachable from both call shapes', () => {
+  const wf = readFileSync(path.join(root, '.github/workflows/review-v2-p1.yml'), 'utf8');
+  const call = wf.slice(wf.indexOf('  workflow_call:'), wf.indexOf('  workflow_dispatch:'));
+  const dispatch = wf.slice(wf.indexOf('  workflow_dispatch:'), wf.indexOf('\njobs:'));
+  assert.match(call, /setup_command:/, 'workflow_call must declare setup_command');
+  assert.match(dispatch, /setup_command:/, 'workflow_dispatch must mirror it or trials cannot use it');
+});
