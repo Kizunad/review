@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "repository": "Kizunad/Bong",
+  "pullNumber": 1993,
+  "runId": 31353864338,
+  "runAttempt": 1,
+  "workflowRef": "3884af3e45493c04cecc39effa4751b4b06195d1",
+  "baseOid": "66c5a6dcc332a370fc1a15472ea9052fecddee73",
+  "headOid": "3ddf2852f24690190bc3b5ec2c72847023605e6b",
+  "reviewOid": "3ddf2852f24690190bc3b5ec2c72847023605e6b",
+  "policySha256": "4ba0e54a9276c37ac4049d83ca8ff922ff16e989f1d46ad10988d5cb9d9600ca",
+  "artifacts": {
+    "review.json": "d953a02913457a99c9e33e129b4ec73e09564fb604ed30b67084f001c0a19ae4",
+    "review.md": "09f7fc645980f68108fc6c07c7ee198bbd5243138f570d6d5a593671ea40cc19"
+  },
+  "manifestSha256": "efa2c65c8a85efbb1bebfaaa7ba81d8c0314433811169941231af8a7677cfafa"
+}

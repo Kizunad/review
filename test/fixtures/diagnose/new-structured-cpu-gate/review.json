@@ -1,0 +1,22 @@
+{
+  "version": "v2",
+  "decision": "infrastructure_failure",
+  "findings": [],
+  "suggestions": [],
+  "omittedSuggestions": 0,
+  "failures": [
+    {
+      "stage": "plan",
+      "status": "infra_error",
+      "error": "cpu overload gate rejected the call (system cpu overloaded (current: 96.5%, threshold: 90%)); failing fast instead of retrying",
+      "diagnostic": "{\"events\":[{\"type\":\"result\",\"subtype\":\"success\",\"isError\":true,\"apiErrorStatus\":503,\"terminalReason\":\"api_error\"}],\"stderr\":\"\"}",
+      "apiErrorStatus": 503,
+      "apiErrorMessage": "Service Unavailable",
+      "terminalReason": "api_error",
+      "model": "cc-review",
+      "attempts": 1,
+      "retryable": true
+    }
+  ],
+  "coverageGaps": []
+}

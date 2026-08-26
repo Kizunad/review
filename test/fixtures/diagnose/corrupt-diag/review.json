@@ -1,0 +1,16 @@
+{
+  "version": "v2",
+  "decision": "infrastructure_failure",
+  "findings": [],
+  "suggestions": [],
+  "omittedSuggestions": 0,
+  "failures": [
+    {
+      "stage": "find",
+      "status": "infra_error",
+      "error": "after 3 attempts: claude exited 1",
+      "diagnostic": "not json at all"
+    }
+  ],
+  "coverageGaps": []
+}

@@ -1,0 +1,9 @@
+{
+  "version": "v2",
+  "decision": "approve",
+  "findings": [],
+  "suggestions": [],
+  "omittedSuggestions": 0,
+  "failures": [],
+  "coverageGaps": []
+}
